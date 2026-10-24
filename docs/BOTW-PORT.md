@@ -7,6 +7,10 @@ o código ARM64 do jogo vira C, compilado para a máquina, e o NVN (a API gráfi
 O plano do porte do LAS para Android, com as medições e decisões dele, está em
 [docs/las/ANDROID-PORT.md](las/ANDROID-PORT.md). O README original do LAS está em [docs/las/](las/).
 
+Proposta de um backend opcional de execução ARM64 direta no Android, com etapas,
+limites e critérios de validação: [ANDROID-ARM64-EXECUTION.md](ANDROID-ARM64-EXECUTION.md)
+(em inglês; proposta de arquitetura, ainda não implementada).
+
 ## Ponto de partida
 
 O que vem pronto do LAS e não depende do jogo:
