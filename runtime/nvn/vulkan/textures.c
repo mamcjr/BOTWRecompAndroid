@@ -562,6 +562,10 @@ int vk_texture_count(void) {
             (unsigned long long)g_tex_stat_init, (unsigned long long)g_tex_stat_reused, (unsigned long long)g_tex_stat_reinit,
             (unsigned long long)g_tex_stat_fin_owner, (unsigned long long)g_tex_stat_fin_copy,
             (unsigned long long)g_tex_stat_reg);
+        extern uint64_t g_tex_drain_ns, g_tex_drains;
+        LOG("[tex-diag] slot replacements waited for the render thread: %llu, %.1f ms in all\n",
+            (unsigned long long)__atomic_exchange_n(&g_tex_drains, 0, __ATOMIC_RELAXED),
+            __atomic_exchange_n(&g_tex_drain_ns, 0, __ATOMIC_RELAXED) / 1e6);
         for (int i = g_nlive >= 3 ? g_nlive - 3 : 0; i < g_nlive; i++) {
             NvnTexture *t = g_live[i];
             LOG("[tex-sample #%d] addr=%llx %ux%ux%u fmt=%#x tgt=%u flags=%#x refs=%u fin=%d label=%s\n",
@@ -797,8 +801,10 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     static int always_full = -1;
     if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
     bool full = b->dynamic || !b->uploaded || always_full;
-    bool periodic = frame - b->full_frame >= 120 && full_hash_budget >= total;  // (safety net: a full hash now and then)
-    if (!full && periodic) { full = true; full_hash_budget -= total; }
+    // (safety net: a full hash now and then - one larger than the frame's budget too, as the frame's first: a texture
+    // over 4 MB never fit it, and a change its samples missed stayed unseen - TOTKRecompAndroid's 26 MB terrain atlas, 20 s)
+    bool periodic = frame - b->full_frame >= 120 && (full_hash_budget >= total || full_hash_budget == (4u << 20));
+    if (!full && periodic) { full = true; full_hash_budget = full_hash_budget > total ? full_hash_budget - total : 0; }
     if (!b->tp) b->tp = texpatch_identify(t) + 1;  // (button prompts / Hero Mode icon: re-uploaded when their look changes)
     bool restyle = b->tp > 0 && b->uploaded && b->tp_gen != texpatch_generation();
     // The OS's page write tracking (exec.c vk_pages_changed, shared with the vertex cache): texture memory the CPU
@@ -814,7 +820,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             b->wgen = now;
             if (!ch && b->uploaded && !restyle) {
                 if (!periodic) { prof_tex_watch_skips++; return; }
-                if (b->dynamic) full_hash_budget -= total;  // (the others took theirs above)
+                if (b->dynamic) full_hash_budget = full_hash_budget > total ? full_hash_budget - total : 0;  // (the others took theirs above)
             }
         }
     }

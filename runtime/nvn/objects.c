@@ -665,6 +665,7 @@ static NvnTexture *g_desc_hash[DESC_BUCKETS];
 static pthread_mutex_t g_live_lock = PTHREAD_MUTEX_INITIALIZER;
 static NvnTexture *g_all_tex;
 uint64_t g_tex_stat_init, g_tex_stat_reinit, g_tex_stat_reused, g_tex_stat_fin_owner, g_tex_stat_fin_copy, g_tex_stat_reg;
+uint64_t g_tex_drain_ns, g_tex_drains;
 
 static uint32_t owner_hash(uint64_t g) { return (uint32_t)((g >> 3) * 0x9E3779B97F4A7C15ull >> 46) & (OWNER_SLOTS - 1); }
 static uint32_t desc_hash(uint64_t addr) { return (uint32_t)((addr >> 9) * 0x9E3779B97F4A7C15ull >> 48) & (DESC_BUCKETS - 1); }
@@ -1211,7 +1212,13 @@ static void register_texture(Cpu *c) {
     NvnTexture *old = e->tex, *t = HOST(NvnTexture, A(2));
 #ifdef __ANDROID__
     // An asynchronous draw must finish reading the previous descriptor before its slot is replaced.
-    if (old) vk_async_drain();
+    if (old) {
+        extern uint64_t g_tex_drain_ns, g_tex_drains;  // (LARECOMP_LOG_TEXDIAG: the game's threads' wait in these)
+        uint64_t t0 = plat_now_ns();
+        vk_async_drain();
+        __atomic_add_fetch(&g_tex_drain_ns, plat_now_ns() - t0, __ATOMIC_RELAXED);
+        __atomic_add_fetch(&g_tex_drains, 1, __ATOMIC_RELAXED);
+    }
 #endif
     if (old != t) {
         pthread_mutex_lock(&g_live_lock);

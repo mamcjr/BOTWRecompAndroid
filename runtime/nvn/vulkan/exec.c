@@ -89,6 +89,10 @@ static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
 static uint32_t pass_written;  // (the attachments this pass's draws wrote so far: draw_writes)
 static uint32_t pass_dup_null;  // (color slots left unbound: their image is bound in another slot - begin_pass)
+static const void *g_cur_rec;   // (exec_list: the record being run)
+static struct { const void *rec; uint32_t aspects; } lclear[16];  // (clears the pass's load operations did: begin_pass)
+static int nlclear;
+static int naliases;
 
 uint64_t vk_completed_seq(void) {
     uint64_t v = 0;
@@ -1841,6 +1845,7 @@ static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v :
 static volatile uint64_t g_scene_frame;
 uint64_t vk_scene_frame(void) { return g_scene_frame; }
 
+static VkRect2D scissor_rect(void);
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     pipeline_dirty = true;
@@ -1981,6 +1986,48 @@ static void begin_pass(void) {
     }
     if (!w) { pass_sx = pass_sy = 1; minw = minh = 16; }
     pass_w = minw; pass_h = minh;
+    // A pass that begins with clears of whole attachments (BOTW's G-buffer, its light buffers): their load operations
+    // clear instead. Loaded and then cleared by vkCmdClearAttachments, a tiler read each attachment from memory into
+    // every bin first, for nothing. Only the clears right at the start, one after another (the same scissor), each over
+    // the whole render area with every channel, and none while copy aliases wait for a write (alias_before_write runs
+    // at each clear). From TOTKRecompAndroid (GPU 18.4 -> 18.1 ms there). LARECOMP_NO_CLEAR_LOAD=1: off;
+    // LARECOMP_AB=<n>:clrload, side 0: as before.
+    nlclear = 0;
+    {
+        static int off = -1;
+        if (off < 0) off = getenv("LARECOMP_NO_CLEAR_LOAD") != NULL;
+        const CmdRec *q = g_cur_rec;
+        if (!off && AB("clrload") != 0 && !naliases && q && (q->op == CMD_CLEAR_COLOR || q->op == CMD_CLEAR_DEPTH_STENCIL) &&
+            w && minw != UINT32_MAX) {
+            float s0 = vp_sx, s1 = vp_sy, s2 = vp_ox, s3 = vp_oy;
+            vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
+            VkRect2D rc = scissor_rect();
+            vp_sx = s0; vp_sy = s1; vp_ox = s2; vp_oy = s3;
+            bool whole = rc.offset.x == 0 && rc.offset.y == 0 && rc.extent.width >= minw && rc.extent.height >= minh;
+            uint32_t done = 0;  // (colour slots bits 0-7, depth 8, stencil 9: one clear each)
+            for (int k = 0; whole && k < 16 && q->size; k++) {
+                uint32_t asp = 0;
+                if (q->op == CMD_CLEAR_COLOR) {
+                    int idx = (int)q->x[0];
+                    if (idx < 0 || idx >= (int)pass_ncolor || !ca[idx].imageView || (q->x[2] & 0xF) != 0xF || (done >> idx & 1)) break;
+                    ca[idx].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                    memcpy(ca[idx].clearValue.color.float32, q->extra, 16);
+                    done |= 1u << idx;
+                    asp = 1;
+                } else if (q->op == CMD_CLEAR_DEPTH_STENCIL) {
+                    bool dz = q->x[0] != 0 && has_d && !(done >> 8 & 1);
+                    bool sz = has_s && st.rt.depth && renderer_format_has_stencil(st.rt.depth->format) && q->x[2] != 0 &&
+                              (q->x[2] & 0xFF) == 0xFF && !(done >> 9 & 1);
+                    if (q->x[0] != 0 && !dz) break;  // (a depth clear it can't take: left to vkCmdClearAttachments, and the rest)
+                    if (dz) { da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; da.clearValue.depthStencil.depth = q->f[0]; done |= 1u << 8; asp |= 1; }
+                    if (sz) { sa.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR; sa.clearValue.depthStencil.stencil = (uint32_t)q->x[1]; done |= 1u << 9; asp |= 2; }
+                    if (!asp) break;
+                } else break;
+                lclear[nlclear].rec = q, lclear[nlclear].aspects = asp, nlclear++;
+                q = (const CmdRec *)((const uint8_t *)q + q->size);
+            }
+        }
+    }
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
@@ -2207,6 +2254,17 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil, uint32_t sval,
                   uint32_t smask) {
     begin_pass();
+    for (int i = 0; i < nlclear; i++) {  // (done by the pass's load operations: begin_pass - each once)
+        if (lclear[i].rec != g_cur_rec) continue;
+        uint32_t asp = lclear[i].aspects;
+        lclear[i].rec = NULL;
+        if (index >= 0 && (asp & 1)) return;
+        if (index < 0) {
+            if (asp & 1) depth = false;
+            if (asp & 2) stencil = false;
+            if (!depth && !stencil) return;
+        }
+    }
     VkCommandBuffer cb = vk_cmd();
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     VkRect2D rect = scissor_rect();
@@ -3154,7 +3212,6 @@ static void ct_draw(Prog *pr, const char *what) {
 typedef struct { NvnTexture *src, *dst; VkImage simg, dimg; } CopyAlias;
 extern uint32_t vk_view_gen;
 static CopyAlias aliases[8];
-static int naliases;
 static uint64_t stat_alias_made, stat_alias_renamed, stat_alias_partial, stat_alias_copied;
 
 static int copy_opt(void) {
@@ -7445,6 +7502,8 @@ static void exec_list(uint64_t handle, int depth) {
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
         void *x = r->extra;
+        g_cur_rec = r;
+        if (nlclear && r->op != CMD_CLEAR_COLOR && r->op != CMD_CLEAR_DEPTH_STENCIL) nlclear = 0;  // (begin_pass's, used up)
         if (r->op < CMD_COUNT) op_counts[r->op]++;
         if (dchain && r->op != CMD_DISPATCH && !dchain_keeps(r->op)) {  // (the dispatches' run ends)
             dchain = false;
