@@ -513,18 +513,24 @@ static void create_device(void) {
     // reported to LASRecomp-Android-Plus; LAS Recomp for Android 4a8749f turned it off on every GPU). Here only on
     // Xclipse: without it BOTW's heap goes through CPU copies (~4 GB every 2 s), and Mali drivers may take it.
     // LARECOMP_VK_HOST_IMPORT=0 / 1: off / on on any GPU.
-    // Mali-G2-Ultra (Xring O3, driver r56p0): with the import and the global-memory arena (exec.c gres_init) the game's
-    // text went missing from every menu; with both off it is all there (issue #44, the reporter's own tests). Both off
-    // there unless LARECOMP_VK_HOST_IMPORT / LARECOMP_VK_NO_GRES say otherwise.
-    bool mali_g2 = strstr(g_vk.props.deviceName, "Mali-G2-Ultra") != NULL;
-    if (mali_g2) setenv("LARECOMP_VK_NO_GRES", "1", 0);
+    // Mali (ARM, vendor 0x13B5) whose driver offers the import (r54p1 and later): with it and the global-memory arena
+    // (exec.c gres_init) the game's text went missing from every menu and the title art had grey blocks (Mali-G2-Ultra
+    // r56p0, issue #44; Mali-G1-Ultra r54p1, #121 - both reporters' own tests, all there with both off), and the 3 GB
+    // heap imported at once got the app killed for memory and froze Android (Mali-G610 r56p0, #118). Both off on those
+    // unless LARECOMP_VK_HOST_IMPORT / LARECOMP_VK_NO_GRES say otherwise; the Mali drivers without the extension (r49p1
+    // and older) already go through CPU copies, and keep the arena. Driver compatibility's "Game memory on the GPU" =
+    // Off (gpu_heap 0) also leaves the import off on any driver but Turnip (whose Off is the placed heap's alone).
+    bool mali = g_vk.props.vendorID == 0x13B5;
     if (g_vk.host_import) {
         const char *e = getenv("LARECOMP_VK_HOST_IMPORT");
         bool xclipse = strstr(g_vk.props.deviceName, "Xclipse") || g_vk.props.vendorID == 0x144D;  // (Samsung)
-        if (e ? !atoi(e) : xclipse || mali_g2) {
+        bool by_setting = g_settings.gpu_heap == 0 && !vk_driver_is_turnip();
+        if (mali && !e) setenv("LARECOMP_VK_NO_GRES", "1", 0);
+        if (e ? !atoi(e) : xclipse || mali || by_setting) {
             g_vk.host_import = false;
             LOG("[vk] guest heap import left off (%s)\n", e ? "LARECOMP_VK_HOST_IMPORT=0" :
-                xclipse ? "Xclipse: its first submission fails" : "Mali-G2-Ultra: the game's text went missing");
+                xclipse ? "Xclipse: its first submission fails" :
+                mali ? "Mali: the game's text went missing, and memory ran out" : "settings: game memory on the GPU off");
         }
     }
 #endif

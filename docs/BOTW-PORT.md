@@ -831,9 +831,10 @@ na GPU só com 7 GB ou mais de RAM, #83), 05cb1b6 (giroscópio do celular com co
   `LARECOMP_VK_HOST_IMPORT=0,LARECOMP_VK_NO_GRES=1` tudo certo e a RAM cai de 4018 para ~1,8 GB. #118 (Nothing Phone
   2a, Mali-G610 MC4, r56p0, 0.2.4, 1.8.2 nativo): importou os 3120 MB, a corrida anterior foi morta por memória baixa
   (rss 4470 MB) e o Android inteiro travou. As Mali sem a extensão (G720/G925 r49p1, G57 r32) já vão pelas cópias.
-  Corrigir: import desligado (e NO_GRES) em toda Mali por padrão (vendor 0x13B5, como já é o Xclipse e a G2-Ultra);
-  e "Memória do jogo na GPU" = Desligado (gpu_heap 0) desligar também o import - hoje só vale para o heap placed do
-  Turnip, então a opção não ajuda na Mali (o #121 tentou gpu_heap = 0 no ini).
+  **Corrigido (local, 31/10):** import e NO_GRES desligados por padrão em toda Mali cujo driver oferece o import
+  (vendor 0x13B5; as sem a extensão continuam com o arena); "Memória do jogo na GPU" = Desligado (gpu_heap 0) desliga
+  também o import em qualquer driver que não seja o Turnip. `LARECOMP_VK_HOST_IMPORT=1` volta ao import. Não testado
+  numa Mali (o POCO é Adreno 830): confirmar com os autores do #121 e do #118 na próxima versão.
 - **#122 (ibka512, fontes):** "Importar fontes" nunca funciona no Android - o diálogo do SDL devolve `content://`, o
   nome comparado é o document id e o `fopen` não abre a URI (`launcher.mm` import_fonts). Corrigir: nome via
   `OpenableColumns.DISPLAY_NAME` + cópia com `SDL_IOFromFile`, ou pela Activity como o resto das importações. Ele roda
