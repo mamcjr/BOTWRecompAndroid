@@ -1007,7 +1007,22 @@ static void svc_impl(Cpu *c, uint32_t imm, uint64_t pc) {
     case 0x0A: longjmp(t_cur->unwind, 1);  // ExitThread: back to thread_main, which signals the thread object
     case 0x0B: {  // SleepThread (in slices of at most 50 ms: a reboot doesn't wait out a long sleep)
         int64_t ns = (int64_t)x[0];
-        if (ns <= 0) { sched_yield(); break; }
+        if (ns <= 0) {
+            // A yield returns at once, without the host's: the game's job workers spin on yields, and a host sched_yield
+            // took ~30 us - each look at the job queue came that much later (TOTKRecompAndroid, 2026-10-31: +6% fps,
+            // +14% with core 0's too, whose yield still hands the core on: its queue, svc_blocks).
+            // LARECOMP_HOST_YIELD=1: the host's yield as before; =2: skipped off core 0 only. LARECOMP_AB=<n>:yield.
+#ifdef __ANDROID__
+            static int host_yield = -1;
+            if (host_yield < 0) host_yield = getenv("LARECOMP_HOST_YIELD") ? atoi(getenv("LARECOMP_HOST_YIELD")) : 0;
+            extern int vk_ab(const char *what);
+            int ab = vk_ab("yield");
+            bool c0 = t_cur && __atomic_load_n(&t_cur->core, __ATOMIC_ACQUIRE) == 0;
+            if (ab >= 0 ? ab == 1 : host_yield == 0 || (host_yield == 2 && !c0)) break;
+#endif
+            sched_yield();
+            break;
+        }
         for (uint64_t end = plat_now_ns() + (uint64_t)ns, now; !g_rt_unwind && (now = plat_now_ns()) < end;) {
             uint64_t d = end - now < 50000000 ? end - now : 50000000;
             struct timespec ts = {(time_t)(d / 1000000000), (long)(d % 1000000000)};
