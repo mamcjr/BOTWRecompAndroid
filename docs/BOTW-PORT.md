@@ -1194,8 +1194,9 @@ Pedidos ainda não começados, o mais recente no fim.
   dos nomes) e o Auto mapear o país do celular. Pequeno.
 - **Sensor de movimento: Automático / Celular / Controle** (#115, prometido na resposta de 2026-10-31): com um GameSir
   X2 Type-C (sem giroscópio) o do celular parou de funcionar na 0.2.4/0.2.5 - provavelmente o controle anuncia um
-  giroscópio com ruído e a troca automática (motion.c motion_event) o toma por vivo. Uma opção em Controles, e o
-  Automático conferir pelas linhas `[motion]` do log que o autor mandar.
+  giroscópio com ruído e a troca automática (motion.c motion_event) o toma por vivo. **Feito (local, 31/10):**
+  menu do jogo > aba Controles > "Sensor de movimento" (settings `motion_source` 0/1/2). Falta conferir o
+  Automático pelas linhas `[motion]` do log que o autor mandar.
 
 ## Regras
 

@@ -185,12 +185,22 @@ void motion_pad_opened(SDL_Gamepad *g) {
 
 void motion_event(const SDL_Event *e) {
     if (!g_settings.motion || ENV("LARECOMP_MOTION_TEST")) return;
+    // Settings > Controls > Motion sensor (settings.h motion_source): 1 the phone's alone - for a controller that reports
+    // a gyroscope it hasn't got, whose noise passed for a live one and muted the phone's (GameSir X2 Type-C, #115); 2 a
+    // controller's alone, taken as it comes; 0 the automatic switch below.
+    int source = g_settings.motion_source;
     if (e->type == SDL_EVENT_SENSOR_UPDATE) {
-        if (SDL_GetTicksNS() < pad_until_ns) return;
+        if (source == 2 || (source == 0 && SDL_GetTicksNS() < pad_until_ns)) return;
         float s[3];
         to_screen(e->sensor.data, s);
         feed(SDL_GetSensorTypeForID(e->sensor.which), s, e->sensor.sensor_timestamp ? e->sensor.sensor_timestamp : SDL_GetTicksNS());
     } else if (e->type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE) {
+        if (source == 1) return;
+        if (source == 2) {
+            feed((SDL_SensorType)e->gsensor.sensor, e->gsensor.data,
+                 e->gsensor.sensor_timestamp ? e->gsensor.sensor_timestamp : SDL_GetTicksNS());
+            return;
+        }
         // A controller's sensors replace the phone's only once its gyroscope is alive: some report one that never is (a
         // USB-C controller the phone sits in, GameSir X5 Lite: issue #78), and its zeros held the phone's off. Alive is
         // readings that change from one to the next - a real gyroscope's noise does even lying still - 20 in a row:

@@ -749,6 +749,12 @@ static void tab_about(void) {
     hint("The phone's gyroscope - or a controller's that has one - aims the bow and the Sheikah Slate's camera and tilts "
          "the shrines' motion puzzles, as the Switch's motion controls do. The game's own options can turn motion "
          "aiming off.");
+    {
+        static const char *const sources[] = {"Auto", "Phone", "Controller"};
+        if (choice("Motion sensor", &g_settings.motion_source, sources, 3)) settings_save();  // (runtime/hle/motion.c)
+    }
+    hint("Auto: a controller's gyroscope once it sends live readings, the phone's otherwise. Phone: always the phone's - "
+         "for a controller that says it has a gyroscope but doesn't. Controller: only the controller's.");
     ImGui::Spacing();
     controls_bindings_draw(ImGui::GetFontSize() / 34);
     ImGui::Spacing();
