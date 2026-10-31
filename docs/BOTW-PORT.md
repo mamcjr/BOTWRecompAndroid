@@ -885,6 +885,25 @@ na GPU só com 7 GB ou mais de RAM, #83), 05cb1b6 (giroscópio do celular com co
 - **Respostas boas:** #108 (SD845) confirmou a 0.2.5 - voltar do segundo plano não crasha mais (fechada). #89
   (Mali-G925) jogou na 0.2.5 sem crash, só quedas de fps. #126 vai testar a 1.6.0 no Xclipse 530.
 
+**Triagem de 2026-10-31, manhã:**
+- **Pista forte - Mali sem import, depois de um carregamento (#89, #131):** no caminho das cópias (gcopy, Mali sem
+  VK_EXT_external_memory_host) o upload por janela de 2 s, normalmente ~0,9 GB, salta depois de um carregamento: #89
+  (Mali-G925 r49p1, 0.2.5, 1.8.2) depois de teleportar para Kakariko foi a 15,4 GB por 2 s (~258 MB por quadro), com
+  2-7 fps no carregamento e a GPU mem de 2146 para 2658 MB; RAM do app 5,2 GB e só reabrir resolve. #131 (Mali-G720,
+  0.2.5 confirmado pelo autor, crash a cada 20-30 min ao sair de santuários) tem picos de 3-7 GB por 2 s e a GPU mem
+  subindo em degraus de 256 MB (2658 -> 3426 MB) até o SIGSEGV. O anel transitório (exec.c vk_transient, pedaços de
+  64 MB) só cresce. Próximo passo: reproduzir no POCO forçando as cópias (`LARECOMP_VK_NO_PLACED=1
+  LARECOMP_VK_HOST_IMPORT=0`), teleportar e ver o que manda 258 MB por quadro; e devolver pedaços do anel ociosos.
+- **#121 (G1-Ultra) na 0.2.5:** confirmou que continua (sem texto; com HOST_IMPORT=0 + NO_GRES=1 tudo certo, RAM 3949
+  -> ~1,8 GB) e que `gpu_heap = 0` não pesava - ambos resolvidos no db2451a (local). Corrigiu o relato: os blocos na
+  arte do título NÃO vêm do import (aparecem com e sem, variam por arte) - bug à parte, de baixa prioridade.
+- **#130 (POCO F7, Adreno 825, Turnip Mesa 27.0 "V38" pelo adrenotools, 0.2.5, 1.8.2, recompilado e nativo):** as
+  folhas no chão que seguem o Link. Heap placed, leituras in-place e LRZ ligados (8xx). Pedir: quando começa, se some
+  ao recarregar, e testar "Leitura direta da imagem desenhada" e LRZ desligados.
+- **#132 (Xclipse 530, driver da Samsung):** a 1.6.0 roda bem melhor que a 1.0.0 (20-30 fps fora do Planalto, quedas
+  a 10). Pedido de otimização: fila de desempenho Xclipse.
+- **#120:** fechada pelo autor (aberta por engano; logs da 0.2.3/0.2.4 num repositório dele).
+
 **Esperando log ou resposta:** #22 (vídeo da torre no Adreno 840), #24/#30 (8s Gen 4), #23 (RP Nova T26), #41
 (build de teste com `uclamp.min`), #68 (S23 a 5-10 fps), #64 (build no Mali-G57).
 
