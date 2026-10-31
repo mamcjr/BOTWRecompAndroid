@@ -178,6 +178,9 @@ void motion_open(void) {
 // A controller that has a gyroscope: its own sensors, in place of the phone's while it sends them
 void motion_pad_opened(SDL_Gamepad *g) {
     if (!SDL_GamepadHasSensor(g, SDL_SENSOR_GYRO)) return;
+    // (Motion sensor: Phone - the controller's left off: a USB-C controller the phone sits in, its sensors on, and the
+    // phone's aim stopped after a few shots until the controller was plugged in again, #78)
+    if (g_settings.motion_source == 1) { LOG("[motion] %s: its gyroscope left off (Phone)\n", SDL_GetGamepadName(g)); return; }
     SDL_SetGamepadSensorEnabled(g, SDL_SENSOR_GYRO, true);
     if (SDL_GamepadHasSensor(g, SDL_SENSOR_ACCEL)) SDL_SetGamepadSensorEnabled(g, SDL_SENSOR_ACCEL, true);
     LOG("[motion] %s: its gyroscope\n", SDL_GetGamepadName(g));
@@ -206,8 +209,10 @@ void motion_event(const SDL_Event *e) {
         // readings that change from one to the next - a real gyroscope's noise does even lying still - 20 in a row:
         // one stray reading switched to that controller for good (0.2.3), and a speed threshold (0.2.4) never let a
         // slow aim or a resting controller take over (#78, #115). Back to the phone's after 2 s of readings that are
-        // zero or repeat: a dead or frozen sensor.
-        static bool pad_live;
+        // zero or repeat: a dead or frozen sensor. And a turn first: some controllers with no gyroscope send noise that
+        // changes (GameSir X2 Type-C, #115, #137) - once a reading of 0.5 rad/s (~30 deg/s: a hand turning it, more
+        // than any noise) has come, that controller's changing readings are a gyroscope.
+        static bool pad_live, pad_turned;
         static int changing;
         static float last[3];
         static uint64_t dead_ns;
@@ -217,9 +222,13 @@ void motion_event(const SDL_Event *e) {
                          (g[0] != last[0] || g[1] != last[1] || g[2] != last[2]);
             memcpy(last, g, sizeof last);
             uint64_t now = SDL_GetTicksNS();
+            if (!pad_turned && g[0] * g[0] + g[1] * g[1] + g[2] * g[2] > 0.25f) {
+                pad_turned = true;
+                LOG("[motion] the controller's gyroscope turned (%.2f %.2f %.2f rad/s)\n", g[0], g[1], g[2]);
+            }
             if (!pad_live) {
                 changing = alive ? changing + 1 : 0;
-                if (changing >= 20) {
+                if (changing >= 20 && pad_turned) {
                     pad_live = true, dead_ns = 0;
                     LOG("[motion] the controller's gyroscope is alive: its sensors in place of the phone's\n");
                 }
@@ -295,6 +304,18 @@ HLE_FUNC("_ZN2nn3hid22GetSixAxisSensorStatesEPNS0_18SixAxisSensorStateEiRKNS0_19
     uint64_t now = SDL_GetTicksNS();
     pthread_mutex_lock(&m_lock);
     if (!g_settings.motion || ENV("LARECOMP_MOTION_TEST") || now - m_live_ns > 250000000) own_sample(now);
+    {   // (the log: a sensor that stops sending while the game reads it - aiming that stops working, #78)
+        static bool quiet;
+        static int nlog;
+        bool q = g_settings.motion && m_live_ns && now - m_live_ns > 1000000000;
+        if (q != quiet && nlog < 40) {
+            nlog++;
+            LOG(q ? "[motion] no gyroscope readings for 1 s while the game reads the sensor (%s)\n"
+                  : "[motion] gyroscope readings again (%s)\n",
+                g_settings.motion_source == 1 ? "Phone" : g_settings.motion_source == 2 ? "Controller" : "Auto");
+        }
+        quiet = q;
+    }
     if (n > ring_n) n = ring_n;
     if (n < 0) n = 0;
     for (int i = 0; i < n; i++) out[i] = ring[(ring_head - i + RING) % RING];
