@@ -1337,7 +1337,9 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui::NewFrame();
 
 #ifdef __ANDROID__
-    if (g_settings.show_fps) {  // (the full performance overlay: ui/perf_overlay.mm)
+    // (the full performance overlay: ui/perf_overlay.mm - hidden while the menu is open, as the touch controls: through
+    // the menu's translucent panel it showed behind the options, #142)
+    if (g_settings.show_fps && !g_open.load()) {
         extern void perf_overlay_draw(ImVec2 display, float scale);
         perf_overlay_draw(io.DisplaySize, scale);
     }
