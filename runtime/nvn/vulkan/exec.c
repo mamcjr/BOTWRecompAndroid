@@ -934,9 +934,10 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 
 // ================================================================== transient memory ring
 // 64 MB host-visible chunks (device-local when the GPU exposes resizable BAR); a chunk is reused once every
-// submission that allocated from it has completed.
+// submission that allocated from it has completed, and given back after 10 s unused (down to RING_KEEP of them).
 #define CHUNK_SIZE (64ull << 20)
-typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq; } Chunk;
+#define RING_KEEP 4
+typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq, frame; } Chunk;  // frame: last picked
 static Chunk *chunks;
 static int nchunks, active = -1;
 
@@ -983,6 +984,16 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
 #ifdef __ANDROID__
     gcopy_retire(done);  // (copies back out of chunks about to be reused)
 #endif
+    // Chunks idle for 10 s go back to the driver: a burst of copies (hundreds of MB a frame after a load on a Mali, #89)
+    // grew the ring for good, and the app's memory with it - 256 MB steps up to the crash in #131. The first free one
+    // is always picked, so after a burst the extra chunks stay unpicked.
+    uint64_t now = renderer_present_count();
+    for (int i = nchunks - 1; i >= 0 && nchunks > RING_KEEP; i--) {
+        if (i == active || chunks[i].seq > done || now - chunks[i].frame < 300) continue;
+        vmaDestroyBuffer(g_vk.vma, chunks[i].buf, chunks[i].mem);
+        chunks[i] = chunks[--nchunks];
+        if (active == nchunks) active = i;
+    }
     int pick = -1;
     for (int i = 0; i < nchunks; i++)
         if (i != active && chunks[i].seq <= done && chunks[i].size >= size) { pick = i; break; }
@@ -990,6 +1001,7 @@ VkSpan vk_transient(uint64_t size, uint64_t align) {
     active = pick;
     chunks[pick].used = size;
     chunks[pick].seq = pending;
+    chunks[pick].frame = now;
     stat_upload_bytes += size;
     return (VkSpan){chunks[pick].buf, 0, chunks[pick].ptr};
 }
@@ -4232,7 +4244,7 @@ static void gcopy_retire(uint64_t done) {
 // and copied into the slot by the GPU at the start of the submission. What a shader stored also goes back to guest
 // memory once its submission is done (the game reads some of it as uniform buffers, vertices, textures), and to the
 // range's last-uploaded copy, so that isn't taken for the CPU's write.
-typedef struct { uint64_t lo, hi; bool store; } GcRange;  // heap offsets, 256-aligned
+typedef struct { uint64_t lo, hi; bool store, learned; } GcRange;  // heap offsets, 256-aligned; learned: gres_learn
 #define GA_SIZE (128ull << 20)  // (the minimum maxStorageBufferRange)
 #define GA_RES (48ull << 20)    // [0, GA_RES): resident slots; the rest: the ring
 #define GA_SEG (8ull << 20)
@@ -4280,7 +4292,8 @@ static void ga_wrote(uint64_t off, uint64_t len) {
 static void ga_invalidate(const void *p, uint64_t len) {
     if (ga_noncoherent) vmaInvalidateAllocation(g_vk.vma, ga_mem, (VkDeviceSize)((const uint8_t *)p - ga_ptr), len);
 }
-static uint64_t stat_gres_fail[4];  // (fell back to the plain copies: 0 no entry/space, 1 table full, 2 ring, 3 too big)
+static uint64_t stat_gres_fail[5];  // (fell back to the plain copies: 0 no entry/space, 1 table full, 2 ring, 3 too big;
+                                     // 4 not a fall-back: a learned range left out for lack of table slots)
 
 static bool gres_init(void) {
     if (gres_state >= 0) return gres_state;
@@ -4469,6 +4482,23 @@ static uint64_t ga_load_copy(uint64_t at, uint64_t size) {
     return off;
 }
 
+// The table entries a load range takes (gres_prepare: its resident parts and the gaps between them, one each)
+static int gres_need(uint64_t lo, uint64_t hi) {
+    int n = 0;
+    for (uint64_t at = lo; at < hi; n++) {
+        GaRes *in = NULL;
+        uint64_t next = hi;
+        for (int k = 0; k < ga_nres; k++) {
+            GaRes *e = &ga_res[k];
+            if (!e->live) continue;
+            if (e->lo <= at && at < e->hi) { in = e; break; }
+            if (e->lo > at && e->lo < next) next = e->lo;
+        }
+        at = in ? (hi < in->hi ? hi : in->hi) : next;
+    }
+    return n;
+}
+
 static bool gres_prepare(const GcRange *r, int m, bool store) {
     if (!gres_init()) return false;
     {   // LARECOMP_GMISS: the arena's state every ~5 s
@@ -4478,10 +4508,10 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
             int live = 0;
             for (int i = 0; i < ga_nres; i++) live += ga_res[i].live;
             LOG("[gres] frame %llu: %d resident ranges (%d entries), %.1f of %llu MB, %d learned, %.1f KB synced; plain copies "
-                "instead: %llu no entry/space, %llu table full, %llu ring, %llu too big\n", (unsigned long long)last, live, ga_nres,
-                ga_res_top / 1048576.0, (unsigned long long)(GA_RES >> 20), gl_n, stat_gres_sync / 1024.0,
-                (unsigned long long)stat_gres_fail[0], (unsigned long long)stat_gres_fail[1], (unsigned long long)stat_gres_fail[2],
-                (unsigned long long)stat_gres_fail[3]);
+                "instead: %llu no entry/space, %llu table full, %llu ring, %llu too big; %llu learned ranges left out\n",
+                (unsigned long long)last, live, ga_nres, ga_res_top / 1048576.0, (unsigned long long)(GA_RES >> 20), gl_n,
+                stat_gres_sync / 1024.0, (unsigned long long)stat_gres_fail[0], (unsigned long long)stat_gres_fail[1],
+                (unsigned long long)stat_gres_fail[2], (unsigned long long)stat_gres_fail[3], (unsigned long long)stat_gres_fail[4]);
             stat_gres_sync = 0;
             memset(stat_gres_fail, 0, sizeof stat_gres_fail);
         }
@@ -4514,6 +4544,16 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
             }
         }
     }
+    // Learned ranges take only the slots the draw's own ranges leave: a table they filled failed the whole draw over
+    // to the plain copies - every range copied by the CPU, megabytes a draw. After loads (a teleport, out of a shrine)
+    // the learned ranges fill up: 15 GB of copies every 2 s and 6 fps on a Mali-G925 until the game restarted (#89),
+    // the same on a Mali-G720 before its crashes (#131). A learned range left out reads zero there, as before learning.
+    int need[6 * 16 + GL_MAX], after[6 * 16 + GL_MAX + 1];  // (entries each range takes; the bound ones' from i on)
+    after[m] = 0;
+    for (int i = m - 1; i >= 0; i--) {
+        need[i] = r[i].store ? 1 : gres_need(r[i].lo, r[i].hi);
+        after[i] = after[i + 1] + (r[i].learned ? 0 : need[i]);
+    }
     uint32_t tab[(GMAP_MAX + 1) * 4];
     memset(tab, 0, sizeof tab);
     int n = 0;
@@ -4527,6 +4567,7 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
     } while (0)
     for (int i = 0; i < m; i++) {
         uint64_t lo = r[i].lo, hi = r[i].hi;
+        if (r[i].learned && n + need[i] + after[i + 1] > GMAP_MAX) { stat_gres_fail[4]++; continue; }
         if (r[i].store) {  // a storing shader's bound ranges: resident from now on
             GaRes *e = gres_get(lo, hi, true);
             if (!e) { stat_gres_fail[0]++; return false; }
@@ -4742,7 +4783,7 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
         if (covered) continue;
         int k = m++;
         while (k > 0 && r[k - 1].lo > lo) { r[k] = r[k - 1]; k--; }
-        r[k] = (GcRange){lo, hi, false};
+        r[k] = (GcRange){lo, hi, false, true};
     }
     uint64_t total = 0;
     for (int i = 0; i < m; i++) total += (r[i].hi - r[i].lo + 255) & ~255ull;
