@@ -31,6 +31,7 @@ unsigned maxwell_gmem_miss_stages = ~0u;
 bool maxwell_brx_window;
 bool maxwell_static_stacks;
 bool maxwell_structured;
+bool maxwell_struct_skips = true;  // (structure: forward jumps out of a region as guarded skips; LARECOMP_NO_STRUCT_SKIPS)
 bool maxwell_no_switch;
 bool maxwell_no_local_struct;
 bool maxwell_native_half;
@@ -2506,6 +2507,10 @@ typedef struct {
     uint8_t *consumed;
     Str out;
     bool fail, exit_used;
+    // Skips: a forward jump past the region it sits in (or over code inside it) sets sk<id>; the code after it is
+    // guarded by `if (!sk<id>)` at each level up to the target block, where the flag drops again.
+    int nsk, sk_t[16], sk_id[16], sk_depth[16], nskv;  // pending: target block, flag, depth it was made at; flags made
+    int ngd, gd_id[64];                                  // open guards (innermost last), each a flag
 } SCtx;
 
 static int st_thread(SCtx *x, int b) {  // through blocks that are only an unconditional jump
@@ -2543,12 +2548,50 @@ static int st_switch(SCtx *x, int k, int end, int depth);
 
 static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt);
 static void st_range(SCtx *x, int a, int end, int opened, int depth) { st_range_alt(x, a, end, opened, depth, -1); }
+static void st_range_body(SCtx *x, int a, int end, int opened, int depth, int alt, int g0);
 static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt) {
+    int g0 = x->ngd;
+    st_range_body(x, a, end, opened, depth, alt, g0);
+    for (; x->ngd > g0; x->ngd--) sp(&x->out, "  }\n");  // (this level's guards end with its region)
+}
+// A construct over blocks (k, e) - a loop, an if / else - can't hold a pending skip's target: a jump into it.
+static bool st_skip_inside(const SCtx *x, int k, int e) {
+    for (int i = 0; i < x->nsk; i++)
+        if (x->sk_t[i] > k && x->sk_t[i] < e) return true;
+    return false;
+}
+// Block k reached: skips that end here drop their flag (after closing this level's guards down to theirs), and the
+// pending ones made at this depth or deeper get a guard here.
+static void st_skip_at(SCtx *x, int k, int depth, int g0) {
+    for (int i = 0; i < x->nsk;) {
+        if (x->sk_t[i] != k) { i++; continue; }
+        int id = x->sk_id[i];
+        for (int g = g0; g < x->ngd; g++)
+            if (x->gd_id[g] == id) {
+                for (; x->ngd > g; x->ngd--) sp(&x->out, "  }\n");
+                break;
+            }
+        sp(&x->out, "  sk%d = false;\n", id);
+        x->nsk--;
+        for (int j = i; j < x->nsk; j++) x->sk_t[j] = x->sk_t[j + 1], x->sk_id[j] = x->sk_id[j + 1], x->sk_depth[j] = x->sk_depth[j + 1];
+    }
+    for (int i = 0; i < x->nsk; i++) {
+        if (x->sk_depth[i] < depth || x->sk_t[i] <= k) continue;
+        bool open = false;
+        for (int g = g0; g < x->ngd && !open; g++) open = x->gd_id[g] == x->sk_id[i];
+        if (open) continue;
+        if (x->ngd == 64) { x->fail = true; return; }
+        x->gd_id[x->ngd++] = x->sk_id[i];
+        sp(&x->out, "  if (!sk%d) {\n", x->sk_id[i]);
+    }
+}
+static void st_range_body(SCtx *x, int a, int end, int opened, int depth, int alt, int g0) {
     if (depth > 64) { x->fail = true; return; }
     for (int k = a; k < end && !x->fail;) {
+        if (x->nsk) { st_skip_at(x, k, depth, g0); if (x->fail) return; }
         if (x->latch[k] >= 0 && k != opened) {  // a loop: [k, its last back edge]
             int le = x->latch[k] + 1;
-            if (le > end || x->nloops == 32) { x->fail = true; return; }
+            if (le > end || x->nloops == 32 || st_skip_inside(x, k, le)) { x->fail = true; return; }
             sp(&x->out, "  for (;;) {\n");
             x->loops[x->nloops][0] = k, x->loops[x->nloops][1] = le, x->nloops++;
             st_range(x, k, le, k, depth + 1);
@@ -2562,6 +2605,7 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
         st_code(x, k);
         if (!b->term || x->consumed[k]) { k++; continue; }
         if (b->term == 3) {
+            if (x->nsk) { x->fail = true; return; }
             k = st_switch(x, k, end, depth);
             if (k < 0 || x->fail) return;
             continue;
@@ -2581,10 +2625,20 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
                 if (k + 1 < end) x->fail = true;
                 return;
             }
+            if (st_skip_inside(x, k, end)) { x->fail = true; return; }
             sp(&x->out, "  if (!(%s)) {\n", b->cond);
             st_range(x, k + 1, end, -1, depth + 1);
             sp(&x->out, "  }\n");
             return;
+        }
+        if (t > k && (t > end || always) && !x->nsw && x->nsk < 16 && maxwell_struct_skips &&
+            (!x->nloops || t < x->loops[x->nloops - 1][1])) {  // past the region (or over code in it): a skip
+            int id = x->nskv++;
+            if (always) sp(&x->out, "  sk%d = true;\n", id);
+            else sp(&x->out, "  if (%s) sk%d = true;\n", b->cond, id);
+            x->sk_t[x->nsk] = t, x->sk_id[x->nsk] = id, x->sk_depth[x->nsk] = depth, x->nsk++;
+            k++;
+            continue;
         }
         if (t <= k || t > end || always) { x->fail = true; return; }
         SBlk *last = &x->b[t - 1];
@@ -2599,6 +2653,7 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
             x->nloops = nl;
         }
         if (!els && alt >= 0 && t - 1 > k && last->term == 1 && !strcmp(last->cond, "true") && J == alt && !x->consumed[t - 1]) {
+            if (st_skip_inside(x, k, end)) { x->fail = true; return; }
             x->consumed[t - 1] = 1;
             sp(&x->out, "  if (!(%s)) {\n", b->cond);
             st_range_alt(x, k + 1, t, -1, depth + 1, alt);
@@ -2607,6 +2662,7 @@ static void st_range_alt(SCtx *x, int a, int end, int opened, int depth, int alt
             sp(&x->out, "  }\n");
             return;
         }
+        if (st_skip_inside(x, k, els ? J : t)) { x->fail = true; return; }
         sp(&x->out, "  if (!(%s)) {\n", b->cond);
         if (els) {
             x->consumed[t - 1] = 1;
@@ -2760,10 +2816,14 @@ static bool structure(Ctx *c, const uint64_t *code, size_t end, const uint8_t *l
     for (int k = 0; ok && k < nb; k++)
         if (x.b[k].term == 1 && x.b[k].tgt <= k && k > x.latch[x.b[k].tgt]) x.latch[x.b[k].tgt] = k;
     if (ok) st_range(&x, 0, nb, -1, 0);
-    ok = ok && !x.fail;
+    ok = ok && !x.fail && !x.nsk;
     if (ok) {
         free(c->body.buf);
-        c->body = x.out;
+        Str body = {0};
+        for (int i = 0; i < x.nskv; i++) sp(&body, "  bool sk%d = false;\n", i);
+        sp(&body, "%s", x.out.buf ? x.out.buf : "");
+        free(x.out.buf);
+        c->body = body;
     } else free(x.out.buf);
     free(x.skip); free(blk); free(x.b); free(x.latch); free(x.consumed);
     return ok;
@@ -2845,9 +2905,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
                    "uint lo = 0u, hi = gmap[%d].x; while (lo < hi) { uint m = (lo + hi) >> 1; "
                    "if (gmap[m].x <= g) lo = m + 1u; else hi = m; } if (lo == 0u) return 0xFFFFFFFFu; uvec4 e = gmap[lo - 1u]; "
                    "o = g - e.x; if (o >= e.y) return 0xFFFFFFFFu; gc_ = e.xyz; return e.z + (o >> 2); }\n", GMAP_MAX);
-        } else
-        sp(&s, "uint gfind(uint g) { uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uint o = g - gmap[i].x; "
-               "if (g >= gmap[i].x && o < gmap[i].y) return gmap[i].z + (o >> 2); } return 0xFFFFFFFFu; }\n", GMAP_MAX);
+        } else  // (the entry last found first, as above: a single-invocation loop storing word by word searched the
+                // table for every word - TOTK's list clears, 1.5 ms of the GPU's frame)
+        sp(&s, "uvec3 gc_ = uvec3(0u, 0u, 0u);\n"
+               "uint gfind(uint g) { uint o = g - gc_.x; if (o < gc_.y) return gc_.z + (o >> 2); "
+               "uint n = gmap[%d].x; for (uint i = 0u; i < n; i++) { uvec4 e = gmap[i]; o = g - e.x; "
+               "if (g >= e.x && o < e.y) { gc_ = e.xyz; return e.z + (o >> 2); } } return 0xFFFFFFFFu; }\n", GMAP_MAX);
         if (GMISS_ON(stage)) {
             sp(&s, "layout(std430, set = %d, binding = %d) buffer GMiss { uint w[]; } gmiss_;\n", set, GMISS_BUFFER_INDEX);
             sp(&s, "uint gmiss(%s ga) { uint k = atomicAdd(gmiss_.w[0], 1u); if (k < 64u) gmiss_.w[1u + k] = uint(ga); "

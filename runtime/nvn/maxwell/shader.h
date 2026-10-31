@@ -116,6 +116,7 @@ extern bool maxwell_static_stacks;
 // (GLSL, with maxwell_static_stacks) shaders with branches as if / else / for instead of the `switch (pc)` state
 // machine when their control flow allows it (translate.c structure()). Set by the Android backend.
 extern bool maxwell_structured;
+extern bool maxwell_struct_skips;  // (structure: forward jumps out of a region as guarded skips)
 // (maxwell_structured) no GLSL switch for a jump table: such a shader keeps its state machine (Qualcomm's compiler)
 extern bool maxwell_no_switch;
 // (maxwell_structured) a shader with local memory keeps its state machine (Qualcomm's compiler crashed on one)
