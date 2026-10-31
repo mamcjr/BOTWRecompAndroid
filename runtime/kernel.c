@@ -525,6 +525,23 @@ static uint32_t block_current(int64_t timeout_ns) {
     waitlist_add(t);
 #ifdef __ANDROID__
     int kind0 = t->wait_kind;
+    {   // LARECOMP_KWAIT_SPIN_US=<us>: a short wait first without sleeping (the kernel lock let go meanwhile) - the
+        // main thread hands work to its job workers and waits for their results many times a frame, each wake-up a
+        // futex and maybe a sleeping core brought back. A/B in one run (LARECOMP_AB=<n>:kspin), 1.9.0 with FSR 1 +
+        // FXAA (GPU-bound near 20 ms): 50 us +4%, +1.4%, +0.4% in three runs, 150 us nothing. Off by default: with the
+        // default settings the frame sits at the 60 fps cap with the GPU as the limit, where a spin is only CPU heat.
+        static long spin_ns = -1;
+        if (spin_ns < 0) { const char *e = getenv("LARECOMP_KWAIT_SPIN_US"); spin_ns = (e ? atol(e) : 0) * 1000; }
+        extern int vk_ab(const char *what);
+        if (spin_ns > 0 && (timeout_ns < 0 || timeout_ns > spin_ns) && vk_ab("kspin") != 0) {
+            pthread_mutex_unlock(&g_klock);
+            for (uint64_t end = plat_now_ns() + (uint64_t)spin_ns; plat_now_ns() < end;) {
+                if (__atomic_load_n(&t->wait_kind, __ATOMIC_ACQUIRE) != kind0 || g_rt_unwind) break;
+                __asm__ volatile("yield");
+            }
+            pthread_mutex_lock(&g_klock);
+        }
+    }
 #endif
     while (t->wait_kind != WAIT_NONE) {
         if (g_rt_unwind) {  // reboot: give up the wait (the thread unwinds when its svc returns)

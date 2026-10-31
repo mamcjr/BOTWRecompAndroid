@@ -1128,6 +1128,26 @@ Pedidos ainda não começados, o mais recente no fim.
   **Desligado por padrão desde o mesmo dia** (`LARECOMP_CB_WINDOW=1` liga): em jogo a água ficou branca, o terreno
   em "cortinas" e objetos ao longe com pontas num golpe - o buffer lido no lugar enquanto a CPU já escreve o quadro
   seguinte nele (o sync lag deixa a CPU um quadro à frente). `LARECOMP_LOG_CBWIN=1` mostra o que fica copiado.
+- **Tempo de quadro, 2026-10-31 (1.9.0 recompilado, save da noite no Grande Platô, POCO a 80-93 °C):** medidas por
+  A/B na mesma rodada (`LARECOMP_AB=<quadros>:<chave>` + `LARECOMP_LOG_PACE=1`, só os quadros no mundo - o Link morre
+  ~40 s depois de carregar esse save à noite; a média por lado com `abpace.awk` do scratchpad). Teste com as
+  configurações padrão sem tocar no ini do usuário: `LARECOMP_SETTINGS=<v190/build/t_default.ini>` (SGSR, sem AA).
+  - **Linha do tempo:** a thread de render traduz um quadro em ~10,5 ms e fica ~12 ms parada esperando a próxima lista;
+    o caminho crítico eram as threads do jogo (o núcleo 0 ocupado 82% do tempo, ~2.200 trocas por segundo).
+  - **simpleperf** (`--call-graph dwarf`; o APK é `profileable`; símbolos com o libmain.so de `merged_native_libs`
+    em `--symfs`): nas threads do jogo ~1/3 era runtime, metade disso o `shadow_at` do cmdbuf (um mutex global por
+    registro gravado: futex e a escrita do trace de contenção do bionic). Sem lock na leitura: período 23,01 -> 22,02
+    ms. A página da sombra guardada no command buffer: 18,84 -> 18,60 ms. `renderer_present_count` sem chamadas (~4%
+    da thread de render).
+  - Sem ganho: girar antes de esperar o núcleo 0 (22,03 vs 21,98 ms); girar 50 us antes de dormir numa espera do
+    kernel deu +4%, +1,4%, +0,4% em três rodadas e 150 us nada - ficou desligado (`LARECOMP_KWAIT_SPIN_US`), porque
+    agora a GPU é o limite e o giro só esquenta; tirar a barreira do início de cada pass custa só 0,27 ms de GPU agora.
+  - **Agora o limite é a GPU:** com FSR 1 + FXAA (o ini do usuário na 1.9.0) o quadro fica em ~19-20 ms e trocar o FSR
+    1 pelo SGSR dá 20,06 -> 18,44 ms (+8,6%). Com o padrão (SGSR, sem AA) o mundo fica cravado em **60 fps** mesmo a
+    87 °C: render 10,2 ms, GPU ~15 ms em ~160 passes e ~3.250 draws (o G-buffer de 1.200 draws 2,3 ms, o resto
+    espalhado). Para 13 ms falta tirar ~2 ms da GPU; nenhum pass sozinho dá isso. Uma linha de ~1,4 ms aparece num
+    dos dispatches do cs 37fefb800 (o mesmo shader leva 0,01-0,02 ms nos outros, e a linha muda de dispatch de um
+    quadro para outro): uma espera, não trabalho - a investigar.
 - **Onde vai o quadro de 60 fps (1.9.0, Grande Platô, 2026-10-27, celular a 75-93 °C):**
   - Linha do tempo (`LARECOMP_FRAME_TIMELINE=4000`), ~19 ms por quadro, em série: o jogo grava a lista do quadro
     (~3,9 ms, uma lista só), a thread de render traduz (~11 ms, 6-8 submissões pelo split de 3 ms) e apresenta (~0,8
