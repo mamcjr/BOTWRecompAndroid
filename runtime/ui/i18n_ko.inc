@@ -609,3 +609,7 @@
  "휴대폰"},
 {"Auto: a controller's gyroscope once it sends live readings, the phone's otherwise. Phone: always the phone's - for a controller that says it has a gyroscope but doesn't. Controller: only the controller's.",
  "자동: 컨트롤러의 자이로가 실제 값을 보내면 그것을, 아니면 휴대폰의 것을 씁니다. 휴대폰: 항상 휴대폰의 것 - 자이로가 있다고 알리지만 실제로는 없는 컨트롤러용. 컨트롤러: 컨트롤러의 것만."},
+{"Spanish (Latin America)",
+ "스페인어 (중남미)"},
+{"French (Canada)",
+ "프랑스어 (캐나다)"},

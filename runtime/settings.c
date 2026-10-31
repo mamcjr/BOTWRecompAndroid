@@ -72,11 +72,14 @@ Settings g_settings = {
 // SavageWindRecomp); the older versions are told English instead.
 // Chinese is zh-Hans / zh-Hant, as GetDesiredLanguage answers since system 4.0 (and Eden): the older zh-CN / zh-TW
 // gave Japanese text (issue #15).
+// "es" / "fr" give Spain's and France's text (regionEU); Latin America's Spanish and Canada's French are the region US
+// ones (Pack/Bootup_USes.pack, Bootup_USfr.pack, in every version), told as es-419 / fr-CA (issue #128).
 const char *const g_language_codes[N_LANGUAGES] = {"auto", "ja", "en-US", "es", "fr", "de", "it", "nl", "ru", "ko",
-                                                   "zh-Hans", "zh-Hant", "pt-BR"};
+                                                   "zh-Hans", "zh-Hant", "pt-BR", "es-419", "fr-CA"};
 const char *const g_language_names[N_LANGUAGES] = {"Auto", "Japanese", "English", "Spanish", "French", "German",
                                                    "Italian", "Dutch", "Russian", "Korean", "Chinese (Simplified)",
-                                                   "Chinese (Traditional)", "Portuguese (Brazil)"};
+                                                   "Chinese (Traditional)", "Portuguese (Brazil)",
+                                                   "Spanish (Latin America)", "French (Canada)"};
 
 // The app's own menus (ui/i18n.mm): the game's Language when one is chosen - one setting for both, read once (the menus
 // change when the app starts again) - else the phone's first preferred language, which is the app's own when Android
@@ -90,7 +93,7 @@ const char *settings_menu_language(void) {
         int chosen = g_settings.language;
         if (!(e && *e) && chosen > LANG_AUTO && chosen < N_LANGUAGES) {
             static const char *const menu[N_LANGUAGES] = {"en", "ja", "en", "es", "fr", "de", "it", "nl", "ru", "ko",
-                                                          "zh-Hans", "zh-Hant", "pt"};  // (g_language_codes' order)
+                                                          "zh-Hans", "zh-Hant", "pt", "es", "fr"};  // (g_language_codes' order)
             return lang = menu[chosen];
         }
         if (e && *e) {
@@ -153,8 +156,16 @@ static const char *host_language(void) {
     char l[8] = {0};
     size_t n = 0;
     for (const char *p = e; *p && *p != '.' && *p != '@' && *p != '_' && *p != '-' && n < sizeof l - 1; p++) l[n++] = *p;
+    // (the country after the language: "es-MX", "es_AR.UTF-8", "es-419")
+    char country[8] = {0};
+    const char *sep = e + n;
+    if (*sep == '_' || *sep == '-')
+        for (size_t k = 0; sep[k + 1] && sep[k + 1] != '.' && sep[k + 1] != '@' && sep[k + 1] != '-' && k < sizeof country - 1; k++)
+            country[k] = sep[k + 1];
+    if (!strcmp(l, "es")) return country[0] && strcmp(country, "ES") ? "es-419" : "es";  // (Spain's, else the Americas')
+    if (!strcmp(l, "fr")) return !strcmp(country, "CA") ? "fr-CA" : "fr";
     static const struct { const char *loc, *code; } map[] = {{"ja", "ja"}, {"ko", "ko"}, {"ru", "ru"}, {"nl", "nl"},
-                                                             {"de", "de"}, {"it", "it"}, {"fr", "fr"}, {"es", "es"}};
+                                                             {"de", "de"}, {"it", "it"}};
     for (size_t i = 0; i < sizeof map / sizeof *map; i++)
         if (!strcmp(l, map[i].loc)) return map[i].code;
     if (!strcmp(l, "zh"))  // (TW / HK, Hant: traditional)

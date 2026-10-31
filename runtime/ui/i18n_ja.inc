@@ -609,3 +609,7 @@
  "スマートフォン"},
 {"Auto: a controller's gyroscope once it sends live readings, the phone's otherwise. Phone: always the phone's - for a controller that says it has a gyroscope but doesn't. Controller: only the controller's.",
  "自動: コントローラーのジャイロが実際の値を送ってきたらそれを、そうでなければスマートフォンのものを使います。スマートフォン: 常にスマートフォンのもの (ジャイロがあると報告するのに実際にはないコントローラー向け)。コントローラー: コントローラーのものだけ。"},
+{"Spanish (Latin America)",
+ "スペイン語 (中南米)"},
+{"French (Canada)",
+ "フランス語 (カナダ)"},

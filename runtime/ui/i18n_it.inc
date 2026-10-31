@@ -609,3 +609,7 @@
  "Telefono"},
 {"Auto: a controller's gyroscope once it sends live readings, the phone's otherwise. Phone: always the phone's - for a controller that says it has a gyroscope but doesn't. Controller: only the controller's.",
  "Auto: il giroscopio del controller appena invia letture vere, altrimenti quello del telefono. Telefono: sempre quello del telefono, per un controller che dice di avere un giroscopio ma non ce l'ha. Controller: solo quello del controller."},
+{"Spanish (Latin America)",
+ "Spagnolo (America Latina)"},
+{"French (Canada)",
+ "Francese (Canada)"},

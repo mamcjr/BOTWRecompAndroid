@@ -609,3 +609,7 @@
  "手機"},
 {"Auto: a controller's gyroscope once it sends live readings, the phone's otherwise. Phone: always the phone's - for a controller that says it has a gyroscope but doesn't. Controller: only the controller's.",
  "自動：手把的陀螺儀一傳送真實數據就用它，否則用手機的。手機：一律用手機的——適合聲稱有陀螺儀但實際沒有的手把。手把：只用手把的。"},
+{"Spanish (Latin America)",
+ "西班牙語（拉丁美洲）"},
+{"French (Canada)",
+ "法語（加拿大）"},
