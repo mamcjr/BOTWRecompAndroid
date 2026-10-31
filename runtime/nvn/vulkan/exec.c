@@ -4333,7 +4333,15 @@ typedef struct { uint64_t lo, hi; bool store, learned; } GcRange;  // heap offse
 #define GA_RES (48ull << 20)    // [0, GA_RES): resident slots; the rest: the ring
 #define GA_SEG (8ull << 20)
 #define GA_NRES 512
-typedef struct { uint64_t lo, hi, off, checked; uint8_t *shadow; bool live; uint64_t *bseq; } GaRes;  // (bseq: per 256 B)
+typedef struct {
+    uint64_t lo, hi, off, checked;
+    uint8_t *shadow;
+    bool live;
+    uint64_t *bseq;  // (per 256 B)
+    bool learned, stored;  // (made by gres_learn; a shader has stored into it: never let go)
+    bool spare;            // (a learned window out of gl_learned: let go when the space runs out - ga_res_alloc)
+    uint64_t dead_seq;     // (let go: its space reusable once that submission is done - ga_free)
+} GaRes;
 static GaRes ga_res[GA_NRES];
 static int ga_nres;
 static VkBuffer ga_buf;
@@ -4461,6 +4469,61 @@ static void gres_sync(GaRes *e) {
     }
 }
 
+// The resident part's space let go (merged slots, spare learned windows - gres_learn) and taken again: a slot only
+// ever took new space, and a long session filled the 48 MB - every learned window stayed resident (114 in 6 minutes
+// in Hateno, #89): new ranges no longer fit, the draws fell back to plain copies and the shaders' misses went
+// unlearned, the frame rate falling until the game restarted. A dead slot's space and index come back once its
+// submission is done and no write-back still points into it (gc_back).
+static bool ga_backs_into(uint64_t off, uint64_t len) {  // (a write-back still to come reads arena [off, off + len))
+    bool any = false;
+    pthread_mutex_lock(&gc_lock);
+    for (int i = 0; i < gc_nback && !any; i++) {
+        uint64_t s = (uint64_t)(gc_back[i].src - ga_ptr);
+        any = s < off + len && off < s + gc_back[i].len;
+    }
+    pthread_mutex_unlock(&gc_lock);
+    return any;
+}
+static void gres_reclaim(void) {
+    uint64_t done = vk_completed_seq();
+    for (int i = 0; i < ga_nres; i++) {
+        GaRes *e = &ga_res[i];
+        if (e->live || !e->shadow || e->dead_seq > done || ga_backs_into(e->off, e->hi - e->lo)) continue;
+        free(e->shadow), free(e->bseq);
+        e->shadow = NULL, e->bseq = NULL;  // (its index free: gres_get)
+    }
+    while (ga_nres && !ga_res[ga_nres - 1].live && !ga_res[ga_nres - 1].shadow) ga_nres--;
+}
+
+// Space for len bytes in the resident part: the top if it fits there, else the lowest gap between the slots in use
+// (live, or dead but not reclaimed yet) - ~0 when none
+static uint64_t ga_res_alloc(uint64_t len) {
+    static uint64_t cap;  // (LARECOMP_GA_RES_MB=<n>, a test: a smaller resident part, to see it reused)
+    if (!cap) { const char *e = getenv("LARECOMP_GA_RES_MB"); cap = e && atoi(e) > 0 && ((uint64_t)atoi(e) << 20) < GA_RES ? (uint64_t)atoi(e) << 20 : GA_RES; }
+    len = (len + 255) & ~255ull;
+    if (ga_res_top + len <= cap) { uint64_t off = ga_res_top; ga_res_top += len; return off; }
+    for (int i = 0; i < ga_nres; i++)  // (out of room: the spare learned windows let go - a miss there learns it again)
+        if (ga_res[i].live && ga_res[i].spare) ga_res[i].live = false, ga_res[i].dead_seq = vk_pending_seq();
+    gres_reclaim();
+    uint64_t at = 0;
+    for (;;) {  // (first fit: the slots in use sorted by place, a gap before each)
+        uint64_t next = ~0ull, end = 0;
+        for (int i = 0; i < ga_nres; i++) {
+            GaRes *e = &ga_res[i];
+            if (!e->live && !e->shadow) continue;
+            uint64_t eo = e->off, ee = e->off + ((e->hi - e->lo + 255) & ~255ull);
+            if (ee > at && eo < next) next = eo, end = ee;
+        }
+        if (next == ~0ull) {  // (nothing in use from here on: up to the resident part's end)
+            if (at + len > cap) return ~0ull;
+            if (at + len > ga_res_top) ga_res_top = at + len;
+            return at;
+        }
+        if (next >= at + len) return at;
+        at = end;
+    }
+}
+
 // The live resident entry covering heap [lo, hi); create: else a new one for it (and any it overlaps)
 static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
     for (int i = 0; i < ga_nres; i++)
@@ -4482,16 +4545,25 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
     if (no && in_pass) vk_end_pass();  // (merging copies slot to slot: outside any render pass)
     uint64_t len = uhi - ulo;
     int slot = -1;
-    for (int i = 0; i < ga_nres; i++) if (!ga_res[i].live && !ga_res[i].shadow) { slot = i; break; }
-    if (slot < 0 && ga_nres < GA_NRES) slot = ga_nres++;
-    if (slot < 0 || ga_res_top + len > GA_RES) return NULL;
+    for (int pass = 0; pass < 2 && slot < 0; pass++) {
+        if (pass) gres_reclaim();
+        for (int i = 0; i < ga_nres; i++) if (!ga_res[i].live && !ga_res[i].shadow) { slot = i; break; }
+        if (slot < 0 && ga_nres < GA_NRES) slot = ga_nres++;
+    }
+    uint64_t at = slot < 0 ? ~0ull : ga_res_alloc(len);
+    if (at == ~0ull) {
+        static int told;
+        if (!told++) LOG("[vk] global memory arena: its resident part is full (%d slots, %.1f of %llu MB in use)\n", ga_nres,
+                         ga_res_top / 1048576.0, (unsigned long long)(GA_RES >> 20));
+        if (slot >= 0 && slot == ga_nres - 1 && !ga_res[slot].shadow) ga_nres--;  // (the index taken back)
+        return NULL;
+    }
     GaRes *n = &ga_res[slot];
     uint8_t *shadow = malloc(len);
     uint64_t *bseq = calloc((len + 255) / 256, sizeof *bseq);
-    if (!shadow || !bseq) { free(shadow); free(bseq); return NULL; }
+    if (!shadow || !bseq) { free(shadow); free(bseq); if (slot == ga_nres - 1) ga_nres--; return NULL; }
     const uint8_t *g = (const uint8_t *)(uintptr_t)(HEAP_BASE + ulo);
-    *n = (GaRes){ulo, uhi, ga_res_top, renderer_present_count() + 1, shadow, true, bseq};  // (synced: this frame)
-    ga_res_top += (len + 255) & ~255ull;
+    *n = (GaRes){ulo, uhi, at, renderer_present_count() + 1, shadow, true, bseq};  // (synced: this frame)
     memcpy(shadow, g, len);
     memcpy(ga_ptr + n->off, g, len);  // (a new slot: nothing on the GPU uses it yet)
     ga_wrote(n->off, len);
@@ -4503,7 +4575,8 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
             gres_sync(e);
             VkBufferCopy cp = {e->off, n->off + (e->lo - ulo), e->hi - e->lo};
             vkCmdCopyBuffer(cb, ga_buf, ga_buf, 1, &cp);
-            e->live = false;  // (its slot isn't reused: the arena's resident part only grows until a reset)
+            n->stored |= e->stored;
+            e->live = false, e->dead_seq = vk_pending_seq();  // (its space and index back once that's done: gres_reclaim)
         }
         vk_full_barrier(cb);
     }
@@ -4524,6 +4597,7 @@ static void gres_learn(uint32_t off) {
     GaRes *in = NULL;
     for (int i = 0; i < ga_nres && !in; i++)
         if (ga_res[i].live && ga_res[i].lo <= off && off < ga_res[i].hi) in = &ga_res[i];
+    if (in) in->spare = false;
     if (!in) {  // (data the CPU writes, reached by pointer - the lights' parameters, objects' data: resident too, a
                 // window around it between the ranges already resident - 64 KB before, 256 KB after: the objects'
                 // data grows upward as the game allocates (walking around: a miss, and wrong shadows, for every
@@ -4538,8 +4612,15 @@ static void gres_learn(uint32_t off) {
             if (e->lo > off && e->lo < hi) hi = e->lo;
         }
         if (hi <= lo || !(in = gres_get(lo, hi, true))) return;
+        in->learned = true;
     }
-    if (gl_n == GL_MAX) memmove(gl_learned, gl_learned + 1, sizeof gl_learned[0] * --gl_n);
+    if (gl_n == GL_MAX) {  // (the oldest out - its window a spare, if only learning made it: ga_res_alloc)
+        for (int i = 0; i < ga_nres; i++) {
+            GaRes *e = &ga_res[i];
+            if (e->live && e->learned && !e->stored && e->lo == gl_learned[0].lo && e->hi == gl_learned[0].hi) e->spare = true;
+        }
+        memmove(gl_learned, gl_learned + 1, sizeof gl_learned[0] * --gl_n);
+    }
     gl_learned[gl_n++] = (GcRange){in->lo, in->hi};
     LOG("[vk] global memory: shaders reach heap %x outside their tables - %llx+%llx goes in every table\n", off,
         (unsigned long long)in->lo, (unsigned long long)(in->hi - in->lo));
@@ -4655,6 +4736,7 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
         if (r[i].store) {  // a storing shader's bound ranges: resident from now on
             GaRes *e = gres_get(lo, hi, true);
             if (!e) { stat_gres_fail[0]++; return false; }
+            e->stored = true;
             gres_sync(e);
             GRES_ADD(lo, hi - lo, e->off + (lo - e->lo));
             stat_gres_res++;
