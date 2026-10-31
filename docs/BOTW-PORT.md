@@ -859,6 +859,26 @@ na GPU só com 7 GB ou mais de RAM, #83), 05cb1b6 (giroscópio do celular com co
 - **Melhoria do log:** nenhum log diz a versão do app - os de 30/10 tiveram de ser datados pela hora da release.
   Escrever `BOTWRecompAndroid 0.2.x (versionCode N)` na primeira linha.
 
+**Triagem de 2026-10-31, madrugada:**
+- **#129 (S24 Ultra, Adreno 750 no Turnip, 0.2.5) - regressão da 0.2.5:** faixas diagonais no terreno (grama e rocha
+  alternadas) e o fundo do menu principal errado. Suspeita forte: o 7315a62 (PR #103) fez o gpu_heap = auto ligar o
+  heap placed em todo Turnip com `map_placed`, não só nos 8xx - o Adreno 750 no Turnip passou a usar esse caminho na
+  0.2.5. Confirmar pedindo "Memória do jogo na GPU" = Desligado; corrigir restringindo o auto ao caso do #103 (o 732
+  que o Turnip chama de "Adreno (TM) 735") ou provando o caminho no 7xx. Segunda suspeita: o arredondamento de x*255
+  do #112 (02ab939, só testável com `LARECOMP_NO_UNORM_ROUND=1`).
+- **#115 (S24 Ultra + GameSir X2 Type-C, sem giroscópio):** o giroscópio do celular não funciona com o controle
+  ligado, na 0.2.4 e na 0.2.5. Hipótese: o X2 anuncia um giroscópio pelo SDL que manda ruído, a 0.2.4 (>0,05 rad/s) e
+  a 0.2.5 (20 leituras diferentes) o tomam por vivo e calam o do celular (pad_until_ns). Pedir o log (linhas
+  `[motion]`). Corrigir com uma opção "Sensor de movimento: Auto / Celular / Controle".
+- **#130 (sem aparelho nem versão):** um monte de folhas no chão que segue o Link (areia, água, rocha). Pedir GPU,
+  versão do app e do jogo, modo e o log.
+- **#131 (GJ3303, Mali-G720, 1.8.2, mesmo autor do #123):** crash depois de ~30 min ao sair de um santuário, repetido.
+  SIGSEGV lendo 0x88 em f_100a1fb80+34 (outra função que o 0x8 do #123), 175 linhas `outside their tables`, rss
+  4743 MB na corrida anterior. Família "crash depois de minutos em Mali". O log não diz a versão do app (aberta depois
+  da release da 0.2.5): perguntar.
+- **Respostas boas:** #108 (SD845) confirmou a 0.2.5 - voltar do segundo plano não crasha mais (fechar). #89
+  (Mali-G925) jogou na 0.2.5 sem crash, só quedas de fps. #126 vai testar a 1.6.0 no Xclipse 530.
+
 **Esperando log ou resposta:** #22 (vídeo da torre no Adreno 840), #24/#30 (8s Gen 4), #23 (RP Nova T26), #41
 (build de teste com `uclamp.min`), #68 (S23 a 5-10 fps), #64 (build no Mali-G57).
 
