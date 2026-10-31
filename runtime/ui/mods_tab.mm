@@ -59,6 +59,8 @@ static void import_mod(void) {
     pthread_mutex_unlock(&g_lock);
 }
 
+extern "C" const char *fs_aoc_image(void);  // (runtime/services/fs.c: the DLC image, NULL when not set up)
+
 extern "C" void mods_tab_draw(float scale) {
     opt_begin("##mods", scale);
     opt_section("Mods");
@@ -87,6 +89,19 @@ extern "C" void mods_tab_draw(float scale) {
             mods_set(mods[i].name, on);
             mods[i].on = on;
             settings_save();
+        }
+    }
+    {   // A mod made for the DLC (its folder for the DLC's title, as Relics of the Past ships) with no DLC set up: the
+        // game closes at the title screen (#65 - reproduced on 1.6.0, fine with the DLC)
+        bool dlc_mod = false;
+        for (int i = 0; i < n; i++) dlc_mod |= mods[i].on && strcasestr(mods[i].name, "01007EF00011F001") != NULL;
+        if (dlc_mod && !fs_aoc_image()) {
+            ImGui::Spacing();
+            ImGui::PushTextWrapPos(0);
+            ImGui::TextColored(ImVec4(1.0f, 0.75f, 0.3f, 1.0f), "%s",
+                               tr("A mod for the DLC is on, but the DLC isn't set up (Settings > Files > DLC). Mods made "
+                                  "with it, like Relics of the Past, close the game at the title screen without it."));
+            ImGui::PopTextWrapPos();
         }
     }
     ImGui::Spacing();

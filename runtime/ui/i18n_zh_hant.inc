@@ -613,3 +613,5 @@
  "西班牙語（拉丁美洲）"},
 {"French (Canada)",
  "法語（加拿大）"},
+{"A mod for the DLC is on, but the DLC isn't set up (Settings > Files > DLC). Mods made with it, like Relics of the Past, close the game at the title screen without it.",
+ "已啟用一個 DLC 模組，但尚未設定 DLC（設定 > 檔案 > DLC）。像 Relics of the Past 這樣以 DLC 製作的模組，沒有 DLC 時會在標題畫面關閉遊戲。"},

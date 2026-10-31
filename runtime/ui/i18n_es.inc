@@ -613,3 +613,5 @@
  "Español (Latinoamérica)"},
 {"French (Canada)",
  "Francés (Canadá)"},
+{"A mod for the DLC is on, but the DLC isn't set up (Settings > Files > DLC). Mods made with it, like Relics of the Past, close the game at the title screen without it.",
+ "Hay un mod para el DLC activado, pero el DLC no está configurado (Ajustes > Archivos > DLC). Los mods hechos con él, como Relics of the Past, cierran el juego en la pantalla de título sin él."},
