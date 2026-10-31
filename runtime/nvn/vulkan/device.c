@@ -1259,7 +1259,15 @@ bool vk_async_on(void);
 bool vk_async_is_render_thread(void);
 void vk_async_present(NvnTexture *t);
 void vk_async_drain(void);
-uint64_t renderer_present_count(void) { return vk_async_on() && !vk_async_is_render_thread() ? g_game_frames : total_frames; }
+// (asked many times a draw, mostly by the render thread: its test first, from async.c's variables - the calls to
+// vk_async_on and vk_async_is_render_thread were ~4% of the render thread, simpleperf 2026-10-31; a thread-local
+// costs a dynamic TLS resolve per read in this dlopened library)
+extern pthread_t g_vk_render_thread;
+extern bool g_vk_render_started;
+uint64_t renderer_present_count(void) {
+    if (g_vk_render_started && pthread_equal(pthread_self(), g_vk_render_thread)) return total_frames;
+    return vk_async_on() ? g_game_frames : total_frames;
+}
 #else
 uint64_t renderer_present_count(void) { return total_frames; }
 #endif

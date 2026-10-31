@@ -41,22 +41,36 @@ static CmdRec *raw_rec(uint64_t at, uint32_t op, uint32_t size) {
 }
 
 // ---- shadow pages: guest page -> host block of SHADOW_PAGE * SHADOW_K bytes (allocated at first use, kept)
+// Asked for every record the game's threads write, several at once: a lookup takes no lock - slots are only ever
+// added (mem published before page). The lock is only for adding one: under it every record contended (futex wakes and
+// bionic's contention trace writes, ~15% of the game's threads, the critical path of the frame; simpleperf
+// 2026-10-31). No per-thread cache of the last page: a thread-local costs a dynamic TLS resolve in this library.
 enum { SHADOW_SLOTS = 1 << 16 };
 static struct { uint64_t page; uint8_t *mem; } g_shadow[SHADOW_SLOTS];
 static pthread_mutex_t g_shadow_lock = PTHREAD_MUTEX_INITIALIZER;
 
+static uint8_t *shadow_find(uint64_t page, uint32_t *at) {
+    uint32_t i = (uint32_t)(page * 0x9E3779B97F4A7C15ull >> 48) & (SHADOW_SLOTS - 1);
+    for (uint64_t p; (p = __atomic_load_n(&g_shadow[i].page, __ATOMIC_ACQUIRE)); i = (i + 1) & (SHADOW_SLOTS - 1))
+        if (p == page) return g_shadow[i].mem;
+    *at = i;
+    return NULL;
+}
+
 static uint64_t shadow_at(uint64_t guest) {
     uint64_t page = guest / SHADOW_PAGE + 1;  // (+1: 0 marks an empty slot)
-    pthread_mutex_lock(&g_shadow_lock);
-    uint32_t i = (uint32_t)(page * 0x9E3779B97F4A7C15ull >> 48) & (SHADOW_SLOTS - 1);
-    while (g_shadow[i].page && g_shadow[i].page != page) i = (i + 1) & (SHADOW_SLOTS - 1);
-    if (!g_shadow[i].page) {
-        g_shadow[i].mem = malloc(SHADOW_PAGE * SHADOW_K + sizeof(CmdRec));
-        if (!g_shadow[i].mem) FATAL("nvn: no memory for a command shadow page\n");
-        g_shadow[i].page = page;
+    uint32_t i;
+    uint8_t *m = shadow_find(page, &i);
+    if (!m) {
+        pthread_mutex_lock(&g_shadow_lock);
+        if (!(m = shadow_find(page, &i))) {  // (still missing: added at the empty slot it ended on)
+            m = malloc(SHADOW_PAGE * SHADOW_K + sizeof(CmdRec));
+            if (!m) FATAL("nvn: no memory for a command shadow page\n");
+            g_shadow[i].mem = m;
+            __atomic_store_n(&g_shadow[i].page, page, __ATOMIC_RELEASE);
+        }
+        pthread_mutex_unlock(&g_shadow_lock);
     }
-    uint8_t *m = g_shadow[i].mem;
-    pthread_mutex_unlock(&g_shadow_lock);
     return (uint64_t)(uintptr_t)m + guest % SHADOW_PAGE * SHADOW_K;
 }
 
