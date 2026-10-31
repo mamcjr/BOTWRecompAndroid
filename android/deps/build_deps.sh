@@ -69,6 +69,8 @@ fi
 # SDL3: the shared library and the Java side of the same version (org.libsdl.app, compiled into the app)
 if [ ! -f "$P/lib/libSDL3.so" ]; then
     unpack SDL3-3.4.16.tar.gz sdl
+    # (an AAudio stream disconnected while the app was in the background: reopened on resume, not left silent)
+    patch -d "$W/sdl" -p1 < "$D/sdl-aaudio-resume.patch"
     "$CMAKE" -S "$W/sdl" -B "$W/sdl/build" "${ANDROID_CMAKE[@]}" -DCMAKE_INSTALL_PREFIX="$P" -DCMAKE_INSTALL_LIBDIR=lib \
         -DSDL_SHARED=ON -DSDL_STATIC=OFF -DSDL_TESTS=OFF -DSDL_EXAMPLES=OFF
     "$CMAKE" --build "$W/sdl/build" -j"$JOBS"

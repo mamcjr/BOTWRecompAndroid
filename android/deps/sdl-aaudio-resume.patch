@@ -1,0 +1,12 @@
+--- a/src/audio/aaudio/SDL_aaudio.c
++++ b/src/audio/aaudio/SDL_aaudio.c
+@@ -524,6 +524,9 @@
+             if (res != AAUDIO_OK) {
+                 LOGI("SDL Failed AAudioStream_requestStart %d", res);
+                 SDL_SetError("%s : %s", SDL_FUNCTION, ctx.AAudio_convertResultToText(res));
++                // A stream disconnected while paused gets no error callback: flag it ourselves, so PlayDevice builds a new one.
++                SDL_SetAtomicInt(&hidden->error_callback_triggered, (int) res);
++                SDL_SignalSemaphore(hidden->semaphore);
+             }
+         }
+     }
