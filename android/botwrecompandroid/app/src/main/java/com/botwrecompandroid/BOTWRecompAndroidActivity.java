@@ -457,6 +457,28 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         }
     }
 
+    // A file the SDL dialog picked, as the content:// URI it hands back (the start screen's Import fonts,
+    // runtime/ui/launcher.mm import_fonts): its name - the URI ends in a document id - and a copy of it at dst, an
+    // absolute path (fopen can't open the URI; issue #122). "" / false when it can't be read.
+    public static String documentName(String uri) {
+        try (Cursor c = self.getContentResolver().query(Uri.parse(uri), new String[] {OpenableColumns.DISPLAY_NAME}, null, null, null)) {
+            if (c != null && c.moveToFirst() && !c.isNull(0)) return c.getString(0);
+        } catch (Exception ignored) {
+        }
+        return "";
+    }
+
+    public static boolean copyDocument(String uri, String dst) {
+        try (InputStream in = self.getContentResolver().openInputStream(Uri.parse(uri))) {
+            if (in == null) return false;
+            copy(in, new File(dst));
+            return true;
+        } catch (Exception e) {
+            Log.e(TAG, "copy " + uri + " to " + dst, e);
+            return false;
+        }
+    }
+
     public static String logFolderName() {
         Uri tree = logTree();
         if (tree == null) return "";

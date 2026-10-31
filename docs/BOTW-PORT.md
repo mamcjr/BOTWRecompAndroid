@@ -839,7 +839,10 @@ na GPU só com 7 GB ou mais de RAM, #83), 05cb1b6 (giroscópio do celular com co
   nome comparado é o document id e o `fopen` não abre a URI (`launcher.mm` import_fonts). Corrigir: nome via
   `OpenableColumns.DISPLAY_NAME` + cópia com `SDL_IOFromFile`, ou pela Activity como o resto das importações. Ele roda
   em chinês: aceitar também as fontes zh-cn/zh-tw/ko (`nintendo_udsg-r_org_zh-cn_003` etc.; o .bfttf zh-cn usa outra
-  chave/cabeçalho), senão o texto chinês some com a DejaVu.
+  chave/cabeçalho), senão o texto chinês some com a DejaVu. **Corrigido (local, 31/10):** nome e cópia pela Activity
+  (`documentName` / `copyDocument`); o pl.c serve os tipos 1-4 (zh-cn, zh-cn ext, zh-tw, ko) quando importados, e o
+  .bfttf tira a chave do próprio arquivo (conferido com um .bfttf de chave arbitrária). Não testado no celular nem
+  com os dumps reais das fontes chinesas.
 - **#123 (Mali-G720, 0.2.4, 1.8.2 recompilado, cópias):** crash após 12 min: SIGSEGV write em 0x8, host pc
   f_100059380+420, depois de 31 linhas `global memory: shaders reach heap ... outside their tables` - a família que a
   correção do GMap do Argon (0.2.5) trata. Pedir a 0.2.5 e prints dos glitches.
@@ -1191,7 +1194,9 @@ Pedidos ainda não começados, o mais recente no fim.
   - um botão 60/30 nos controles de toque: um controle novo no layout editável.
 - **Espanhol da América Latina e francês do Canadá** (#128, 2026-10-30): o jogo já tem os dois (`Bootup_USes.pack` /
   `es-419`, `Bootup_USfr.pack` / `fr-CA`); faltam as opções em Idioma (settings.c g_language_codes/names, as traduções
-  dos nomes) e o Auto mapear o país do celular. Pequeno.
+  dos nomes) e o Auto mapear o país do celular. **Feito (local, 31/10):** "Espanhol (América Latina)" e "Francês
+  (Canadá)" em Idioma; no Auto, espanhol de qualquer país menos a Espanha vira es-419 e o francês do Canadá, fr-CA.
+  Falta ver no jogo que es-419 abre o `Bootup_USes.pack`.
 - **Sensor de movimento: Automático / Celular / Controle** (#115, prometido na resposta de 2026-10-31): com um GameSir
   X2 Type-C (sem giroscópio) o do celular parou de funcionar na 0.2.4/0.2.5 - provavelmente o controle anuncia um
   giroscópio com ruído e a troca automática (motion.c motion_event) o toma por vivo. **Feito (local, 31/10):**

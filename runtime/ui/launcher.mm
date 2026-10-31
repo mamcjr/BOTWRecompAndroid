@@ -533,6 +533,45 @@ static void android_call_int(const char *method, int v) {  // (one int argument)
     env->DeleteLocalRef(act);
 }
 
+// A content:// URI the SDL dialog picked (Import fonts): its name, and a copy of it at an absolute path
+// (BOTWRecompAndroidActivity documentName / copyDocument)
+static std::string android_document_name(const std::string &uri) {
+    std::string v;
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return v;
+    jclass c = env->GetObjectClass(act);
+    jmethodID m = env->GetStaticMethodID(c, "documentName", "(Ljava/lang/String;)Ljava/lang/String;");
+    jstring u = env->NewStringUTF(uri.c_str());
+    jstring s = m ? (jstring)env->CallStaticObjectMethod(c, m, u) : NULL;
+    if (env->ExceptionCheck()) { env->ExceptionClear(); s = NULL; }
+    if (s) {
+        const char *t = env->GetStringUTFChars(s, NULL);
+        if (t) v = t, env->ReleaseStringUTFChars(s, t);
+        env->DeleteLocalRef(s);
+    }
+    env->DeleteLocalRef(u);
+    env->DeleteLocalRef(c);
+    env->DeleteLocalRef(act);
+    return v;
+}
+
+static bool android_copy_document(const std::string &uri, const std::string &dst) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return false;
+    jclass c = env->GetObjectClass(act);
+    jmethodID m = env->GetStaticMethodID(c, "copyDocument", "(Ljava/lang/String;Ljava/lang/String;)Z");
+    jstring u = env->NewStringUTF(uri.c_str()), d = env->NewStringUTF(dst.c_str());
+    bool ok = m && env->CallStaticBooleanMethod(c, m, u, d);
+    if (env->ExceptionCheck()) { env->ExceptionClear(); ok = false; }
+    env->DeleteLocalRef(u);
+    env->DeleteLocalRef(d);
+    env->DeleteLocalRef(c);
+    env->DeleteLocalRef(act);
+    return ok;
+}
+
 // The log file (Driver compatibility; runtime/platform/android.c): written to a folder the player picks
 // (BOTWRecompAndroidActivity pickLogFolder / openLog), where a file manager can open it - Android/data/ is out of its reach
 extern "C" void android_log_file(bool on);
@@ -956,6 +995,10 @@ static void SDLCALL picked(void *, const char *const *files, int) {
 static const char *FONT_STD[] = {"nintendo_udsg-r_std_003.bfttf", "nintendo_udsg-r_std_003.ttf",
                                  "nintendo_udsgr_std_003.ttf", "nintendo_udsgr_std_003.bfttf"};
 static const char *FONT_EXT[] = {"nintendo_ext_003.bfttf", "nintendo_ext_003.ttf"};
+static const char *FONT_CJK[] = {"nintendo_udsg-r_org_zh-cn_003.bfttf", "nintendo_udsg-r_org_zh-cn_003.ttf",  // (pl.c)
+                                 "nintendo_udsg-r_ext_zh-cn_003.bfttf", "nintendo_udsg-r_ext_zh-cn_003.ttf",
+                                 "nintendo_udjxh-db_zh-tw_003.bfttf",   "nintendo_udjxh-db_zh-tw_003.ttf",
+                                 "nintendo_udsg-r_ko_003.bfttf",        "nintendo_udsg-r_ko_003.ttf"};
 static std::vector<std::string> g_font_picks;
 static std::string g_font_msg;
 
@@ -981,12 +1024,27 @@ static void import_fonts() {
     mkdir("fonts", 0755);
     int ok = 0, skipped = 0;
     for (auto &src : picks) {
-        std::string base = src.substr(src.find_last_of('/') + 1), low = base;
+        std::string base = src.substr(src.find_last_of('/') + 1), low;
+#ifdef __ANDROID__
+        // Android's dialog hands back content:// URIs, which end in a document id ("primary%3ADownload%2F..." or a
+        // number) and which fopen can't open: the name and the copy come through the activity (issue #122)
+        bool uri = !src.compare(0, 10, "content://");
+        if (uri) base = android_document_name(src);
+#endif
+        low = base;
         for (auto &c : low) c = (char)tolower(c);
         bool known = false;
         for (auto n : FONT_STD) known |= low == n;
         for (auto n : FONT_EXT) known |= low == n;
+        for (auto n : FONT_CJK) known |= low == n;
         if (!known) { skipped++; continue; }
+#ifdef __ANDROID__
+        if (uri) {
+            char cwd[1024];
+            if (getcwd(cwd, sizeof cwd) && android_copy_document(src, std::string(cwd) + "/fonts/" + low)) ok++;
+            continue;
+        }
+#endif
         FILE *in = fopen(src.c_str(), "rb"), *out = fopen(("fonts/" + low).c_str(), "wb");
         if (in && out) {
             char buf[65536];
@@ -1004,6 +1062,7 @@ static void import_fonts() {
 static void remove_fonts() {
     for (auto n : FONT_STD) unlink((std::string("fonts/") + n).c_str());
     for (auto n : FONT_EXT) unlink((std::string("fonts/") + n).c_str());
+    for (auto n : FONT_CJK) unlink((std::string("fonts/") + n).c_str());
     g_font_msg = "Imported fonts removed: the substitute font is used.";
 }
 
