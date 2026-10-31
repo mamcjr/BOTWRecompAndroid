@@ -89,8 +89,9 @@ typedef struct {
 // (GLSL compute, Vulkan) the fast copy of a dispatch's storage buffers: its address table and its data
 #define GMAP_BUFFER_INDEX 20
 #define GFAST_BUFFER_INDEX 21
-#define GMAP_MAX 16  // ranges in the table (GMap { uvec4 gmap[GMAP_MAX + 1]; }: [i] = addr lo, addr hi, size, word offset;
-                     // [GMAP_MAX].x = count)
+#define GMAP_MAX 32  // ranges in the table (GMap { uvec4 gmap[GMAP_MAX + 1]; }: [i] = addr lo, addr hi, size, word offset;
+                     // [GMAP_MAX].x = count). 32: a draw's own ranges and the 16 learned ones (vulkan/exec.c gres_learn)
+                     // - at 16 they overflowed after loads, and the draw fell back to the CPU copying it all (#89)
 extern uint64_t maxwell_gmem_base, maxwell_gmem_size;
 // (GLSL) every stage's global memory through the GMap table, not only compute: set by a backend that can't wrap the
 // guest heap in a buffer (Android: no VK_EXT_external_memory_host; vulkan/exec.c copies the bound ranges instead)
