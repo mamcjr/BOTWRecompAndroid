@@ -1711,13 +1711,14 @@ bool vk_adreno_8xx(const char *name) {
     return n >= 800 && n < 900;
 }
 // A Turnip path's setting (-1 Automatic, 1 on, 0 off) for this GPU
-bool vk_turnip_path_on(int setting) {
-    if (setting >= 0) return setting != 0;
-    if (vk_adreno_8xx(g_vk.props.deviceName)) return true;
-    // Turnip names an Adreno 732 "Adreno (TM) 735", and vk_adreno_8xx takes that for a pre-8xx GPU: the heap stayed
-    // off, and the game's text glyphs (a buffer ~2.7 GB into the 3 GB heap, outside any storage descriptor's reach)
-    // read as zeros - every menu, dialogue and item name blank. A Turnip that can place the heap in GPU memory is
-    // meant to be on for those paths: without it the game is unreadable on such a GPU.
+bool vk_turnip_path_on(int setting) { return setting < 0 ? vk_adreno_8xx(g_vk.props.deviceName) : setting != 0; }
+// gpu_heap's: Automatic is on wherever Turnip can place the heap. Off on a Turnip Adreno 7xx (an Adreno 732, which
+// Turnip names "Adreno (TM) 735": PR #103), the game's text glyphs (a buffer ~2.7 GB into the 3 GB heap, past Turnip's
+// 128 MB storage range) read as zeros - every menu, dialogue and item name blank. Only the heap: 0.2.5 widened
+// vk_turnip_path_on itself, and with it the in-place target reads it also gates, checked on the Adreno 830 only - the
+// likely cause of the terrain striped on an Adreno 750 (issue #129: BOTW's terrain decals read the targets they write).
+bool vk_turnip_heap_on(int setting) {
+    if (setting >= 0 || vk_adreno_8xx(g_vk.props.deviceName)) return vk_turnip_path_on(setting);
     return g_vk.map_placed && vk_driver_is_turnip();
 }
 static bool g_lrz_at_start = true;

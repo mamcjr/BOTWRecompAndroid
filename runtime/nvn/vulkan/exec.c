@@ -3948,11 +3948,11 @@ bool vk_heap_place(uint64_t size) {
     // on an Adreno 730 (issue #31). A page not tracked yet counts as written, so turning it on late is safe.
 #define NOT_PLACED() (gcopy_mode ? plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX) : (void)0, false)
     if (!g_vk.map_placed || getenv("LARECOMP_VK_NO_PLACED")) return NOT_PLACED();
-    extern bool vk_turnip_path_on(int setting);
-    if (!vk_turnip_path_on(g_settings.gpu_heap)) {
-        // (the start screen's Driver compatibility: Automatic leaves it to the Adreno 8xx it was made on)
+    extern bool vk_turnip_heap_on(int setting);
+    if (!vk_turnip_heap_on(g_settings.gpu_heap)) {
+        // (the start screen's Driver compatibility: Automatic is on wherever Turnip places it - vulkan/device.c)
         LOG("[vk] guest heap as GPU memory: off (%s) - shader global memory through CPU copies\n",
-            g_settings.gpu_heap < 0 ? "automatic: not an Adreno 8xx" : "settings");
+            g_settings.gpu_heap < 0 ? "automatic: not Turnip" : "settings");
         return NOT_PLACED();
     }
     {   // The placed heap is committed at once (~3.1 GB for BOTW), where CPU copies commit only the pages the game

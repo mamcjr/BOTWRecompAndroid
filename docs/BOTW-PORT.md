@@ -861,11 +861,13 @@ na GPU só com 7 GB ou mais de RAM, #83), 05cb1b6 (giroscópio do celular com co
 
 **Triagem de 2026-10-31, madrugada:**
 - **#129 (S24 Ultra, Adreno 750 no Turnip, 0.2.5) - regressão da 0.2.5:** faixas diagonais no terreno (grama e rocha
-  alternadas) e o fundo do menu principal errado. Suspeita forte: o 7315a62 (PR #103) fez o gpu_heap = auto ligar o
-  heap placed em todo Turnip com `map_placed`, não só nos 8xx - o Adreno 750 no Turnip passou a usar esse caminho na
-  0.2.5. Confirmar pedindo "Memória do jogo na GPU" = Desligado; corrigir restringindo o auto ao caso do #103 (o 732
-  que o Turnip chama de "Adreno (TM) 735") ou provando o caminho no 7xx. Segunda suspeita: o arredondamento de x*255
-  do #112 (02ab939, só testável com `LARECOMP_NO_UNORM_ROUND=1`).
+  alternadas) e o fundo do menu principal errado. Causa provável: o 7315a62 (PR #103) alargou `vk_turnip_path_on`
+  inteiro para todo Turnip com `map_placed`, e essa função decide também as leituras in-place dos alvos
+  (inplace_reads) - as decals do terreno leem e escrevem os alvos do G-buffer, um feedback loop só conferido no Adreno
+  830. **Corrigido (local):** `vk_turnip_heap_on` só para o heap (o que o #103 precisava: sem ele o 7xx fica sem
+  texto); inplace_reads e LRZ de volta a só 8xx; o rótulo "Automático (ligado/desligado nesta GPU)" e o texto do heap
+  seguem a escolha real. Não reproduzível no POCO (830): pedir ao autor "Leitura direta da imagem desenhada" = Desligado para
+  confirmar. Segunda suspeita: o arredondamento de x*255 do #112 (02ab939, `LARECOMP_NO_UNORM_ROUND=1`).
 - **#115 (S24 Ultra + GameSir X2 Type-C, sem giroscópio):** o giroscópio do celular não funciona com o controle
   ligado, na 0.2.4 e na 0.2.5. Hipótese: o X2 anuncia um giroscópio pelo SDL que manda ruído, a 0.2.4 (>0,05 rad/s) e
   a 0.2.5 (20 leituras diferentes) o tomam por vivo e calam o do celular (pad_until_ns). Pedir o log (linhas
