@@ -821,6 +821,44 @@ na GPU só com 7 GB ou mais de RAM, #83), 05cb1b6 (giroscópio do celular com co
   escrita no endereço com LARECOMP_WATCH / mprotect) e conferir os tamanhos dos objetos NVN da 1.0.0 contra o que as
   nossas HLE escrevem.
 
+**Triagem de 2026-10-30, noite (depois da 0.2.5; logs baixados e conferidos):**
+- **#126 (Xclipse 530, 0.2.5, 1.0.0):** os riscos pretos nos inimigos mortos, no Link nos santuários e no monge = o
+  bug estacionado da 1.0.0 (acima). Respondido: só na 1.0.0, usar a 1.8.2 ou a 1.9.0. Bom sinal no mesmo relato: a
+  0.2.5 destravou o vídeo da torre no Xclipse e foi de 10-15 para 20-30 fps (720p + dinâmica).
+- **Import do heap na Mali - prioridade (#121, #118, junto com o #44 da G2-Ultra):** os drivers Mali novos expõem
+  VK_EXT_external_memory_host e o heap de 3120 MB é importado. #121 (Mali-G1-Ultra, driver r54p1, 0.2.4, 1.9.0
+  nativo): sem texto em nenhum menu e blocos cinza na arte do título - igual ao #44; com
+  `LARECOMP_VK_HOST_IMPORT=0,LARECOMP_VK_NO_GRES=1` tudo certo e a RAM cai de 4018 para ~1,8 GB. #118 (Nothing Phone
+  2a, Mali-G610 MC4, r56p0, 0.2.4, 1.8.2 nativo): importou os 3120 MB, a corrida anterior foi morta por memória baixa
+  (rss 4470 MB) e o Android inteiro travou. As Mali sem a extensão (G720/G925 r49p1, G57 r32) já vão pelas cópias.
+  Corrigir: import desligado (e NO_GRES) em toda Mali por padrão (vendor 0x13B5, como já é o Xclipse e a G2-Ultra);
+  e "Memória do jogo na GPU" = Desligado (gpu_heap 0) desligar também o import - hoje só vale para o heap placed do
+  Turnip, então a opção não ajuda na Mali (o #121 tentou gpu_heap = 0 no ini).
+- **#122 (ibka512, fontes):** "Importar fontes" nunca funciona no Android - o diálogo do SDL devolve `content://`, o
+  nome comparado é o document id e o `fopen` não abre a URI (`launcher.mm` import_fonts). Corrigir: nome via
+  `OpenableColumns.DISPLAY_NAME` + cópia com `SDL_IOFromFile`, ou pela Activity como o resto das importações. Ele roda
+  em chinês: aceitar também as fontes zh-cn/zh-tw/ko (`nintendo_udsg-r_org_zh-cn_003` etc.; o .bfttf zh-cn usa outra
+  chave/cabeçalho), senão o texto chinês some com a DejaVu.
+- **#123 (Mali-G720, 0.2.4, 1.8.2 recompilado, cópias):** crash após 12 min: SIGSEGV write em 0x8, host pc
+  f_100059380+420, depois de 31 linhas `global memory: shaders reach heap ... outside their tables` - a família que a
+  correção do GMap do Argon (0.2.5) trata. Pedir a 0.2.5 e prints dos glitches.
+- **#124 (Mali-G925, POCO X8 Pro Max, 1.8.2):** após 10-15 min glitch, 6 fps e fecha; no Game Hub da Xiaomi dura
+  bem mais. Log de 18 linhas (não jogou). Família "crash depois de minutos em Mali" (hipótese dos VMAs). Pedir o
+  log-previous logo depois do crash, na 0.2.5. Ofereceu doar.
+- **#119 (Dimensity 8400 / Mali-G720, 0.2.4):** trocar de arma ou de poder cai para 2-9 fps; na 0.2.2 não caía.
+  Suspeita: a 0.2.4 trocou as leituras de volta da Mali para memória cached com flush/invalidate manual, e o menu
+  rápido usa a captura da tela (desfoque). Pedir log na 0.2.5 abrindo esse menu.
+- **#125 (Galaxy A56, Xclipse 540, 0.2.3):** 2-5 fps, render thread 51 ms, GPU 1% - a regressão de memória não
+  cacheada da 0.2.3 (corrigida na 0.2.4). Pedir a 0.2.5 (o #126 no Xclipse 530 chega a 20-30).
+- **#127 (Mali-G57 MC2, driver de fábrica r32/Vulkan 1.1, 0.2.5, 1.9.0, 50%):** 6-12 fps, picos de 5 fps com 60 mil
+  draws e 2,8 GB de memória de GPU. A GPU mais fraca testada até aqui (#85): fila de desempenho Mali.
+- **#128 (LATAM Spanish):** o jogo tem o espanhol latino-americano (`Pack/Bootup_USes.pack`, código `es-419`) e o
+  francês do Canadá (`USfr`, `fr-CA`); o app só oferece "es"/"fr" (Espanha/França). Fácil: duas opções novas em
+  Idioma e, no Auto, es-MX/es-US/es-AR/es-419... -> es-419 e fr-CA -> fr-CA.
+- **#120:** issue vazia ("BOTWRecomp_test log", sem texto nem anexo).
+- **Melhoria do log:** nenhum log diz a versão do app - os de 30/10 tiveram de ser datados pela hora da release.
+  Escrever `BOTWRecompAndroid 0.2.x (versionCode N)` na primeira linha.
+
 **Esperando log ou resposta:** #22 (vídeo da torre no Adreno 840), #24/#30 (8s Gen 4), #23 (RP Nova T26), #41
 (build de teste com `uclamp.min`), #68 (S23 a 5-10 fps), #64 (build no Mali-G57).
 
@@ -1128,6 +1166,9 @@ Pedidos ainda não começados, o mais recente no fim.
     morta dos analógicos do controle (Configurações > Controles, 0-40%);
   - campo de visão: precisa de um patch no código do jogo em cada versão (achar o valor da câmera);
   - um botão 60/30 nos controles de toque: um controle novo no layout editável.
+- **Espanhol da América Latina e francês do Canadá** (#128, 2026-10-30): o jogo já tem os dois (`Bootup_USes.pack` /
+  `es-419`, `Bootup_USfr.pack` / `fr-CA`); faltam as opções em Idioma (settings.c g_language_codes/names, as traduções
+  dos nomes) e o Auto mapear o país do celular. Pequeno.
 
 ## Regras
 
