@@ -110,6 +110,7 @@ typedef struct {
     uint64_t callback, callback_data;
     bool recording;
     uint64_t guest;  // the guest NVNcommandBuffer*
+    uint64_t shadow_page, shadow_mem;  // (cmdbuf.c write_at) the shadow page its records last went to: no lookup per record
 } NvnCmdBuf;
 
 // One recorded command: header, the call's integer and float arguments, then copied data.

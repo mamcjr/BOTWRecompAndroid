@@ -75,8 +75,12 @@ static uint64_t shadow_at(uint64_t guest) {
 }
 
 // The chunk records go to: cb->gmem (guest address; 0: host memory at cb->mem), cb->size and cb->used in game bytes.
-static uint64_t write_at(const NvnCmdBuf *cb) {
-    return cb->gmem ? shadow_at(cb->gmem + cb->used) : cb->mem + cb->used * SHADOW_K;
+// (the page last written kept in the command buffer: a page's shadow never moves, so it can't go stale)
+static uint64_t write_at(NvnCmdBuf *cb) {
+    if (!cb->gmem) return cb->mem + cb->used * SHADOW_K;
+    uint64_t guest = cb->gmem + cb->used, page = guest / SHADOW_PAGE + 1;
+    if (page != cb->shadow_page) cb->shadow_mem = shadow_at(guest - guest % SHADOW_PAGE), cb->shadow_page = page;
+    return cb->shadow_mem + guest % SHADOW_PAGE * SHADOW_K;
 }
 
 // The list being recorded goes on at `to` (a jump to it).
