@@ -563,6 +563,21 @@ JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nati
     g_ds.thermal = thermal;
     g_ds.headroom = headroom;
     pthread_mutex_unlock(&g_ds_lock);
+    // LARECOMP_LOG_POWER=1 (a test, on battery only: on the charger the current is the charger's): the power draw each
+    // second with the CPU clusters' clocks, this process's CPU share and the A/B side (LARECOMP_AB)
+    static int log_power = -1;
+    if (log_power < 0) log_power = getenv("LARECOMP_LOG_POWER") != NULL;
+    if (log_power) {
+        extern int vk_ab(const char *what);
+        extern uint64_t renderer_present_count(void);
+        PlatDeviceStats s;
+        plat_device_stats(&s);
+        char mhz[64] = {0};
+        for (int i = 0, n = 0; i < s.ncluster && n < (int)sizeof mhz - 8; i++)
+            n += snprintf(mhz + n, sizeof mhz - n, "%s%u", i ? "/" : "", s.cluster_mhz[i]);
+        LOG("[power] %.2f W battery %.1f C soc %.1f C cpu %.0f%% mhz %s thermal %d headroom %.2f frame %llu ab %d\n", watts,
+            batt_temp_c, s.soc_temp_c, s.cpu_pct, mhz, thermal, headroom, (unsigned long long)renderer_present_count(), vk_ab(NULL));
+    }
 }
 
 static uint64_t read_u64(const char *path) {
