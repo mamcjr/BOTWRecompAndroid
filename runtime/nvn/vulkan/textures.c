@@ -811,7 +811,16 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     if (!t->addr || t->target == 10) return;
     uint64_t frame = vk_frame_counter();
     if (b->uploaded && b->checked_frame == frame) return;
-    if (b->uploaded && !b->dynamic && ((frame + ((uintptr_t)b >> 6)) & 7)) return;
+    // A texture that never changed since its upload is checked every 8th frame - but a linear one (flag 0x40 / 0x10)
+    // every frame: BOTW fills its terrain height tiles (256x256 R16, 64x64, linear) on the CPU and draws them into the
+    // terrain's arrays (512x512x8 RGBA8) right away, once. Read up to 7 frames late, an array layer was built from the
+    // tile's old contents and kept them: the stretched "curtains" after a fast travel or a tower, until the save was
+    // loaded again (2026-11-01, POCO, 1.9.0: in two sessions of fast travels none with every frame, and the first ones
+    // back at once with every 8th; a bisection over the GPU-drawn textures had pointed at that array). There are few
+    // linear textures, and page tracking makes most checks free. LARECOMP_LIN_STAGGER=1: every 8th frame, as before.
+    static int lin_every = -1;
+    if (lin_every < 0) lin_every = !getenv("LARECOMP_LIN_STAGGER");
+    if (b->uploaded && !b->dynamic && !(lin_every && (t->flags & 0x50)) && ((frame + ((uintptr_t)b >> 6)) & 7)) return;
     const FormatInfo *fi = t->layout.fmt;
     if (!fi || !fi->bpb) return;
     VkFmt mf = fmt_of(t->format);
