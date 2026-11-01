@@ -165,22 +165,45 @@ static bool format_supports(VkFormat f, VkFormatFeatureFlags want) {
 
 #ifdef __ANDROID__
 // BC textures on a GPU without BC (Mali, and others outside Adreno): decoded on the CPU at upload (bcdec, MIT /
-// Unlicense) into the smallest plain format that holds them - BC4 R8, BC5 RG8 (2x the size), BC1/2/3/7 RGBA8 (4-8x),
-// BC6H RGBA16F. They used to become RGBA8 images left unwritten: colored 4x4 garbage on every BC texture (a
-// Mali-G615, 2026-10-17).
+// Unlicense) into the smallest plain format that holds them - BC4 R8, BC5 RG8 (2x the size), BC2/3/7 RGBA8 (4x),
+// BC6H RGBA16F - and BC1 into ASTC 4x4 where the GPU has it (bc1_astc), else RGBA8 (8x). They used to become RGBA8
+// images left unwritten: colored 4x4 garbage on every BC texture (a Mali-G615, 2026-10-17).
 #define BCDEC_STATIC
 #define BCDEC_IMPLEMENTATION
 #define BCDEC_BC4BC5_PRECISE  // (signed BC4 / BC5: the game's normal maps)
 #include "../bcdec.h"
+#include "../bc1_astc.h"
 
+// BC1 (most of BOTW's textures: ~150 MB of them around a village, ~1.1 GB as RGBA8 - the Mali phones' "low memory"
+// kills and 1-5 fps after a few minutes, #143 #155 #162) into ASTC 4x4 instead where the GPU samples it (every Mali):
+// the same block, 2x BC1's size, the colours within a step or two (bc1_astc.c). LARECOMP_BC1_ASTC=0: RGBA8 as before.
+static bool bc1_astc(void) {
+    static int ok = -1;
+    if (ok < 0) {
+        const char *e = getenv("LARECOMP_BC1_ASTC");
+        VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+        ok = (!e || atoi(e)) && format_supports(VK_FORMAT_ASTC_4x4_UNORM_BLOCK, need) &&
+             format_supports(VK_FORMAT_ASTC_4x4_SRGB_BLOCK, need);
+        if (ok) LOG("[vk] BC1 textures as ASTC 4x4\n");
+    }
+    return ok;
+}
+
+// The format a BC texture is decoded into without BC; *bpp: its bytes per texel (0: ASTC 4x4 blocks - bc1_to_astc)
 static VkFormat bc_target(VkFormat bc, uint32_t *bpp) {
     switch (bc) {
+    case VK_FORMAT_BC1_RGB_UNORM_BLOCK: case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+        if (bc1_astc()) { *bpp = 0; return VK_FORMAT_ASTC_4x4_UNORM_BLOCK; }
+        *bpp = 4; return VK_FORMAT_R8G8B8A8_UNORM;
+    case VK_FORMAT_BC1_RGB_SRGB_BLOCK: case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+        if (bc1_astc()) { *bpp = 0; return VK_FORMAT_ASTC_4x4_SRGB_BLOCK; }
+        *bpp = 4; return VK_FORMAT_R8G8B8A8_SRGB;
     case VK_FORMAT_BC4_UNORM_BLOCK: *bpp = 1; return VK_FORMAT_R8_UNORM;
     case VK_FORMAT_BC4_SNORM_BLOCK: *bpp = 1; return VK_FORMAT_R8_SNORM;
     case VK_FORMAT_BC5_UNORM_BLOCK: *bpp = 2; return VK_FORMAT_R8G8_UNORM;
     case VK_FORMAT_BC5_SNORM_BLOCK: *bpp = 2; return VK_FORMAT_R8G8_SNORM;
     case VK_FORMAT_BC6H_UFLOAT_BLOCK: case VK_FORMAT_BC6H_SFLOAT_BLOCK: *bpp = 8; return VK_FORMAT_R16G16B16A16_SFLOAT;
-    case VK_FORMAT_BC1_RGB_SRGB_BLOCK: case VK_FORMAT_BC1_RGBA_SRGB_BLOCK: case VK_FORMAT_BC2_SRGB_BLOCK:
+    case VK_FORMAT_BC2_SRGB_BLOCK:
     case VK_FORMAT_BC3_SRGB_BLOCK: case VK_FORMAT_BC7_SRGB_BLOCK: *bpp = 4; return VK_FORMAT_R8G8B8A8_SRGB;
     default: *bpp = 4; return VK_FORMAT_R8G8B8A8_UNORM;
     }
@@ -914,16 +937,18 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 if (linear) for (uint32_t y = 0; y < l.hb; y++) memcpy(blocks + (uint64_t)y * l.wb * bsize, src + (uint64_t)y * LIN_STRIDE(l.wb * bsize), l.wb * bsize);
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, bsize, l.block_height_log2, l.block_depth_log2);
                 if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, blocks, l.w, l.h, l.wb * bsize);
-                VkSpan s = vk_transient((uint64_t)l.wb * 4 * l.hb * 4 * bpp, 16);
+                uint64_t out_size = bpp ? (uint64_t)l.wb * 4 * l.hb * 4 * bpp : (uint64_t)l.wb * l.hb * 16;
+                VkSpan s = vk_transient(out_size, 16);
                 uint64_t decode_start = texture_trace_on() ? SDL_GetTicksNS() : 0;
-                bc_decode(b->bc_vf, blocks, l.wb, l.hb, bsize, s.ptr, bpp);
+                if (bpp) bc_decode(b->bc_vf, blocks, l.wb, l.hb, bsize, s.ptr, bpp);
+                else bc1_to_astc(blocks, s.ptr, (uint64_t)l.wb * l.hb);
                 uint64_t decode_ns = decode_start ? SDL_GetTicksNS() - decode_start : 0;
                 VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = l.wb * 4, .bufferImageHeight = l.hb * 4,
                                         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, layer, 1},
                                         .imageExtent = {l.w < level_w(b, lv) ? l.w : level_w(b, lv), l.h < level_h(b, lv) ? l.h : level_h(b, lv), 1}};
                 vk_dl_note_upload((void *)b->image, rg.imageExtent.width, rg.imageExtent.height, rg.imageSubresource.mipLevel);
                 vkCmdCopyBufferToImage(cb, s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
-                texture_trace_record(TEX_TRACE_BC, (uint64_t)l.wb * l.hb * bsize, (uint64_t)l.wb * 4 * l.hb * 4 * bpp, decode_ns);
+                texture_trace_record(TEX_TRACE_BC, (uint64_t)l.wb * l.hb * bsize, out_size, decode_ns);
                 continue;
             }
 #endif
