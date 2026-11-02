@@ -50,7 +50,7 @@ uint64_t vk_async_frame_cpu_ns(void) { return __atomic_load_n(&last_frame_cpu, _
 void kernel_blocking_begin(void);        // kernel.c: core 0 to the game's other threads while a guest thread waits here
 void kernel_blocking_end(void);
 void vk_execute_now(uint64_t handle);    // exec.c: translate and submit a command list
-void vk_present_now(NvnTexture *t);      // device.c: the window's half of backend_present
+void vk_present_now(NvnTexture *t, uint64_t asked);  // device.c: the window's half of backend_present
 void nvn_sync_set_seq(uint64_t guest, uint64_t seq);
 uint64_t renderer_fence_seq(void);
 
@@ -91,7 +91,7 @@ static void *render_main(void *arg) {
         extern void vk_tl(const char *what, uint64_t a, uint64_t b);  // (exec.c: LARECOMP_FRAME_TIMELINE)
         vk_tl(r.type == REQ_EXEC ? "render: list start" : r.type == REQ_PRESENT ? "render: present start" : "render: fence", r.id, 0);
         if (r.type == REQ_EXEC) { vk_execute_now(r.a); free(r.p); }  // (r.p: the list copy, vk_async_execute)
-        else if (r.type == REQ_PRESENT) vk_present_now((NvnTexture *)r.p);
+        else if (r.type == REQ_PRESENT) vk_present_now((NvnTexture *)r.p, r.a);
         if (r.type != REQ_FENCE) vk_tl(r.type == REQ_EXEC ? "render: list end" : "render: present end", r.id, 0);
         else if (r.type == REQ_FENCE) nvn_sync_set_seq(r.a, renderer_fence_seq());
         uint64_t elapsed = plat_now_ns() - t0;
@@ -226,7 +226,7 @@ void vk_async_execute(uint64_t handle) {
 
 void vk_async_present(NvnTexture *t) {
     pthread_mutex_lock(&p_lock);
-    push(REQ_PRESENT, 0, t);
+    push(REQ_PRESENT, plat_now_ns(), t);  // (a: when the game handed it over: device.c vsync_update)
     pthread_mutex_unlock(&p_lock);
 }
 
