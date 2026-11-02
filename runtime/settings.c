@@ -236,10 +236,10 @@ void settings_load(void) {
         char key[64];
 #ifdef __ANDROID__
         char val[512] = "";  // (a key with nothing after "=": mods_off when every mod is on)
-        if (sscanf(line, " %63[^= ] = %511[^\n]", key, val) < 1) continue;
+        if (sscanf(line, " %63[^= ] = %511[^\r\n]", key, val) < 1) continue; val[strcspn(val, "\r\n")] = 0;
 #else
         char val[128] = "";
-        if (sscanf(line, " %63[^= ] = %127[^\n]", key, val) < 1) continue;
+        if (sscanf(line, " %63[^= ] = %127[^\r\n]", key, val) < 1) continue; val[strcspn(val, "\r\n")] = 0;
 #endif
         if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "original") ? ASPECT_ORIGINAL : ASPECT_UNLOCKED;
         else if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
