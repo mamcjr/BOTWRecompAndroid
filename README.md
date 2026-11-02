@@ -51,6 +51,29 @@ Windows, Linux or macOS may still be used as development hosts with the Android 
 > `romfs`). The app does not open NSP/XCI files or use `prod.keys`. Instructions on obtaining game files are not
 > provided.
 
+## Touch Controls Overhaul
+
+Since **0.2.12-beta**, the touch controls show what each button does while you play in the world, with the game's own
+icons read from your game files. The game's menus keep the classic buttons.
+
+![Touch controls in the world](docs/images/touch-controls-overhaul.jpg)
+
+- **Your gear on the buttons:** attack, the bow and the shield show what you have equipped, and power shows the selected
+  rune (1.6.0, 1.8.2 and 1.9.0).
+- **Rune fan:** tap power to use the rune; hold it to open a fan of your runes and let go over the one you want.
+- **Gestures:**
+  - **Bow and throw:** hold and drag the same finger to aim.
+  - **Camera:** drag anywhere on the right half.
+  - **Weapon and shield pickers:** hold, then choose with a second finger.
+  - **Shield surfing:** double-tap the shield and hold.
+- **Minimap at the top:** while the touch controls are on screen, the minimap, time, temperature and sensor move to the
+  top right corner. With a controller they stay in their usual place. Tap the minimap to open the map; the Sheikah Slate
+  button opens the scope.
+- **Your own layout:** in **Controls**, edit the action layout or the classic one. Drag the buttons, and select one to
+  make it bigger or smaller with **−** and **+**.
+
+![Rune fan](docs/images/touch-controls-overhaul-runes.jpg)
+
 ## Installing (beta)
 
 1. Download the APK from [Releases](https://github.com/mamcjr/BOTWRecompAndroid/releases) and install it (Android 11+,

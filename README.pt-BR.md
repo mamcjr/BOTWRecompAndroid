@@ -53,6 +53,30 @@ Windows, Linux e macOS podem continuar sendo usados como ambientes de desenvolvi
 > e extraídos (`exefs` e `romfs`). O app não abre NSP/XCI nem usa `prod.keys`. Não serão dadas instruções de como
 > obter os arquivos.
 
+## Touch Controls Overhaul
+
+Desde a **0.2.12-beta**, enquanto você joga no mundo, os controles de toque mostram o que cada botão faz, com os
+ícones do próprio jogo lidos dos seus arquivos. Os menus do jogo continuam com os botões clássicos.
+
+![Controles de toque no mundo](docs/images/touch-controls-overhaul.jpg)
+
+- **Seu equipamento nos botões:** o ataque, o arco e o escudo mostram o que está equipado, e o poder mostra a runa
+  selecionada (1.6.0, 1.8.2 e 1.9.0).
+- **Leque de runas:** toque no poder para usar a runa; segure para abrir um leque com as suas runas e solte sobre a que
+  quiser.
+- **Gestos:**
+  - **Arco e arremessar:** segure e arraste o mesmo dedo para mirar.
+  - **Câmera:** arraste em qualquer ponto da metade direita.
+  - **Troca de arma e de escudo:** segure e escolha com um segundo dedo.
+  - **Surf com escudo:** toque duas vezes no escudo e segure.
+- **Minimapa no alto:** com os controles de toque na tela, o minimapa, a hora, a temperatura e o sensor vão para o
+  canto superior direito. Com um controle, ficam no lugar de sempre. Toque no minimapa para abrir o mapa; o botão da
+  Sheikah Slate abre a luneta.
+- **Seu próprio layout:** em **Controles**, edite o layout de ação ou o clássico. Arraste os botões, e selecione um
+  para aumentá-lo ou diminuí-lo com **−** e **+**.
+
+![Leque de runas](docs/images/touch-controls-overhaul-runes.jpg)
+
 ## Instalando (beta)
 
 1. Baixe o APK em [Releases](https://github.com/mamcjr/BOTWRecompAndroid/releases) e instale (Android 11+, ARM64 e
