@@ -70,7 +70,7 @@ static const struct { int bit; float x, y, r; } IC[I_N] = {
     {TB_Y, 0.83f, 0.70f, 0.11f},         // attack: the largest
     {TB_L, 0.83f, 0.4781f, 0.0624f},     // power: L on a tap; held, the rune fan
     {TB_ZL, 0.94f, 0.635f, 0.052f},      // shield up / lock on
-    {TB_ZR, 0.72f, 0.635f, 0.07f},       // bow: held, the same finger's drag aims
+    {TB_ZR, 0.72f, 0.635f, 0.07f},       // bow: held, the same finger's drag aims (the phone with motion controls on)
     {TB_X, 0.72f, 0.80f, 0.05f},         // jump
     {TB_B, 0.83f, 0.875f, 0.05f},        // sprint
     {TB_A, 0.94f, 0.80f, 0.05f},         // interact (talk, pick up, open)
@@ -411,7 +411,8 @@ static void recompute(void) {  // (t_lock held; also once a frame: the power's h
             continue;
         }
         if (IC[k].bit >= 0 && IC[k].bit < 16) b |= 1ull << IC[k].bit;
-        if (k == I_BOW || k == I_R || k == I_WEAPON || k == I_SHIELD) aim = i;
+        if (k == I_WEAPON || k == I_SHIELD) aim = i;
+        if ((k == I_BOW || k == I_R) && !g_settings.motion) aim = i;  // (with motion controls on, the phone aims)
     }
     if (surf_a_at && now >= surf_a_at) pulse_until[TB_A] = now + PULSE_MS, surf_a_at = 0;  // (shield surfing: A in the air)
     for (int i = 0; i < 16; i++) if (pulse_until[i] > now) b |= 1ull << i;
