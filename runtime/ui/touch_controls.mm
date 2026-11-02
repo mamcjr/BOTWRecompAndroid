@@ -431,7 +431,9 @@ static void recompute(void) {  // (t_lock held; also once a frame: the power's h
     else if (aim >= 0 && !stick[1].on) ox = fingers[aim].x - fingers[aim].sx, oy = fingers[aim].y - fingers[aim].sy;
     else aim = -1;
     if (aim >= 0) {  // the drag from where the finger landed: full at 70% of a stick's radius, past a small dead zone
-        float R = stick_radius() * 0.7f, dx = ox / R, dy = oy / R;
+        // (the bow and a throw: full at 1.3 stick radii, over touch_aim_sens - 0.7 turned the aim too fast; the pickers: 0.7)
+        float sens = g_settings.touch_aim_sens > 0.1f ? g_settings.touch_aim_sens : 1.0f;
+        float R = stick_radius() * (picker ? 0.7f : 1.3f / sens), dx = ox / R, dy = oy / R;
         float m = sqrtf(dx * dx + dy * dy), k = m < 0.1f ? 0 : fminf(1, (m - 0.1f) / 0.9f) / m;
         g_touch_rx = (int32_t)(dx * k * 32767), g_touch_ry = (int32_t)(-dy * k * 32767);
         aiming = true;

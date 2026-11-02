@@ -626,3 +626,5 @@
  "Editar o layout clássico"},
 {"While editing, touch a button to select it, then - and + change its own size.",
  "Na edição, toque num botão para selecioná-lo; depois - e + mudam o tamanho só dele."},
+{"Aim sensitivity (bow, throw)",
+ "Sensibilidade da mira (arco, arremesso)"},

@@ -625,3 +625,5 @@
  "Editar el diseño clásico"},
 {"While editing, touch a button to select it, then - and + change its own size.",
  "Al editar, toca un botón para seleccionarlo; luego - y + cambian solo su tamaño."},
+{"Aim sensitivity (bow, throw)",
+ "Sensibilidad de la puntería (arco, lanzar)"},

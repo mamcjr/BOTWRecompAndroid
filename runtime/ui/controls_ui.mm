@@ -88,6 +88,13 @@ static void touch_layout_draw(void) {
     if (ImGui::Checkbox(tr("Action icons in the world"), &icons)) g_settings.touch_scheme = icons ? 1 : 0, settings_save();
     hint("While playing in the world, buttons drawn as what they do (attack, jump, the bow...) instead of A, B, ZR. The "
          "game's menus keep the classic buttons. Edit the layout while playing to move them.");
+    if (icons) {  // (the bow and throw buttons' drag: ui/touch_controls.mm recompute)
+        float as = (g_settings.touch_aim_sens > 0.1f ? g_settings.touch_aim_sens : 1.0f) * 100;
+        ImGui::TextUnformatted(tr("Aim sensitivity (bow, throw)"));
+        ImGui::SetNextItemWidth(-1);
+        if (ImGui::SliderFloat("##AimSens", &as, 25, 200, "%.0f%%")) g_settings.touch_aim_sens = as / 100;
+        if (ImGui::IsItemDeactivatedAfterEdit()) settings_save();
+    }
     ImGui::Spacing();
     if (ImGui::Checkbox(tr("Camera by dragging"), &g_settings.touch_drag_camera)) settings_save();
     hint("The camera turns while a finger moves on the right half of the screen and stops when it stops, as in phone "
