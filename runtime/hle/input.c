@@ -81,8 +81,10 @@ static void recompute_pad(void) {
         for (int i = 0; i < 4; i++) if (abs(v[i]) > abs(ax[i])) ax[i] = v[i];
     }
     // Settings > Controls' dead zone: each stick's position inside it is centre, and past it the travel is stretched
-    // back to full (round: a diagonal keeps its angle), so a worn stick's drift doesn't walk Link or turn the camera
-    float dz = g_settings.stick_deadzone;
+    // back to full (round: a diagonal keeps its angle), so a worn stick's drift doesn't walk Link or turn the camera.
+    // Never under 8%, as the Switch's own sticks report a centred one as exactly 0: a stick resting a step off centre
+    // (GameSir X4: 128 of 0-255) read as a held right stick, and the game turned the motion aim off (#149 #175 #78)
+    float dz = fmaxf(g_settings.stick_deadzone, 0.08f);
     for (int s = 0; dz > 0 && s < 2; s++) {
         float x = ax[2 * s] / 32767.0f, y = ax[2 * s + 1] / 32767.0f, m = sqrtf(x * x + y * y);
         float k = m <= dz ? 0 : fminf((m - dz) / (1 - dz), 1) / m;
