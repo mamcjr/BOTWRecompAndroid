@@ -41,6 +41,9 @@ Settings g_settings = {
     .overlay_pos = {-1, -1},
     .touch_pos = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
                   {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}},
+    .touch_scheme = 1,
+    .touch_pos2 = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
+                   {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}},
     .touch_scale = 1.0f,
     .touch_opacity = 1.0f,
     .touch_drag_sens = 1.0f,
@@ -280,6 +283,14 @@ void settings_load(void) {
                 while (*q == ',' || *q == ' ') q++;
             }
         }
+        else if (!strcmp(key, "touch_scheme")) g_settings.touch_scheme = atoi(val);
+        else if (!strcmp(key, "touch_icons_layout")) {  // (the icon layout's: as touch_layout)
+            char *q = val;
+            for (int i = 0; i < TOUCH_NCTL2 * 2 && *q; i++) {
+                g_settings.touch_pos2[i / 2][i % 2] = strtof(q, &q);
+                while (*q == ',' || *q == ' ') q++;
+            }
+        }
 #endif
         else if (!strcmp(key, "resolution")) {
             int n = atoi(val);
@@ -355,6 +366,9 @@ void settings_save(void) {
     fprintf(f, "touch_scale = %.2f\ntouch_opacity = %.2f\ntouch_layout = ", g_settings.touch_scale, g_settings.touch_opacity);
     for (int i = 0; i < TOUCH_NCTL; i++)
         fprintf(f, "%s%.4f,%.4f", i ? "," : "", g_settings.touch_pos[i][0], g_settings.touch_pos[i][1]);
+    fprintf(f, "\ntouch_scheme = %d\ntouch_icons_layout = ", g_settings.touch_scheme);
+    for (int i = 0; i < TOUCH_NCTL2; i++)
+        fprintf(f, "%s%.4f,%.4f", i ? "," : "", g_settings.touch_pos2[i][0], g_settings.touch_pos2[i][1]);
     fprintf(f, "\n");
 #endif
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" :

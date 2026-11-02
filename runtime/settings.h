@@ -58,6 +58,11 @@ typedef struct {
     char gpu_model[64];   // the GPU of the last start ("Adreno (TM) 830v1"): turnip_lrz's Automatic, before the driver
 #define TOUCH_NCTL 19  // (ui/touch_controls.mm: LAS's 12, then the right stick, L3 / R3 and the d-pad)
     float touch_pos[TOUCH_NCTL][2];  // each on-screen control's place, a share of the screen (negative: default)
+    // The icon layout (ui/touch_controls.mm), in the world only - the classic one above stays in the game's menus:
+    // touch_scheme 1 (0: the classic one everywhere), its controls' places of their own
+#define TOUCH_NCTL2 17
+    int touch_scheme;
+    float touch_pos2[TOUCH_NCTL2][2];
     float touch_scale, touch_opacity;
     // FPS-style touch play (ui/touch_controls.mm): the camera by dragging a finger (its speed tilts the right stick)
     // instead of holding a stick, at touch_drag_sens; the sticks drawn only while a finger holds them; each stick's

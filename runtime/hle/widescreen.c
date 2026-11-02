@@ -129,6 +129,10 @@ bool widescreen_in_menu(void) {
     return last && now < last + 30;
 }
 
+// Playing in the world: not the title or a loading screen, no menu of the game's up (pause, map) - the touch controls'
+// icon layout (ui/touch_controls.mm); the classic one stays in the menus
+bool widescreen_world_play(void) { return in_world() && !widescreen_in_menu(); }
+
 float widescreen_hud_shift(float x) {
     if (!widescreen_ui_centred() || widescreen_in_menu() || !in_world()) return 0;
     float ax = x < 0 ? -x : x, t = (ax - 180.0f) / (260.0f - 180.0f);

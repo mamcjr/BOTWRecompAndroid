@@ -459,6 +459,25 @@ const char *romfs_file_at(uint64_t off) {
     return NULL;
 }
 
+// A file of the game's RomFS (its path as the index has it: "UI/StockItem/Weapon_Sword_070.sbitemico"), whole, in a
+// malloc'd buffer - mods included. For the app's own use (ui/touch_icons.mm: the touch controls' item icons). NULL
+// until the game has opened its RomFS, or when the path isn't there.
+uint8_t *fs_romfs_read(const char *path, size_t *size) {
+    if (romfs_fd == -1) return NULL;
+    RomImage *was = R;
+    R = &img_game;
+    uint8_t *out = NULL;
+    for (int i = 0; i < rom_nfiles; i++) {
+        if (strcmp(rom_files[i].path, path)) continue;
+        out = malloc(rom_files[i].size ? rom_files[i].size : 1);
+        if (romfs_read(romfs_fd, out, rom_files[i].size, rom_files[i].off) != (ssize_t)rom_files[i].size) free(out), out = NULL;
+        else *size = rom_files[i].size;
+        break;
+    }
+    R = was;
+    return out;
+}
+
 // ------------------------------------------------------------------ IStorage (raw RomFS image)
 typedef struct { int fd; uint64_t size; bool plain; RomImage *img; } Storage;  // plain: no mod overlay; img: the game's or the DLC's
 

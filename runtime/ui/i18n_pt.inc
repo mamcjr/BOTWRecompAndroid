@@ -616,3 +616,7 @@
  "Francês (Canadá)"},
 {"A mod for the DLC is on, but the DLC isn't set up (Settings > Files > DLC). Mods made with it, like Relics of the Past, close the game at the title screen without it.",
  "Um mod para a DLC está ligado, mas a DLC não está configurada (Configurações > Arquivos > DLC). Mods feitos com ela, como o Relics of the Past, fecham o jogo na tela de título sem ela."},
+{"Action icons in the world",
+ "Ícones de ação no mundo"},
+{"While playing in the world, buttons drawn as what they do (attack, jump, the bow...) instead of A, B, ZR. The game's menus keep the classic buttons. Edit the layout while playing to move them.",
+ "Enquanto você joga no mundo, os botões aparecem como o que fazem (atacar, pular, o arco...) em vez de A, B, ZR. Os menus do jogo continuam com os botões clássicos. Edite o layout durante o jogo para movê-los."},

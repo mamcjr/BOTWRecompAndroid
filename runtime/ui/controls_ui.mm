@@ -55,6 +55,7 @@ static void touch_layout_draw(void) {
     ImGui::EndDisabled();
     bool def = true;
     for (int i = 0; i < TOUCH_NCTL; i++) def &= g_settings.touch_pos[i][0] < 0;
+    for (int i = 0; i < TOUCH_NCTL2; i++) def &= g_settings.touch_pos2[i][0] < 0;
     ImGui::BeginDisabled(def);
     if (ImGui::Button(tr("Reset layout to defaults"), ImVec2(-1, 0))) touch_layout_reset();
     ImGui::EndDisabled();
@@ -76,6 +77,11 @@ static void touch_layout_draw(void) {
         ImGui::TextDisabled("%s", tr(s));
         ImGui::PopTextWrapPos();
     };
+    ImGui::Spacing();
+    bool icons = g_settings.touch_scheme == 1;
+    if (ImGui::Checkbox(tr("Action icons in the world"), &icons)) g_settings.touch_scheme = icons ? 1 : 0, settings_save();
+    hint("While playing in the world, buttons drawn as what they do (attack, jump, the bow...) instead of A, B, ZR. The "
+         "game's menus keep the classic buttons. Edit the layout while playing to move them.");
     ImGui::Spacing();
     if (ImGui::Checkbox(tr("Camera by dragging"), &g_settings.touch_drag_camera)) settings_save();
     hint("The camera turns while a finger moves on the right half of the screen and stops when it stops, as in phone "
