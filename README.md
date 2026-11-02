@@ -62,7 +62,7 @@ icons read from your game files. The game's menus keep the classic buttons.
   rune (1.6.0, 1.8.2 and 1.9.0).
 - **Rune fan:** tap power to use the rune; hold it to open a fan of your runes and let go over the one you want.
 - **Gestures:**
-  - **Bow and throw:** hold and drag the same finger to aim (with motion controls on, move the phone instead).
+  - **Bow and throw:** hold and drag the same finger to aim (with motion controls on, move the phone instead); its sensitivity is in Controls.
   - **Camera:** drag anywhere on the right half.
   - **Weapon and shield pickers:** hold, then choose with a second finger.
   - **Shield surfing:** double-tap the shield and hold.

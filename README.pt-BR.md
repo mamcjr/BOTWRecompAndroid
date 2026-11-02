@@ -65,7 +65,7 @@ Desde a **0.2.12-beta**, enquanto você joga no mundo, os controles de toque mos
 - **Leque de runas:** toque no poder para usar a runa; segure para abrir um leque com as suas runas e solte sobre a que
   quiser.
 - **Gestos:**
-  - **Arco e arremessar:** segure e arraste o mesmo dedo para mirar (com o controle por movimento ligado, mova o celular).
+  - **Arco e arremessar:** segure e arraste o mesmo dedo para mirar (com o controle por movimento ligado, mova o celular); a sensibilidade fica em Controles.
   - **Câmera:** arraste em qualquer ponto da metade direita.
   - **Troca de arma e de escudo:** segure e escolha com um segundo dedo.
   - **Surf com escudo:** toque duas vezes no escudo e segure.
