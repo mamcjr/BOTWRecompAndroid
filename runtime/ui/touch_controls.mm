@@ -360,7 +360,9 @@ static void icon_release(int f, bool cancelled) {  // (t_lock held)
     uint64_t now = SDL_GetTicks();
     if (k == I_POWER) { if (!fingers[f].wheel && !cancelled) pulse_until[TB_L] = now + PULSE_MS; }
     else if (IC[k].bit >= 0 && IC[k].bit < 16 && now - fingers[f].t0 < PULSE_MS) pulse_until[IC[k].bit] = fingers[f].t0 + PULSE_MS;
-    if (k == I_WEAPON || k == I_SHIELD || (k == I_POWER && fingers[f].wheel)) keep_icons_until = now + 1000;  // (mode_check)
+    // (mode_check: the icon layout stays until the game is back in the world - at most 5 s - unless a real menu follows)
+    if (k == I_WEAPON || k == I_SHIELD || (k == I_POWER && fingers[f].wheel)) keep_icons_until = now + 5000;
+    if (k == I_INVENTORY || k == I_SLATE) keep_icons_until = 0;
 }
 
 static void release_all(void) {
@@ -376,7 +378,7 @@ static void release_all(void) {
 
 // The layout in use changes (into the world, into a menu): nothing held over from the other one. But the game's
 // pickers held open from the icon layout (weapon, shield, the rune wheel) count as its menus: the icon layout stays
-// while a finger is on one of its controls, and a second after a picker's is lifted (the game closing it)
+// while a finger is on one of its controls, and after a picker's is lifted until the game is back in the world (icon_release)
 static void mode_check(void) {
     bool m = icons_wanted();
     if (icons_on && !m && !editing) {
@@ -386,6 +388,7 @@ static void mode_check(void) {
         pthread_mutex_unlock(&t_lock);
         if (held || SDL_GetTicks() < keep_icons_until) return;
     }
+    if (m) keep_icons_until = 0;  // (back in the world: the picker has closed)
     if (m != icons_on) release_all(), icons_on = m;
 }
 
@@ -632,6 +635,42 @@ static bool bntx_rgba(const std::vector<uint8_t> &f, std::vector<uint8_t> &px, u
     return true;
 }
 
+static ImTextureID decode_item_icon(const char *item) {  // (UI/StockItem/<item>.sbitemico; 0: not there, not decoded)
+    char path[128];
+    snprintf(path, sizeof path, "UI/StockItem/%s.sbitemico", item);
+    size_t n = 0;
+    uint8_t *raw = fs_romfs_read(path, &n);
+    if (!raw) return 0;
+    std::vector<uint8_t> f = yaz0(raw, n), px;
+    free(raw);
+    uint32_t w, h;
+    return bntx_rgba(f, px, &w, &h) ? (ImTextureID)vk_imgui_texture_rgba(px.data(), (int)w, (int)h) : 0;
+}
+
+// The equipped weapon, bow and shield (hle/pouch.c), by actor name - their icons read once each and kept (a DLC item,
+// in the DLC's own files: none, the fixed icon stays)
+extern "C" bool pouch_equipped(char out[3][64]);
+static char equipped[3][64];
+static ImTextureID item_icon(const char *item) {
+    static struct { char name[64]; ImTextureID tex; } cache[64];
+    static int n;
+    if (!item[0]) return 0;
+    for (int i = 0; i < n; i++) if (!strcmp(cache[i].name, item)) return cache[i].tex;
+    ImTextureID t = decode_item_icon(item);
+    if (n < 64) snprintf(cache[n].name, sizeof cache[n].name, "%s", item), cache[n++].tex = t;
+    return t;
+}
+static void poll_equipped(void) {  // twice a second
+    static uint64_t last;
+    uint64_t now = SDL_GetTicks();
+    if (now - last < 500) return;
+    last = now;
+    char e[3][64] = {};
+    if (!pouch_equipped(e) || !memcmp(e, equipped, sizeof e)) return;
+    memcpy(equipped, e, sizeof equipped);
+    fprintf(stderr, "[touch] equipped: %s, %s, %s\n", e[0][0] ? e[0] : "-", e[1][0] ? e[1] : "-", e[2][0] ? e[2] : "-");
+}
+
 static void load_icon_art(void) {
     static bool act_tried;
     if (!act_tried) {
@@ -649,16 +688,8 @@ static void load_icon_art(void) {
     last_ms = now, tries++;
     for (int i = 0; i < GI_N; i++) {
         if (gi_tex[i]) continue;
-        char path[128];
-        snprintf(path, sizeof path, "UI/StockItem/%s.sbitemico", gi_item[i]);
-        size_t n = 0;
-        uint8_t *raw = fs_romfs_read(path, &n);
-        if (!raw) continue;
-        std::vector<uint8_t> f = yaz0(raw, n), px;
-        free(raw);
-        uint32_t w, h;
-        if (bntx_rgba(f, px, &w, &h)) gi_tex[i] = (ImTextureID)vk_imgui_texture_rgba(px.data(), (int)w, (int)h);
-        fprintf(stderr, "[touch] icon %s: %s\n", gi_item[i], gi_tex[i] ? "loaded" : "not decoded");
+        gi_tex[i] = decode_item_icon(gi_item[i]);
+        fprintf(stderr, "[touch] icon %s: %s\n", gi_item[i], gi_tex[i] ? "loaded" : "not there yet");
     }
 }
 
@@ -715,6 +746,7 @@ static void spyglass(ImDrawList *dl, ImVec2 p, float r, ImU32 col) {
 // (icon layout) its controls and the left stick; the right one only while a finger holds it
 static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU32 fill, ImU32 fill_on, ImU32 line, ImU32 text) {
     load_icon_art();
+    poll_equipped();
     uint32_t pressed = 0;  // (the controls a finger is on)
     pthread_mutex_lock(&t_lock);
     for (int i = 0; i < nfingers; i++)
@@ -735,7 +767,12 @@ static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU3
                : k == I_SLATE ? GI_SLATE : k == I_POWER ? GI_BOMB : -1;
         float box = r * (k == I_BOW ? 0.5f : k == I_WEAPON || k == I_SHIELD ? 0.52f : 0.66f);  // (half the picture's side)
         ImVec2 ia(x - box, y - box), ib(x + box, y + box);
+        // (the equipped item's icon where there is one: the weapon picker shows the bow while it's drawn)
+        int eq = k == I_ATTACK || k == I_WEAPON ? (k == I_WEAPON && (pressed >> I_BOW & 1) ? 1 : 0) : k == I_BOW ? 1
+               : k == I_BLOCK || k == I_SHIELD ? 2 : -1;
+        ImTextureID it = eq >= 0 ? item_icon(equipped[eq]) : 0;
         if (act >= 0 && act_tex) dl->AddImage(act_tex, ia, ib, ImVec2(act / (float)ACT_N, 0), ImVec2((act + 1) / (float)ACT_N, 1), img);
+        else if (it) dl->AddImage(it, ia, ib, ImVec2(0, 0), ImVec2(1, 1), img);
         else if (gi >= 0 && gi_tex[gi]) dl->AddImage(gi_tex[gi], ia, ib, ImVec2(0, 0), ImVec2(1, 1), img);
         else if (k == I_SCOPE) spyglass(dl, c, r, text);
         else {  // (no picture: interact and throw, or the game's icons not read yet)
