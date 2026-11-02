@@ -91,8 +91,10 @@ void native_svc_c(Cpu *c, uint32_t imm) { rt_svc(c, imm, c->x[30]); }
 HostFn hle_slot_fn(uint64_t pc);  // dispatch.c
 void native_hle_c(Cpu *c, uint32_t i) {
     rt_unwind_point();
+    kernel_preempt_point();
     HostFn f = hle_slot_fn(HLE_BASE + 16ull * i);
     f(c);
+    kernel_preempt_point();
 }
 
 // ---- the rewriter

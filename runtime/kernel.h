@@ -54,6 +54,8 @@ struct KThread {
 #endif
 };
 
+void kernel_preempt_point(void);
+
 typedef struct KSharedMem {
     KObject obj;
     uint64_t size, guest_addr;  // guest_addr: where the guest mapped it (0 if not mapped)

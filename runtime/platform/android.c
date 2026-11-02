@@ -566,8 +566,9 @@ JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nati
     // LARECOMP_LOG_POWER=1 (a test, on battery only: on the charger the current is the charger's): the power draw each
     // second with the CPU clusters' clocks, this process's CPU share and the A/B side (LARECOMP_AB)
     static int log_power = -1;
+    static int p_tick = 0;
     if (log_power < 0) log_power = getenv("LARECOMP_LOG_POWER") != NULL;
-    if (log_power) {
+    if (log_power || (++p_tick % 10) == 0) {
         extern int vk_ab(const char *what);
         extern uint64_t renderer_present_count(void);
         PlatDeviceStats s;
@@ -575,8 +576,39 @@ JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nati
         char mhz[64] = {0};
         for (int i = 0, n = 0; i < s.ncluster && n < (int)sizeof mhz - 8; i++)
             n += snprintf(mhz + n, sizeof mhz - n, "%s%u", i ? "/" : "", s.cluster_mhz[i]);
-        LOG("[power] %.2f W battery %.1f C soc %.1f C cpu %.0f%% mhz %s thermal %d headroom %.2f frame %llu ab %d\n", watts,
-            batt_temp_c, s.soc_temp_c, s.cpu_pct, mhz, thermal, headroom, (unsigned long long)renderer_present_count(), vk_ab(NULL));
+        unsigned long long swap_used_mb = 0;
+        {
+            FILE *mf = fopen("/proc/meminfo", "re");
+            unsigned long long st = 0, sf = 0;
+            if (mf) {
+                char ml[128];
+                while (fgets(ml, sizeof ml, mf)) {
+                    if (!strncmp(ml, "SwapTotal:", 10)) st = strtoull(ml + 10, NULL, 10);
+                    else if (!strncmp(ml, "SwapFree:", 9)) sf = strtoull(ml + 9, NULL, 10);
+                }
+                fclose(mf);
+            }
+            swap_used_mb = st > sf ? (st - sf) / 1024 : 0;
+        }
+        char psi[32] = "n/a";
+        {
+            FILE *pf = fopen("/proc/pressure/memory", "re");
+            if (pf) {
+                char pl[160];
+                if (fgets(pl, sizeof pl, pf)) {
+                    const char *a = strstr(pl, "avg10=");
+                    if (a) {
+                        snprintf(psi, sizeof psi, "%.10s", a + 6);
+                        char *sp = strchr(psi, ' ');
+                        if (sp) *sp = 0;
+                    }
+                }
+                fclose(pf);
+            }
+        }
+        LOG("[power] %.2f W battery %.1f C soc %.1f C cpu %.0f%% mhz %s thermal %d headroom %.2f frame %llu ab %d | mem avail %u MB rss %u MB swap %llu MB psi10 %s\n", watts,
+            batt_temp_c, s.soc_temp_c, s.cpu_pct, mhz, thermal, headroom, (unsigned long long)renderer_present_count(), vk_ab(NULL),
+            (unsigned)s.avail_mb, (unsigned)s.rss_mb, swap_used_mb, psi);
     }
 }
 
@@ -836,17 +868,28 @@ static void adpf_work_locked(int slot, uint64_t work_ns, uint64_t target_ns, uin
     if (!m) return;
 
     if (!s_split) {
-        // --- Single session mode (both threads in session[0]) ---
+        // --- Single session mode (all critical threads in session[0]) ---
+        extern int32_t g_adpf_main_tid;
+        int32_t m_tid = __atomic_load_n(&g_adpf_main_tid, __ATOMIC_ACQUIRE);
+        int32_t cand[3] = {m_tid, s_presenting_tid, s_render_tid};
+        int32_t tids[3];
+        int ntids = 0;
+        for (int i = 0; i < 3; i++) {
+            if (cand[i] <= 0) continue;
+            int dup = 0;
+            for (int j = 0; j < ntids; j++) if (tids[j] == cand[i]) { dup = 1; break; }
+            if (!dup) tids[ntids++] = cand[i];
+        }
+        static int32_t s_bound_tids[3];
+        static int s_bound_n;
         if (!session[0]) {
             if (slot == 0) pin_to_fastest_cores();
-            int32_t tids[2];
-            int ntids = 0;
-            if (s_presenting_tid > 0) tids[ntids++] = s_presenting_tid;
-            if (s_render_tid > 0) tids[ntids++] = s_render_tid;
             if (ntids > 0) {
                 session[0] = create(m, tids, (size_t)ntids, (int64_t)target_ns);
                 if (session[0]) {
                     s_session_threads = ntids;
+                    s_bound_n = ntids;
+                    memcpy(s_bound_tids, tids, (size_t)ntids * sizeof(int32_t));
                     target[0] = target_ns;
                     state[0] = 1;
                     LOG("[android] performance hint single session (%d thread%s): on\n", ntids, ntids > 1 ? "s" : "");
@@ -855,23 +898,33 @@ static void adpf_work_locked(int slot, uint64_t work_ns, uint64_t target_ns, uin
                     s_last_error = errno;
                 }
             }
-        } else if (s_session_threads < 2 && s_presenting_tid > 0 && s_render_tid > 0) {
-            // Add the second thread to the active session
-            int32_t tids[2] = {s_presenting_tid, s_render_tid};
+        } else if (ntids > 0 && (ntids != s_bound_n || memcmp(tids, s_bound_tids, (size_t)ntids * sizeof(int32_t)) != 0)) {
             int ok = 0;
             if (set_threads) {
-                int r = set_threads(session[0], tids, 2);
-                if (r == 0) { ok = 1; s_session_threads = 2; }
-                else { s_errors++; s_last_error = r; }
+                int r = set_threads(session[0], tids, (size_t)ntids);
+                if (r == 0) {
+                    ok = 1;
+                    s_session_threads = ntids;
+                    s_bound_n = ntids;
+                    memcpy(s_bound_tids, tids, (size_t)ntids * sizeof(int32_t));
+                    LOG("[android] performance hint session updated (%d threads): on\n", ntids);
+                } else {
+                    s_errors++;
+                    s_last_error = r;
+                }
             }
             if (!ok) {
                 if (close_session) close_session(session[0]);
-                session[0] = create(m, tids, 2, (int64_t)target_ns);
+                session[0] = create(m, tids, (size_t)ntids, (int64_t)target_ns);
                 if (session[0]) {
-                    s_session_threads = 2;
+                    s_session_threads = ntids;
+                    s_bound_n = ntids;
+                    memcpy(s_bound_tids, tids, (size_t)ntids * sizeof(int32_t));
+                    target[0] = target_ns;
                     s_recreated++;
-                    LOG("[android] performance hint session recreated with 2 threads: on\n");
+                    LOG("[android] performance hint session recreated with %d threads: on\n", ntids);
                 } else {
+                    s_bound_n = 0;
                     s_errors++;
                     s_last_error = errno;
                 }
@@ -907,6 +960,9 @@ static void adpf_work_locked(int slot, uint64_t work_ns, uint64_t target_ns, uin
                 s_last_error = r;
                 static bool told;
                 if (!told) { told = true; LOG("[android] performance hint report error %d\n", r); }
+                if (close_session) close_session(session[0]);
+                session[0] = NULL;
+                s_bound_n = 0;
             }
         }
     } else {

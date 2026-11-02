@@ -216,8 +216,21 @@ static uint64_t c0_since;
 // Telemetry (c0_m; issue #41: how much of a frame goes to waiting for core 0, against a slow clock): every 30 s one log
 // line - how often core 0 changed hands, the waits for it (total, longest) and how much of the time it was held.
 static struct { uint64_t start, takes, waited, longest, held; } c0_stat;
+static uint64_t c0_cum_held;
+int32_t g_adpf_main_tid;
 static void c0_held_until(uint64_t now) {
-    if (c0_holder) c0_stat.held += now - c0_since;
+    if (c0_holder) {
+        uint64_t dt = now - c0_since;
+        c0_stat.held += dt;
+        c0_cum_held += dt;
+    }
+}
+uint64_t kernel_core0_held_ns(void) {
+    pthread_mutex_lock(&c0_m);
+    uint64_t now = plat_now_ns();
+    uint64_t v = c0_cum_held + (c0_holder ? now - c0_since : 0);
+    pthread_mutex_unlock(&c0_m);
+    return v;
 }
 static void c0_stat_log(uint64_t now) {
     if (!c0_stat.start) { c0_stat.start = now; return; }
@@ -239,14 +252,14 @@ static uint64_t c0_slice_ns;  // affinity handles BOTW's cross-core waits; slici
 static void *core0_slicer(void *arg) {
     (void)arg;
     for (;;) {
-        struct timespec ts = {0, 2000000};
-        nanosleep(&ts, NULL);
+        usleep(500);
         pthread_mutex_lock(&c0_m);
-        if (c0_holder && c0_head && !c0_holder->core0_evicted && plat_now_ns() - c0_since > c0_slice_ns) {
+        uint64_t now = plat_now_ns();
+        if (c0_holder && c0_head && !c0_holder->core0_evicted && now - c0_since > c0_slice_ns) {
             static uint64_t n;
             if (n++ < 10 || ENV("LARECOMP_LOG_C0"))
-                LOG("[kernel] core 0: t%llu ran %llums without blocking, handoff requested\n", (unsigned long long)c0_holder->id,
-                    (unsigned long long)((plat_now_ns() - c0_since) / 1000000));
+                LOG("[kernel] core 0: t%llu ran %llums, handoff to t%llu\n", (unsigned long long)c0_holder->id,
+                    (unsigned long long)((now - c0_since) / 1000000), (unsigned long long)c0_head->id);
             __atomic_store_n(&c0_holder->core0_evicted, true, __ATOMIC_RELEASE);
             if (c0_nevicted++ == 0) __atomic_fetch_or(&g_fnprof, 2, __ATOMIC_SEQ_CST);
             // The old owner must reach a safe point before another thread can run. Merely clearing the owner
@@ -261,7 +274,8 @@ static pthread_once_t c0_once = PTHREAD_ONCE_INIT;
 static void core0_init(void) {
     c0_on = !getenv("LARECOMP_NO_CORE0");
     const char *e = getenv("LARECOMP_C0_SLICE_MS");
-    if (e && atoi(e) > 0) c0_slice_ns = (uint64_t)atoi(e) * 1000000;
+    int ms = e ? atoi(e) : 4;
+    if (ms > 0) c0_slice_ns = (uint64_t)ms * 1000000;
     if (c0_on && c0_slice_ns) {
         pthread_t th;
         pthread_create(&th, NULL, core0_slicer, NULL);
@@ -291,11 +305,9 @@ static void core0_acquire(KThread *t) {
         return;
     }
     if (t->core0_held) { pthread_mutex_unlock(&c0_m); return; }
-    // A removable queue lets SetThreadCoreMask move a waiter to another core without waiting for the current
-    // owner to yield (that owner may itself be spinning for this worker).
+    // A removable queue lets SetThreadCoreMask move a waiter to another core without waiting for the current owner to yield.
     t->core0_next = NULL;
-    if (c0_tail) c0_tail->core0_next = t;
-    else c0_head = t;
+    if (c0_tail) c0_tail->core0_next = t; else c0_head = t;
     c0_tail = t;
     uint64_t t0 = plat_now_ns();
     while ((c0_holder || c0_head != t) && __atomic_load_n(&t->core, __ATOMIC_ACQUIRE) == 0 && !g_rt_unwind)
@@ -368,6 +380,7 @@ static void *thread_main(void *arg) {
     KThread *t = arg;
     t_cur = t;
 #ifdef __ANDROID__
+    if (t->id == 0x50) __atomic_store_n(&g_adpf_main_tid, (int32_t)gettid(), __ATOMIC_RELEASE);
     plat_thread_unpin();  // (not the presenting thread's fast cores: platform.h)
 #endif
     crash_handler_install();
