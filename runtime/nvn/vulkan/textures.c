@@ -369,12 +369,42 @@ static pthread_mutex_t dead_lock = PTHREAD_MUTEX_INITIALIZER;
 #define DEAD_UNLOCK() ((void)0)
 #endif
 
+// Views destroyed and not handed out again since (issue #176: Mali's driver crashed in vkCmdBeginRendering after
+// ~30 min, twice at the same place - a destroyed attachment view is the suspect): exec.c begin_pass logs a pass that
+// begins with one ("DEAD VIEW"). On unless LARECOMP_CHECK_VIEWS=0; a lock and a short probe per view, per pass.
+#define DV_N 65536
+static uint64_t dv_tab[DV_N];
+static pthread_mutex_t dv_lock = PTHREAD_MUTEX_INITIALIZER;
+static int dv_on = -1;
+static void dv_set(VkImageView v, bool dead) {
+    if (dv_on < 0) { const char *e = getenv("LARECOMP_CHECK_VIEWS"); dv_on = !e || atoi(e) != 0; }
+    if (!dv_on || !v) return;
+    uint64_t k = (uint64_t)v, h = (k * 0x9E3779B97F4A7C15ull) >> 48;
+    pthread_mutex_lock(&dv_lock);
+    for (int p = 0; p < 64; p++, h = (h + 1) & (DV_N - 1)) {
+        if (dead && dv_tab[h] <= 1) { dv_tab[h] = k; break; }  // (an empty slot or a tombstone)
+        if (dv_tab[h] == k) { if (!dead) dv_tab[h] = 1; break; }  // (1: a tombstone)
+    }
+    pthread_mutex_unlock(&dv_lock);
+}
+bool vk_view_is_dead(VkImageView v) {
+    if (dv_on <= 0 || !v) return false;
+    uint64_t k = (uint64_t)v, h = (k * 0x9E3779B97F4A7C15ull) >> 48;
+    bool r = false;
+    pthread_mutex_lock(&dv_lock);
+    for (int p = 0; p < 64 && dv_tab[h]; p++, h = (h + 1) & (DV_N - 1))
+        if (dv_tab[h] == k) { r = true; break; }
+    pthread_mutex_unlock(&dv_lock);
+    return r;
+}
+
 void vk_collect_dead(void) {
     uint64_t done = vk_completed_seq();
     DEAD_LOCK();
     int k = 0;
     for (int i = 0; i < ndead; i++) {
         if (dead[i].seq > done) { dead[k++] = dead[i]; continue; }
+        if (dead[i].view) dv_set(dead[i].view, true);  // (#176: the check above)
         if (dead[i].view) vk_rp_forget_view(dead[i].view), vkDestroyImageView(g_vk.dev, dead[i].view, NULL);
         else vmaDestroyImage(g_vk.vma, dead[i].img, dead[i].mem);
     }
@@ -1132,6 +1162,7 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
         if (nfail++ < 20) LOG("[vk] view failed: type %d fmt %d (image fmt %d) levels %u+%u layers %u+%u\n", type, fmt, b->format, lv0, nlv, ly0, nly);
         return VK_NULL_HANDLE;
     }
+    dv_set(v, false);  // (#176: a handle the driver hands out again is alive)
     ViewEnt *e = &view_tab[slot];
     if (e->b) { defer((Dead){.view = e->view}); vk_view_gen++; }  // evict (16 probes taken)
     *e = (ViewEnt){b, k1, k2, v};

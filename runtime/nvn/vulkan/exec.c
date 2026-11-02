@@ -2035,6 +2035,23 @@ static void begin_pass(void) {
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
+    {   // A destroyed view reaching the driver (#176, Mali: a crash in vkCmdBeginRendering after ~30 min): say which
+        // (textures.c vk_view_is_dead; LARECOMP_CHECK_VIEWS=0 off)
+        extern bool vk_view_is_dead(VkImageView v);
+        static int nlog;
+        int bad = -1;
+        for (uint32_t i = 0; i < pass_ncolor && bad < 0; i++) if (vk_view_is_dead(ca[i].imageView)) bad = (int)i;
+        if (bad < 0 && has_d && vk_view_is_dead(da.imageView)) bad = 8;
+        if (bad < 0 && has_s && vk_view_is_dead(sa.imageView)) bad = 9;
+        if (bad >= 0) {
+            NvnTexture *t = bad < 8 ? st.rt.color[bad] : st.rt.depth;
+            TexBackend *b = t ? t->backend : NULL;
+            if (nlog++ < 50)
+                LOG("[vk] DEAD VIEW in a pass: slot %d tex %p addr %llx %ux%u nvn %#x backend %p image %p frame %llu\n", bad,
+                    (void *)t, t ? (unsigned long long)t->addr : 0ull, t ? t->width : 0, t ? t->height : 0, t ? t->format : 0,
+                    (void *)b, b ? (void *)b->image : NULL, (unsigned long long)vk_frame_counter());
+        }
+    }
     vk_begin_rendering(cb, &ri, pass_color, pass_depth != VK_FORMAT_UNDEFINED ? pass_depth : pass_stencil,
                        (VkSampleCountFlagBits)pass_samples);
     if (g_debug_frame) pass_dump_b = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->backend : NULL;
