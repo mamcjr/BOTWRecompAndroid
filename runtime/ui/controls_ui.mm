@@ -38,7 +38,7 @@ static void cell(int dev, int slot, int fam, int cap_dev, int cap_slot, int ms_l
 
 #ifdef __ANDROID__
 extern "C" bool touch_edit_available(void);  // ui/touch_controls.mm
-extern "C" void touch_edit_begin(void);
+extern "C" void touch_edit_begin_layout(int icons);  // (1 the action layout, 0 the classic one)
 extern "C" void touch_layout_reset(void);
 
 // No controller: the on-screen controls' layout instead of bindings (Android has no keyboard to bind, as a rule)
@@ -51,8 +51,14 @@ static void touch_layout_draw(void) {
     ImGui::Spacing();
     bool can = touch_edit_available();
     ImGui::BeginDisabled(!can);
-    if (ImGui::Button(tr("Edit touch layout"), ImVec2(-1, 0))) touch_edit_begin();
+    if (g_settings.touch_scheme == 1) {  // (two layouts: the icons' in the world, the classic one in the game's menus)
+        if (ImGui::Button(tr("Edit the action layout"), ImVec2(-1, 0))) touch_edit_begin_layout(1);
+        if (ImGui::Button(tr("Edit the classic layout"), ImVec2(-1, 0))) touch_edit_begin_layout(0);
+    } else if (ImGui::Button(tr("Edit touch layout"), ImVec2(-1, 0))) touch_edit_begin_layout(0);
     ImGui::EndDisabled();
+    ImGui::PushTextWrapPos(0);
+    ImGui::TextDisabled("%s", tr("While editing, touch a button to select it, then - and + change its own size."));
+    ImGui::PopTextWrapPos();
     bool def = true;
     for (int i = 0; i < TOUCH_NCTL; i++) def &= g_settings.touch_pos[i][0] < 0;
     for (int i = 0; i < TOUCH_NCTL2; i++) def &= g_settings.touch_pos2[i][0] < 0;

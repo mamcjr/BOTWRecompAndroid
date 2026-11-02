@@ -284,6 +284,16 @@ void settings_load(void) {
             }
         }
         else if (!strcmp(key, "touch_scheme")) g_settings.touch_scheme = atoi(val);
+        else if (!strcmp(key, "touch_sizes") || !strcmp(key, "touch_icons_sizes")) {  // (a size per control)
+            bool two = key[6] == 'i';
+            float *s = two ? g_settings.touch_size2 : g_settings.touch_size;
+            int n = two ? TOUCH_NCTL2 : TOUCH_NCTL;
+            char *q = val;
+            for (int i = 0; i < n && *q; i++) {
+                s[i] = strtof(q, &q);
+                while (*q == ',' || *q == ' ') q++;
+            }
+        }
         else if (!strcmp(key, "touch_icons_layout")) {  // (the icon layout's: as touch_layout)
             char *q = val;
             for (int i = 0; i < TOUCH_NCTL2 * 2 && *q; i++) {
@@ -369,6 +379,10 @@ void settings_save(void) {
     fprintf(f, "\ntouch_scheme = %d\ntouch_icons_layout = ", g_settings.touch_scheme);
     for (int i = 0; i < TOUCH_NCTL2; i++)
         fprintf(f, "%s%.4f,%.4f", i ? "," : "", g_settings.touch_pos2[i][0], g_settings.touch_pos2[i][1]);
+    fprintf(f, "\ntouch_sizes = ");
+    for (int i = 0; i < TOUCH_NCTL; i++) fprintf(f, "%s%.2f", i ? "," : "", g_settings.touch_size[i]);
+    fprintf(f, "\ntouch_icons_sizes = ");
+    for (int i = 0; i < TOUCH_NCTL2; i++) fprintf(f, "%s%.2f", i ? "," : "", g_settings.touch_size2[i]);
     fprintf(f, "\n");
 #endif
     fprintf(f, "upscaler = %s\n", g_settings.upscaler == UPSCALE_METALFX ? "metalfx" : g_settings.upscaler == UPSCALE_FSR1 ? "fsr1" :

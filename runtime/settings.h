@@ -63,6 +63,7 @@ typedef struct {
 #define TOUCH_NCTL2 17
     int touch_scheme;
     float touch_pos2[TOUCH_NCTL2][2];
+    float touch_size[TOUCH_NCTL], touch_size2[TOUCH_NCTL2];  // each control's own size (times touch_scale; 0: 1)
     float touch_scale, touch_opacity;
     // FPS-style touch play (ui/touch_controls.mm): the camera by dragging a finger (its speed tilts the right stick)
     // instead of holding a stick, at touch_drag_sens; the sticks drawn only while a finger holds them; each stick's

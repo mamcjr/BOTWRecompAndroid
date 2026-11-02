@@ -60,16 +60,16 @@ _Static_assert(I_N == TOUCH_NCTL2, "settings.h TOUCH_NCTL2");
 static const struct { int bit; float x, y, r; } IC[I_N] = {
     {-1, 0.09f, 0.77f, 0},               // the left stick's resting place
     {TB_LSTICK, 0.19f, 0.895f, 0.046f},  // crouch
-    {TB_RIGHT, 0.055f, 0.405f, 0.05f},   // weapon: held, the right stick picks one in the game's bar
-    {TB_LEFT, 0.055f, 0.535f, 0.05f},    // shield: the same
+    {TB_RIGHT, 0.0544f, 0.5638f, 0.05f}, // weapon: held, the right stick picks one in the game's bar
+    {TB_LEFT, 0.1167f, 0.565f, 0.05f},   // shield: the same
     {TB_DOWN, 0.46f, 0.90f, 0.043f},     // whistle
     {TB_MINUS, 0.54f, 0.90f, 0.043f},    // the Sheikah Slate (map, album)
     {TB_RSTICK, 0.62f, 0.90f, 0.036f},   // the scope
     {TB_PLUS, 0.89f, 0.32f, 0.045f},     // inventory
-    {TB_Y, 0.83f, 0.70f, 0.092f},        // attack: the largest
-    {TB_L, 0.83f, 0.535f, 0.052f},       // power: L on a tap; held, the rune wheel (d-pad up)
+    {TB_Y, 0.83f, 0.70f, 0.11f},         // attack: the largest
+    {TB_L, 0.83f, 0.4781f, 0.0624f},     // power: L on a tap; held, the rune fan
     {TB_ZL, 0.94f, 0.635f, 0.052f},      // shield up / lock on
-    {TB_ZR, 0.72f, 0.635f, 0.05f},       // bow: held, the same finger's drag aims
+    {TB_ZR, 0.72f, 0.635f, 0.07f},       // bow: held, the same finger's drag aims
     {TB_X, 0.72f, 0.80f, 0.05f},         // jump
     {TB_B, 0.83f, 0.875f, 0.05f},        // sprint
     {TB_A, 0.94f, 0.80f, 0.05f},         // interact (talk, pick up, open)
@@ -98,6 +98,8 @@ static atomic_bool editing;
 static float edit_pos[K_N][2];  // (editing) the layout being edited
 static bool edit_icons;          // (editing) the icon layout, in edit_pos2
 static float edit_pos2[I_N][2];
+static float edit_size[K_N], edit_size2[I_N];  // (editing) each control's own size (g_settings.touch_size / _size2)
+static int edit_sel = -1;  // (editing) the control the bar's - / + resize: its entry in the layout edited
 static _Atomic uint64_t last_draw_ms;
 
 // The icon layout is in use: its setting on, playing in the world (or editing it)
@@ -139,26 +141,36 @@ static void pos_of(int k, float *x, float *y) {
 }
 
 static float size_scale(void) { return g_settings.touch_scale > 0.2f ? g_settings.touch_scale : 1.0f; }
+// each control's own size, times size_scale (a classic layout entry / an icon layout entry)
+static float size_of(int k) { float s = editing ? edit_size[k] : g_settings.touch_size[k]; return s > 0.1f ? s : 1.0f; }
+static float size_of2(int k) { float s = editing ? edit_size2[k] : g_settings.touch_size2[k]; return s > 0.1f ? s : 1.0f; }
 static float stick_radius(void) { return disp_h * 0.13f * size_scale(); }
+static float stick_r(int s) {  // (a stick's own: the left one's size in either layout, the classic right one's)
+    return stick_radius() * (icons_on ? (s ? 1.0f : size_of2(I_MOVE)) : size_of(s ? K_RSTICK : K_STICK));
+}
 
 static void pos_of2(int k, float *x, float *y) {  // (icon layout) in pixels
     const float *p = editing ? edit_pos2[k] : g_settings.touch_pos2[k];
     if (p[0] >= 0 && p[1] >= 0) *x = p[0] * disp_w, *y = p[1] * disp_h;
     else *x = IC[k].x * disp_w, *y = IC[k].y * disp_h;
 }
-static float radius2(int k) { return IC[k].r * disp_h * size_scale(); }
+static float radius2(int k) { return IC[k].r * disp_h * size_scale() * size_of2(k); }
 
-static int edit_bar(Ctl *c) {  // (editing) the bar: save, defaults, cancel
+enum { C_SMALLER = 106, C_BIGGER = 107 };
+static bool is_bar(int bit) { return (bit >= C_DONE && bit <= C_CANCEL) || bit == C_SMALLER || bit == C_BIGGER; }
+static int edit_bar(Ctl *c) {  // (editing) the bar: save, defaults, cancel - and with a control selected, - / + its size
     float u = disp_h / 100.0f, bw = 16 * u, bh = 8 * u, y = 30 * u;
     c[0] = (Ctl){disp_w / 2 - 18 * u, y, 0, C_DONE, "Done", true, bw, bh, -1};
     c[1] = (Ctl){disp_w / 2, y, 0, C_RESET, "Default", true, bw, bh, -1};
     c[2] = (Ctl){disp_w / 2 + 18 * u, y, 0, C_CANCEL, "Cancel", true, bw, bh, -1};
-    return 3;
+    if (edit_sel < 0) return 3;
+    c[3] = (Ctl){disp_w / 2 - 6 * u, y + 11 * u, 0, C_SMALLER, "-", true, 10 * u, bh, -1};
+    c[4] = (Ctl){disp_w / 2 + 6 * u, y + 11 * u, 0, C_BIGGER, "+", true, 10 * u, bh, -1};
+    return 5;
 }
 
 static int layout(Ctl *c) {  // in pixels of the window (landscape)
-    float u = disp_h / 100.0f, z = size_scale();
-    float br = 7.5f * u * z, sw = 15 * u * z, sh = 7 * u * z, sr = 4.5f * u * z, dr = 3.8f * u * z;
+    float u = disp_h / 100.0f, z0 = size_scale();
     static const struct { int k, bit; const char *label; int shape; } T[] = {
         {K_A, TB_A, "A", 0}, {K_B, TB_B, "B", 0}, {K_X, TB_X, "X", 0}, {K_Y, TB_Y, "Y", 0},
         {K_L, TB_L, "L", 1}, {K_ZL, TB_ZL, "ZL", 1}, {K_R, TB_R, "R", 1}, {K_ZR, TB_ZR, "ZR", 1},
@@ -167,7 +179,8 @@ static int layout(Ctl *c) {  // in pixels of the window (landscape)
         {K_UP, TB_UP, "^", 3}, {K_DOWN, TB_DOWN, "v", 3}, {K_LEFT, TB_LEFT, "<", 3}, {K_RIGHT, TB_RIGHT, ">", 3}};
     int n = 0;
     for (const auto &t : T) {
-        float x, y;
+        float x, y, z = z0 * size_of(t.k);
+        float br = 7.5f * u * z, sw = 15 * u * z, sh = 7 * u * z, sr = 4.5f * u * z, dr = 3.8f * u * z;
         pos_of(t.k, &x, &y);
         c[n++] = t.shape == 1 ? (Ctl){x, y, 0, t.bit, t.label, true, sw, sh, t.k}
                               : (Ctl){x, y, t.shape == 2 ? sr : t.shape == 3 ? dr : br, t.bit, t.label, false, 0, 0, t.k};
@@ -187,7 +200,7 @@ static bool in_ctl(const Ctl *c, float x, float y) {
 // else a stick's area as in the classic layout. *k: its entry in touch_pos2.
 static int hit2(float x, float y, int *k) {
     if (editing) {
-        Ctl c[3];
+        Ctl c[5];
         for (int i = 0, n = edit_bar(c); i < n; i++)
             if (fabsf(x - c[i].x) <= c[i].w / 2 && fabsf(y - c[i].y) <= c[i].h / 2) { *k = -1; return c[i].bit; }
     }
@@ -201,7 +214,7 @@ static int hit2(float x, float y, int *k) {
         if (d <= 1 && d < bd) bd = d, best = i;
     }
     if (best >= 0) { *k = best; return best == I_MENU ? C_MENU : C_ICON + best; }
-    float R = stick_radius();
+    float R = stick_r(0);
     if (editing) {  // the left stick's resting place can be dragged
         float sx, sy;
         pos_of2(I_MOVE, &sx, &sy);
@@ -224,12 +237,11 @@ static int hit(float x, float y, int *k) {  // the control under (x, y) (*k: its
     int n = layout(c);
     for (int i = n; i-- > 0;)  // (the bar first)
         if (in_ctl(&c[i], x, y)) { *k = c[i].k; return c[i].bit; }
-    float R = stick_radius();
     if (editing) {  // the sticks' resting places can be dragged
         for (int s = 0; s < 2; s++) {
             float sx, sy;
             pos_of(s ? K_RSTICK : K_STICK, &sx, &sy);
-            if ((x - sx) * (x - sx) + (y - sy) * (y - sy) <= R * R) { *k = s ? K_RSTICK : K_STICK; return s ? C_RSTICK : C_STICK; }
+            if ((x - sx) * (x - sx) + (y - sy) * (y - sy) <= stick_r(s) * stick_r(s)) { *k = s ? K_RSTICK : K_STICK; return s ? C_RSTICK : C_STICK; }
         }
         *k = -1;
         return C_NONE;
@@ -246,7 +258,7 @@ static int hit(float x, float y, int *k) {  // the control under (x, y) (*k: its
 }
 
 static void stick_update(int s) {  // (t_lock held)
-    float R = stick_radius();
+    float R = stick_r(s);
     float dx = stick[s].kx - stick[s].cx, dy = stick[s].ky - stick[s].cy, d = sqrtf(dx * dx + dy * dy);
     if (d > R) { dx *= R / d, dy *= R / d; stick[s].kx = stick[s].cx + dx, stick[s].ky = stick[s].cy + dy; }
     int32_t x = (int32_t)(dx / R * 32767), y = (int32_t)(-dy / R * 32767);
@@ -309,11 +321,72 @@ static void wheel_steps(float x, bool start, uint64_t now) {  // (t_lock held) -
     g_touch_rx = now < flick_until ? flick_dir * 32767 : 0, g_touch_ry = 0;
 }
 
+// The rune fan, where the game's flags are read (hle/gdt_runes.c: the selected rune, the ones the player has): the
+// power held shows the player's runes in an arc above it; let go over one, the game's wheel is opened (d-pad up) and
+// stepped a rune at a time until the game's own selection is that one, then let go. Without them (1.0.0): the wheel in
+// steps above.
+extern "C" int gdt_rune(uint32_t *owned);
+static const char *const rune_item[8] = {"Obj_RemoteBombBall", "Obj_RemoteBombCube", "Obj_Magnetglove", "Obj_StopTimer",
+                                         "Obj_IceMaker", "Obj_Camera", "Obj_Motorcycle", "Obj_AmiiboItem"};
+static int rune_now = -1;  // the game's selected rune (0-7; -1 unknown)
+static uint32_t runes_owned = 0xFF;
+static bool fan_open;
+static int fan_items[8], fan_n, fan_sel = -1;  // (open) the runes shown, the one under the finger
+static int rune_goal = -1;                     // (the game's wheel being stepped to it)
+static uint64_t goal_start, goal_done;
+
+// The fan: a half ring above the power button, from its left round to its right, one slice a rune (in the game's order)
+#define FAN_PI 3.14159265f
+static void fan_ring(float *cx, float *cy, float *ri, float *ro) {
+    float rp = radius2(I_POWER);
+    pos_of2(I_POWER, cx, cy);
+    *ri = rp * 1.2f, *ro = rp * 3.2f;
+}
+
+static void fan_update(float fx, float fy) {  // (t_lock held) the runes shown and the slice the finger points at
+    fan_n = 0;
+    for (int i = 0; i < 8; i++) if (runes_owned >> i & 1) fan_items[fan_n++] = i;
+    float cx, cy, ri, ro;
+    fan_ring(&cx, &cy, &ri, &ro);
+    float dx = fx - cx, dy = fy - cy, a = atan2f(dy, dx);  // (screen y down: the upper half is -pi..0)
+    fan_sel = -1;
+    if (dx * dx + dy * dy < ri * ri * 0.36f || fan_n == 0) return;  // (still on the button: none)
+    if (a > 0) a = dx < 0 ? -FAN_PI : 0;  // (below the button: the nearer end)
+    int s = (int)((a + FAN_PI) / (FAN_PI / fan_n));
+    fan_sel = s < 0 ? 0 : s >= fan_n ? fan_n - 1 : s;
+}
+
+// (t_lock held) stepping the game's wheel to rune_goal: d-pad up held, then as many flicks as the goal is places away
+// in the wheel (the player's runes, in order) - the game's selection flag changes only once the wheel closes, so it
+// can't be watched on the way - a moment more, then let go
+static int goal_steps;
+static bool goal_step(uint64_t now) {
+    if (rune_goal < 0) return false;
+    if (now - goal_start > 4000) { rune_goal = -1; return false; }  // (safety)
+    if (goal_steps == 0) {
+        if (!goal_done) goal_done = now + 250;
+        if (now >= goal_done) { rune_goal = -1; g_touch_rx = 0; return false; }
+    } else if (now - goal_start > 250 && now >= flick_gap_until) {  // (the wheel open first)
+        flick_dir = goal_steps > 0 ? 1 : -1;
+        goal_steps -= flick_dir;
+        flick_until = now + FLICK_MS, flick_gap_until = flick_until + FLICK_MS;
+    }
+    g_touch_rx = now < flick_until ? flick_dir * 32767 : 0, g_touch_ry = 0;
+    return true;
+}
+static int wheel_place(int rune) {  // (its place among the player's runes)
+    int p = 0;
+    for (int i = 0; i < rune; i++) p += runes_owned >> i & 1;
+    return p;
+}
+
 static void recompute(void) {  // (t_lock held; also once a frame: the power's hold, the taps' pulses)
     uint64_t b = 0, now = SDL_GetTicks();
     int aim = -1;  // (icon layout) the finger whose drag tilts the right stick: the bow, throw, weapon, shield
     int wheel = -1;  // (the power's, held into the rune wheel: wheel_steps)
     bool wheel_start = false;
+    if (icons_on) rune_now = gdt_rune(&runes_owned);
+    fan_open = false;
     for (int i = 0; i < nfingers && !editing; i++) {
         int c = fingers[i].ctl;
         if (c >= 0 && c < 16) b |= 1ull << c;
@@ -322,14 +395,18 @@ static void recompute(void) {  // (t_lock held; also once a frame: the power's h
         if (k == I_POWER) {
             bool start = !fingers[i].wheel && now - fingers[i].t0 >= POWER_HOLD_MS;
             if (start) fingers[i].wheel = true;
-            if (fingers[i].wheel) b |= 1ull << TB_UP, wheel = i, wheel_start = start;
+            if (fingers[i].wheel && rune_now >= 0 && rune_goal < 0) fan_open = true, fan_update(fingers[i].x, fingers[i].y);
+            else if (fingers[i].wheel && rune_now < 0) b |= 1ull << TB_UP, wheel = i, wheel_start = start;
             continue;
         }
         if (IC[k].bit >= 0 && IC[k].bit < 16) b |= 1ull << IC[k].bit;
         if (k == I_BOW || k == I_R || k == I_WEAPON || k == I_SHIELD) aim = i;
     }
     for (int i = 0; i < 16; i++) if (pulse_until[i] > now) b |= 1ull << i;
+    bool goal = goal_step(now);
+    if (goal) b |= 1ull << TB_UP;
     g_touch_buttons = b;
+    if (goal) { aiming = true; return; }
     if (wheel >= 0) { wheel_steps(fingers[wheel].x, wheel_start, now); aiming = true; return; }
     // Another finger on the right half (the camera's) while one holds a control: the game's pickers (weapon, shield)
     // take its drag as a held stick, from where it landed - the camera's speed-driven tilt picked nothing; with the
@@ -358,7 +435,15 @@ static void icon_release(int f, bool cancelled) {  // (t_lock held)
     if (editing || c < C_ICON || c >= C_ICON + I_N) return;
     int k = c - C_ICON;
     uint64_t now = SDL_GetTicks();
-    if (k == I_POWER) { if (!fingers[f].wheel && !cancelled) pulse_until[TB_L] = now + PULSE_MS; }
+    if (k == I_POWER) {
+        if (!fingers[f].wheel && !cancelled) pulse_until[TB_L] = now + PULSE_MS;
+        if (fingers[f].wheel && fan_open && !cancelled && fan_sel >= 0 && fan_items[fan_sel] != rune_now) {  // (the fan's pick)
+            rune_goal = fan_items[fan_sel], goal_start = now, goal_done = 0, flick_until = flick_gap_until = 0;
+            goal_steps = wheel_place(rune_goal) - wheel_place(rune_now);
+            fprintf(stderr, "[touch] rune fan: %d -> %d (%d steps)\n", rune_now, rune_goal, goal_steps);
+        }
+        fan_open = false;
+    }
     else if (IC[k].bit >= 0 && IC[k].bit < 16 && now - fingers[f].t0 < PULSE_MS) pulse_until[IC[k].bit] = fingers[f].t0 + PULSE_MS;
     // (mode_check: the icon layout stays until the game is back in the world - at most 5 s - unless a real menu follows)
     if (k == I_WEAPON || k == I_SHIELD || (k == I_POWER && fingers[f].wheel)) keep_icons_until = now + 5000;
@@ -371,7 +456,7 @@ static void release_all(void) {
     stick_release(0);
     stick_release(1);
     memset(pulse_until, 0, sizeof pulse_until);
-    aiming = false;
+    aiming = false, fan_open = false, rune_goal = -1;
     g_touch_buttons = 0;
     pthread_mutex_unlock(&t_lock);
 }
@@ -386,9 +471,9 @@ static void mode_check(void) {
         pthread_mutex_lock(&t_lock);
         for (int i = 0; i < nfingers; i++) held |= fingers[i].ctl >= C_ICON && fingers[i].ctl < C_ICON + I_N;
         pthread_mutex_unlock(&t_lock);
-        if (held || SDL_GetTicks() < keep_icons_until) return;
+        if (held || rune_goal >= 0 || SDL_GetTicks() < keep_icons_until) return;  // (also the fan stepping the wheel)
     }
-    if (m) keep_icons_until = 0;  // (back in the world: the picker has closed)
+    if (m && rune_goal < 0) keep_icons_until = 0;  // (back in the world: the picker has closed)
     if (m != icons_on) release_all(), icons_on = m;
 }
 
@@ -397,35 +482,48 @@ extern "C" bool touch_edit_available(void) {  // the overlay is up (in game): th
     return SDL_GetTicks() - last_draw_ms < 500 && g_settings.touch_controls;
 }
 
-extern "C" void touch_edit_begin(void) {
+// Editing a layout (the Controls tab): icons 1 the icon layout, 0 the classic one, -1 the one on the screen
+extern "C" void touch_edit_begin_layout(int icons) {
     memcpy(edit_pos, g_settings.touch_pos, sizeof edit_pos);
     memcpy(edit_pos2, g_settings.touch_pos2, sizeof edit_pos2);
-    edit_icons = g_settings.touch_scheme == 1 && widescreen_world_play();  // (the layout on the screen: the one edited)
+    memcpy(edit_size, g_settings.touch_size, sizeof edit_size);
+    memcpy(edit_size2, g_settings.touch_size2, sizeof edit_size2);
+    edit_icons = icons >= 0 ? icons == 1 : g_settings.touch_scheme == 1 && widescreen_world_play();
+    edit_sel = -1;
     release_all();
     editing = true;
     icons_on = edit_icons;
     used = true;
     menu_request_close();
 }
+extern "C" void touch_edit_begin(void) { touch_edit_begin_layout(-1); }
 
-static void edit_end(int how) {  // C_DONE / C_RESET / C_CANCEL
-    if (how == C_RESET) {
-        if (edit_icons) for (int k = 0; k < I_N; k++) edit_pos2[k][0] = edit_pos2[k][1] = -1;
-        else for (int k = 0; k < K_N; k++) edit_pos[k][0] = edit_pos[k][1] = -1;
+static void edit_end(int how) {  // C_DONE / C_RESET / C_CANCEL; C_SMALLER / C_BIGGER: the selected control's size
+    if (how == C_SMALLER || how == C_BIGGER) {
+        if (edit_sel < 0) return;
+        float *s = edit_icons ? &edit_size2[edit_sel] : &edit_size[edit_sel];
+        float v = (*s > 0.1f ? *s : 1.0f) + (how == C_BIGGER ? 0.1f : -0.1f);
+        *s = v < 0.5f ? 0.5f : v > 2.0f ? 2.0f : v;
+        return;
+    }
+    if (how == C_RESET) {  // (positions and sizes of the layout being edited)
+        if (edit_icons) for (int k = 0; k < I_N; k++) edit_pos2[k][0] = edit_pos2[k][1] = -1, edit_size2[k] = 0;
+        else for (int k = 0; k < K_N; k++) edit_pos[k][0] = edit_pos[k][1] = -1, edit_size[k] = 0;
         return;  // (still editing: the defaults on the screen)
     }
     if (how == C_DONE) {
-        if (edit_icons) memcpy(g_settings.touch_pos2, edit_pos2, sizeof edit_pos2);
-        else memcpy(g_settings.touch_pos, edit_pos, sizeof edit_pos);
+        if (edit_icons) memcpy(g_settings.touch_pos2, edit_pos2, sizeof edit_pos2), memcpy(g_settings.touch_size2, edit_size2, sizeof edit_size2);
+        else memcpy(g_settings.touch_pos, edit_pos, sizeof edit_pos), memcpy(g_settings.touch_size, edit_size, sizeof edit_size);
         settings_save();
     }
     release_all();
     editing = false;
+    edit_sel = -1;
 }
 
 extern "C" void touch_layout_reset(void) {
-    for (int k = 0; k < K_N; k++) g_settings.touch_pos[k][0] = g_settings.touch_pos[k][1] = -1;
-    for (int k = 0; k < I_N; k++) g_settings.touch_pos2[k][0] = g_settings.touch_pos2[k][1] = -1;
+    for (int k = 0; k < K_N; k++) g_settings.touch_pos[k][0] = g_settings.touch_pos[k][1] = -1, g_settings.touch_size[k] = 0;
+    for (int k = 0; k < I_N; k++) g_settings.touch_pos2[k][0] = g_settings.touch_pos2[k][1] = -1, g_settings.touch_size2[k] = 0;
     settings_save();
 }
 
@@ -498,8 +596,8 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
         else if (k >= 0) pos_of(k, &cx, &cy);
         else cx = x, cy = y;
         fingers[nfingers] = {e->tfinger.fingerID, ctl, x, y, cx - x, cy - y, x, y, SDL_GetTicks(), false};
-        if (editing && k >= 0 && ctl != C_NONE && !(ctl >= C_DONE && ctl <= C_CANCEL))  // (dragging layout entry k)
-            fingers[nfingers].ctl = (icons_on ? C_EDIT2 : 200) + k;
+        if (editing && k >= 0 && ctl != C_NONE && !is_bar(ctl))  // (dragging layout entry k, now the one - / + resize)
+            fingers[nfingers].ctl = (icons_on ? C_EDIT2 : 200) + k, edit_sel = k;
         nfingers++;
         if (!editing && s >= 0) {
             stick[s].on = true;
@@ -508,7 +606,7 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
             else stick_update(s);
         }
         if (ctl == C_MENU && !editing) act = C_MENU;
-        if (ctl >= C_DONE && ctl <= C_CANCEL) act = ctl;
+        if (is_bar(ctl)) act = ctl;
     } else if (e->type == SDL_EVENT_FINGER_MOTION && f >= 0) {
         float px = fingers[f].x, py = fingers[f].y;
         fingers[f].x = x, fingers[f].y = y;
@@ -771,6 +869,7 @@ static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU3
         int eq = k == I_ATTACK || k == I_WEAPON ? (k == I_WEAPON && (pressed >> I_BOW & 1) ? 1 : 0) : k == I_BOW ? 1
                : k == I_BLOCK || k == I_SHIELD ? 2 : -1;
         ImTextureID it = eq >= 0 ? item_icon(equipped[eq]) : 0;
+        if (k == I_POWER && rune_now >= 0) it = item_icon(rune_item[rune_now]);  // (the selected rune)
         if (act >= 0 && act_tex) dl->AddImage(act_tex, ia, ib, ImVec2(act / (float)ACT_N, 0), ImVec2((act + 1) / (float)ACT_N, 1), img);
         else if (it) dl->AddImage(it, ia, ib, ImVec2(0, 0), ImVec2(1, 1), img);
         else if (gi >= 0 && gi_tex[gi]) dl->AddImage(gi_tex[gi], ia, ib, ImVec2(0, 0), ImVec2(1, 1), img);
@@ -782,6 +881,35 @@ static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU3
             dl->AddText(font, fs, ImVec2(x - ts.x / 2, y - ts.y / 2), text, label[k]);
         }
         if (k == I_WEAPON || k == I_SHIELD) swap_arrows(dl, c, r, cyan);
+    }
+    // the rune fan, while the power is held
+    pthread_mutex_lock(&t_lock);
+    bool fo = fan_open;
+    int n = fan_n, sel = fan_sel, items[8];
+    memcpy(items, fan_items, sizeof items);
+    pthread_mutex_unlock(&t_lock);
+    if (fo && n > 0) {  // a half ring of slices, each a rune's icon at its middle
+        float cx, cy, ri, ro;
+        fan_ring(&cx, &cy, &ri, &ro);
+        float span = FAN_PI / n, gap = 0.03f;
+        ImU32 rim = IM_COL32(255, 255, 255, (int)(150 * alpha)), shade = IM_COL32(20, 30, 33, (int)(170 * alpha));
+        for (int i = 0; i < n; i++) {
+            float a0 = -FAN_PI + i * span + gap, a1 = -FAN_PI + (i + 1) * span - gap;
+            ImU32 col = i == sel ? fill_on : shade;
+            const int seg = 12;
+            for (int s = 0; s < seg; s++) {  // (quads: an annular sector isn't convex)
+                float b0 = a0 + (a1 - a0) * s / seg, b1 = a0 + (a1 - a0) * (s + 1) / seg;
+                dl->AddQuadFilled(ImVec2(cx + cosf(b0) * ri, cy + sinf(b0) * ri), ImVec2(cx + cosf(b0) * ro, cy + sinf(b0) * ro),
+                                  ImVec2(cx + cosf(b1) * ro, cy + sinf(b1) * ro), ImVec2(cx + cosf(b1) * ri, cy + sinf(b1) * ri), col);
+            }
+            dl->PathArcTo(ImVec2(cx, cy), ro, a0, a1, seg);
+            dl->PathArcTo(ImVec2(cx, cy), ri, a1, a0, seg);
+            dl->PathStroke(items[i] == rune_now ? cyan : rim, ImDrawFlags_Closed, fmaxf(1.5f, ri * (items[i] == rune_now ? 0.05f : 0.025f)));
+            float am = (a0 + a1) * 0.5f, rm = (ri + ro) * 0.5f, x = cx + cosf(am) * rm, y = cy + sinf(am) * rm;
+            float b = fminf((ro - ri) * 0.36f, rm * span * 0.42f) * (i == sel ? 1.15f : 1.0f);
+            if (ImTextureID it = item_icon(rune_item[items[i]]))
+                dl->AddImage(it, ImVec2(x - b, y - b), ImVec2(x + b, y + b), ImVec2(0, 0), ImVec2(1, 1), img);
+        }
     }
     (void)op;
 }
@@ -816,7 +944,7 @@ extern "C" void touch_controls_draw(ImVec2 display, ImFont *font) {
     }
     if (icons_on) draw_icons(dl, font, alpha, op, fill, fill_on, line, text);
     for (int i = 0; i < n; i++) {
-        bool bar = c[i].bit >= C_DONE && c[i].bit <= C_CANCEL;
+        bool bar = is_bar(c[i].bit);
         bool on = c[i].bit >= 0 && c[i].bit < 16 && (held >> c[i].bit & 1);
         float fs = (c[i].rect ? c[i].h * (bar ? 0.45f : 0.48f) : c[i].r * 0.9f);
         ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, c[i].label);
@@ -849,13 +977,13 @@ extern "C" void touch_controls_draw(ImVec2 display, ImFont *font) {
     }
     // the sticks: where each started (or its resting place) and the knob - none for the drag camera, and only while a
     // finger holds them with "only while touched" (but always while editing the layout: they're dragged into place)
-    float R = stick_radius();
     for (int s = 0; s < 2; s++) {
         if (s == 1 && drag_camera()) continue;
         pthread_mutex_lock(&t_lock);
         bool on = stick[s].on;
         if (g_settings.touch_sticks_hidden && !on && !editing) { pthread_mutex_unlock(&t_lock); continue; }
         if (icons_on && s == 1 && !on) { pthread_mutex_unlock(&t_lock); continue; }  // (the icon layout's: only while held)
+        float R = stick_r(s);
         float rx, ry;
         if (icons_on) pos_of2(I_MOVE, &rx, &ry);
         else pos_of(s ? K_RSTICK : K_STICK, &rx, &ry);
@@ -868,6 +996,21 @@ extern "C" void touch_controls_draw(ImVec2 display, ImFont *font) {
         ImU32 knob = IM_COL32(255, 255, 255, (int)(on ? 120 * op : 70 * alpha));
         if (!skin_image(dl, SKIN_KNOB, ImVec2(kx - kr, ky - kr), ImVec2(kx + kr, ky + kr), knob))
             dl->AddCircleFilled(ImVec2(kx, ky), kr, on ? fill_on : IM_COL32(20, 30, 33, (int)(70 * alpha)), 32);
+    }
+    if (editing && edit_sel >= 0) {  // the control the bar's - / + resize: a gold ring
+        ImU32 gold = IM_COL32(236, 194, 84, 255);
+        float x, y, r = 0;
+        if (icons_on) {
+            pos_of2(edit_sel, &x, &y);
+            r = edit_sel == I_MOVE ? stick_r(0) : radius2(edit_sel);
+        } else if (edit_sel == K_STICK || edit_sel == K_RSTICK) {
+            pos_of(edit_sel, &x, &y);
+            r = stick_r(edit_sel == K_RSTICK);
+        } else {
+            for (int i = 0; i < n; i++)
+                if (c[i].k == edit_sel) x = c[i].x, y = c[i].y, r = c[i].rect ? fmaxf(c[i].w, c[i].h) * 0.6f : c[i].r;
+        }
+        if (r > 0) dl->AddCircle(ImVec2(x, y), r * 1.12f, gold, 48, fmaxf(2, 0.5f * u));
     }
 }
 #endif
