@@ -2088,6 +2088,14 @@ static void pass_size(int *w, int *h) {
 
 static bool g_wide_backdrop;  // (this draw is a layout pane showing a target widened to the window: cbuf_info, scissor_rect)
 static bool g_off_layout;  // (this draw is a menu layout's pane placed past the 16:9 screen's sides: scissor_rect)
+// The map is open: its terrain pane (cb3-hashed fs e91b1fb6, 1280x608, full-width) was drawn this frame or the one
+// before, with a game menu up. Its layout then spreads out with its stretched terrain (cbuf_info) and isn't clipped to
+// the 16:9 part (scissor_rect).
+static uint64_t g_map_frame;
+static bool map_open(float g) {
+    extern bool widescreen_in_menu(void);
+    return g > 1.001f && g_map_frame && renderer_present_count() - g_map_frame <= 2 && widescreen_in_menu();
+}
 
 static VkRect2D scissor_rect(void) {
     int w, h;
@@ -2114,8 +2122,13 @@ static VkRect2D scissor_rect(void) {
             widescreen_ui_centred() && vk_texture_scale_group(t0) == RS_OUT) {
             // (and moves with the HUD's panes out to the edge: widescreen_hud_shift, in 1280-wide layout units)
             extern float widescreen_hud_shift(float x);
-            float k = t0->width / 1280.0f;
+            extern float widescreen_factor(void);
+            float k = t0->width / 1280.0f, g = widescreen_factor();
             x += (int)lroundf(widescreen_hud_shift(((float)x + sw * 0.5f - t0->width * 0.5f) / k) * k);
+            if (map_open(g)) {  // (the map's clips spread out with it, g times as wide about the middle: cbuf_info)
+                float c = (x + sw * 0.5f - t0->width * 0.5f) * g;
+                sw = (int)lroundf(sw * g), x = (int)lroundf(t0->width * 0.5f + c - sw * 0.5f);
+            }
             float u = fminf(sx, sy);
             ox = ((float)w - t0->width * u) * 0.5f, oy = ((float)h - t0->height * u) * 0.5f;
             sx = sy = u;
@@ -2143,7 +2156,7 @@ static VkRect2D scissor_rect(void) {
         extern float widescreen_factor(void);
         NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : NULL;
         float g = widescreen_factor();
-        if (t0 && g_off_layout && g > 1.001f && widescreen_ui_centred() && widescreen_in_menu() &&
+        if (t0 && g_off_layout && g > 1.001f && widescreen_ui_centred() && widescreen_in_menu() && !map_open(g) &&
             vk_texture_scale_group(t0) == RS_OUT) {
             int b0 = (int)floorf(w * (1 - 1 / g) * 0.5f), b1 = w - b0;
             if (x < b0) { sw -= b0 - x; x = b0; }
@@ -3869,6 +3882,31 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 // the sides, 2026-10-28), at any scale (the Game Over fade animates it)
                 VkSpan c = vk_transient_copy(f, size, 256);
                 for (int i = 16; i < 20; i++) ((float *)c.ptr)[i] *= g;
+                if (g_cur_fs_hash == 0xe91b1fb6e1eb920bull) g_map_frame = renderer_present_count();  // (the map's terrain)
+                return ubo_span(c, size);
+            } else if (map_open(g) && size >= 0x230 && f[15] == 0 && f[0] > 0 &&
+                       (fabsf(fabsf(f[5] / f[0]) - 16.0f / 9.0f * g) < 0.01f || fabsf(fabsf(f[5] / f[0]) - 16.0f / 9.0f) < 0.01f)) {
+                // The map (map_open): its terrain is stretched g times across the wide screen (full-width above), so
+                // everything placed on it - markers, names, the frame's pieces - goes g times farther from the middle,
+                // keeping its own shape. In the middle 16:9 part they drifted off their places as the map moved
+                // sideways, and the frame stopped short of the screen's sides (2026-11-02). (A layout through its own
+                // 16:9 camera: narrowed to the widened camera's first, as below.)
+                VkSpan c = vk_transient_copy(f, size, 256);
+                float *m = (float *)c.ptr;
+                if (fabsf(fabsf(f[5] / f[0]) - 16.0f / 9.0f) < 0.01f) for (int i = 0; i < 4; i++) m[i] /= g;
+                // (A piece of a layout-wide window, or of the map's dark frame - four panes about the middle, their
+                // rectangles reaching +-750, past the layout's sides: stretched whole, or they stopped 50 units short
+                // of the screen's edges. A pane past the layout's side - the frame's side pillars, at +-699: moved by
+                // the margin it gained, as far over the screen's edge as it was over the 16:9 part's.)
+                bool past = fabsf(f[19]) < 1.0f && (f[134] < -640.5f || f[134] + f[132] > 640.5f);
+                if (full_width_window(f) || past) for (int i = 16; i < 20; i++) m[i] *= g;
+                else m[19] = fabsf(f[19]) <= 640.0f ? f[19] * g : f[19] + copysignf(640.0f * (g - 1), f[19]);
+                return ubo_span(c, size);
+            } else if (map_open(g) && f[15] > 1.0f && f[0] > 0) {  // (the map's texts: their origin, the same)
+                VkSpan c = vk_transient_copy(f, size, 256);
+                float *m = (float *)c.ptr;
+                if (fabsf(fabsf(f[5] / f[0]) - 16.0f / 9.0f) < 0.01f) for (int i = 0; i < 3; i++) m[i] /= g;  // (narrowed, its
+                else m[3] *= g;                                                                                // origin kept)
                 return ubo_span(c, size);
             } else if (size >= 0x230 && f[15] == 0 && f[0] > 0 && g > 1.001f && fabsf(f[5] / f[0] - 16.0f / 9.0f) < 0.01f) {
                 // A layout drawn through a camera of its own left at 16:9 - the inventory's cursor, the loading
