@@ -133,6 +133,26 @@ bool widescreen_in_menu(void) {
 // icon layout (ui/touch_controls.mm); the classic one stays in the menus
 bool widescreen_world_play(void) { return in_world() && !widescreen_in_menu(); }
 
+// The minimap group up at the top right while the on-screen controls are up (ui/touch_controls.mm touch_hud_top: their
+// buttons sat over it) and the player is in the world: a pane of the game's 1280x720 layouts in its lower right (x > 290,
+// y < -140: the minimap, the time, temperature and noise meters, the Sheikah Sensor; 2026-11-02, LARECOMP_LOG_PANES) goes
+// up this many layout units (y up); 0 elsewhere. vulkan/exec.c moves those panes, their texts and scissors.
+float widescreen_hud_top(float x, float y) {
+    extern bool touch_hud_top(void);
+    if (x < 290.0f || y > -140.0f || !touch_hud_top() || !widescreen_world_play()) return 0;
+    return 490.0f;
+}
+
+// Where the minimap is on a w x h screen, moved up as above (its centre at layout 515, -245; about 100 units across):
+// a touch there opens the map (ui/touch_controls.mm). false: not up there now.
+float widescreen_hud_shift(float x);
+bool widescreen_minimap_at(float w, float h, float *x, float *y, float *r) {
+    if (widescreen_hud_top(515.0f, -245.0f) == 0) return false;
+    float k = h / 720.0f, lx = 515.0f + (widescreen_ui_centred() ? widescreen_hud_shift(515.0f) : 0), ly = -245.0f + 490.0f;
+    *x = w * 0.5f + lx * k, *y = h * 0.5f - ly * k, *r = 105.0f * k;
+    return true;
+}
+
 float widescreen_hud_shift(float x) {
     if (!widescreen_ui_centred() || widescreen_in_menu() || !in_world()) return 0;
     float ax = x < 0 ? -x : x, t = (ax - 180.0f) / (260.0f - 180.0f);

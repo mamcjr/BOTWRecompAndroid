@@ -2078,6 +2078,16 @@ static VkRect2D scissor_rect(void) {
     if (!w) return (VkRect2D){{0, 0}, {pass_w, pass_h}};
     int x = st.scissor[0][0], y = st.scissor[0][1], sw = st.scissor[0][2], sh = st.scissor[0][3];
     float sx = vp_sx, sy = vp_sy, ox = vp_ox, oy = vp_oy;
+    {   // The minimap group up top (widescreen.c widescreen_hud_top): a scissor of it (the map's own) goes up with its panes
+        extern float widescreen_hud_top(float x, float y);
+        NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : NULL;
+        if (t0 && vk_texture_scale_group(t0) == RS_OUT && sw < 16384 && sh < 16384 &&
+            !(x <= 0 && y <= 0 && x + sw >= (int)t0->width && y + sh >= (int)t0->height)) {
+            float k = t0->height / 720.0f;  // (target pixels a layout unit)
+            float dy = widescreen_hud_top((x + sw * 0.5f - t0->width * 0.5f) / k, (t0->height * 0.5f - (y + sh * 0.5f)) / k);
+            if (dy != 0) y -= (int)lroundf(dy * k);
+        }
+    }
     {   // Widescreen (1.8.2): the HUD's camera widens with the scene's (widescreen.c rt_persp_update), which puts the 16:9
         // layout in the centred 16:9 part of the wide final image - a scissor of part of that image (the minimap's) goes
         // there too: scaled straight across, it cut the minimap's left half off
@@ -3784,6 +3794,41 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         extern bool widescreen_ui_centred(void);
         const float *f = (const float *)(uintptr_t)r.addr;
         NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : NULL;
+        {   // LARECOMP_LOG_PANES=1 (finding the HUD's pieces: widescreen.c widescreen_hud_top): every 600th frame, the
+            // layouts' panes (x, y in layout units) and texts (their matrix)
+            static int lp = -1;
+            if (lp < 0) lp = getenv("LARECOMP_LOG_PANES") != NULL;
+            uint64_t pf = renderer_present_count();
+            if (lp && pf % 600 == 0 && t0 && f[12] == 0 && f[13] == 0 && f[14] == -1.0f && f[1] == 0 && f[2] == 0)
+                LOG("[panes] frame %llu fs %016llx size %#llx %s x %.1f y %.1f sx %.3f sy %.3f proj %.4f %.4f row0 %.3f %.3f %.3f %.3f row1 %.3f %.3f %.3f %.3f w %.3f\n",
+                    (unsigned long long)pf, (unsigned long long)g_cur_fs_hash, (unsigned long long)size, f[15] == 0 ? "pane" : "text",
+                    size >= 0x230 ? f[19] : 0, size >= 0x230 ? f[23] : 0, size >= 0x230 ? f[16] : 0, size >= 0x230 ? f[21] : 0, f[0], f[5],
+                    f[0], f[1], f[2], f[3], f[4], f[5], f[6], f[7], f[15]);
+        }
+        if (t0 && vk_texture_scale_group(t0) == RS_OUT && f[12] == 0 && f[13] == 0 && f[14] == -1.0f && f[1] == 0 && f[2] == 0 &&
+            f[0] > 0) {
+            // The minimap group up top with the on-screen controls (widescreen.c widescreen_hud_top): a pane's y (f[23],
+            // layout units) and a text's origin (its rows 1 plus a share of row 3: 360 layout units an NDC unit) - and
+            // the widescreen move out to the edge below, done here too
+            extern float widescreen_hud_top(float x, float y);
+            extern float widescreen_hud_shift(float x);
+            bool centred = widescreen_ui_centred();
+            float g = centred ? widescreen_factor() : 1.0f, a = fabsf(f[5] / f[0]);
+            bool pane = size >= 0x230 && f[15] == 0 && (fabsf(a - 16.0f / 9.0f * g) < 0.01f || fabsf(a - 16.0f / 9.0f) < 0.01f);
+            bool text = !pane && f[15] > 1.0f;
+            float lx = pane ? f[19] : text ? f[3] / f[15] * g * 640.0f : 0, ly = pane ? f[23] : text ? f[7] / f[15] * 360.0f : 0;
+            float dy = pane || text ? widescreen_hud_top(lx, ly) : 0;
+            if (dy != 0) {
+                VkSpan c = vk_transient_copy(f, size, 256);
+                float *m = (float *)c.ptr, dx = centred ? widescreen_hud_shift(lx) : 0;
+                if (pane) m[23] += dy, m[19] += dx;
+                else {
+                    for (int i = 0; i < 4; i++) m[4 + i] += dy / 360.0f * m[12 + i];
+                    for (int i = 0; dx != 0 && i < 4; i++) m[i] += dx / (640.0f * g) * m[12 + i];
+                }
+                return ubo_span(c, size);
+            }
+        }
         if (widescreen_ui_centred() && t0 && vk_texture_scale_group(t0) == RS_OUT && f[12] == 0 && f[13] == 0 && f[14] == -1.0f &&
             f[1] == 0 && f[2] == 0) {
             float g = widescreen_factor();

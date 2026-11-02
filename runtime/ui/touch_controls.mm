@@ -40,6 +40,7 @@ _Atomic uint64_t g_touch_buttons;  // (runtime/hle/input.c) Switch button bits h
 _Atomic int32_t g_touch_lx, g_touch_ly;  // left stick, -32767..32767, y up
 _Atomic int32_t g_touch_rx, g_touch_ry;  // right stick
 bool widescreen_world_play(void);                       // hle/widescreen.c
+bool widescreen_minimap_at(float w, float h, float *x, float *y, float *r);
 uint8_t *fs_romfs_read(const char *path, size_t *size);  // services/fs.c
 }
 
@@ -63,8 +64,8 @@ static const struct { int bit; float x, y, r; } IC[I_N] = {
     {TB_RIGHT, 0.0544f, 0.5638f, 0.05f}, // weapon: held, the right stick picks one in the game's bar
     {TB_LEFT, 0.1167f, 0.565f, 0.05f},   // shield: the same
     {TB_DOWN, 0.46f, 0.90f, 0.043f},     // whistle
-    {TB_MINUS, 0.54f, 0.90f, 0.043f},    // the Sheikah Slate (map, album)
-    {TB_RSTICK, 0.62f, 0.90f, 0.036f},   // the scope
+    {TB_RSTICK, 0.54f, 0.90f, 0.043f},   // the Sheikah Slate: its scope (R3) - the map opens from the minimap
+    {-1, 0.62f, 0.90f, 0},               // (was the scope: kept for saved layouts, not shown)
     {TB_PLUS, 0.89f, 0.32f, 0.045f},     // inventory
     {TB_Y, 0.83f, 0.70f, 0.11f},         // attack: the largest
     {TB_L, 0.83f, 0.4781f, 0.0624f},     // power: L on a tap; held, the rune fan
@@ -87,6 +88,11 @@ static pthread_mutex_t t_lock = PTHREAD_MUTEX_INITIALIZER;
 static struct { SDL_FingerID id; int ctl; float x, y, dx, dy, sx, sy; uint64_t t0; bool wheel; } fingers[10];
 static uint64_t pulse_until[16];  // (icon layout) button bits still held after a short tap, until then (ms)
 static uint64_t keep_icons_until;  // (icon layout) kept through a game menu until then (ms): mode_check
+// Shield surfing (the game's: shield up, jump, then A in the air): the shield button tapped twice and held - the
+// second touch jumps (X) and presses A a moment later, the shield up while it's held
+#define SURF_TAP_MS 300  // (the second touch this soon after the first let go)
+#define SURF_A_MS 150    // (A this long after the jump: in the air)
+static uint64_t block_up_ms, surf_a_at;
 static bool icons_on;  // the icon layout is the one in use (as of the last event or frame)
 static int nfingers;
 // the sticks (0 left, 1 right): where each started and where its knob is (pixels)
@@ -207,7 +213,7 @@ static int hit2(float x, float y, int *k) {
     int best = -1;
     float bd = 1e30f;
     for (int i = 0; i < I_N; i++) {
-        if (i == I_MOVE) continue;
+        if (i == I_MOVE || IC[i].r == 0) continue;
         float cx, cy, r = radius2(i) * 1.25f;  // (thumbs)
         pos_of2(i, &cx, &cy);
         float d = ((x - cx) * (x - cx) + (y - cy) * (y - cy)) / (r * r);
@@ -232,6 +238,11 @@ static int hit2(float x, float y, int *k) {
 }
 
 static int hit(float x, float y, int *k) {  // the control under (x, y) (*k: its layout entry)
+    float mx, my, mr;  // (the minimap, up top with the on-screen controls: a touch opens the map - Minus)
+    if (!editing && widescreen_minimap_at(disp_w, disp_h, &mx, &my, &mr) && (x - mx) * (x - mx) + (y - my) * (y - my) <= mr * mr) {
+        *k = -1;
+        return TB_MINUS;
+    }
     if (icons_on) return hit2(x, y, k);
     Ctl c[32];
     int n = layout(c);
@@ -402,6 +413,7 @@ static void recompute(void) {  // (t_lock held; also once a frame: the power's h
         if (IC[k].bit >= 0 && IC[k].bit < 16) b |= 1ull << IC[k].bit;
         if (k == I_BOW || k == I_R || k == I_WEAPON || k == I_SHIELD) aim = i;
     }
+    if (surf_a_at && now >= surf_a_at) pulse_until[TB_A] = now + PULSE_MS, surf_a_at = 0;  // (shield surfing: A in the air)
     for (int i = 0; i < 16; i++) if (pulse_until[i] > now) b |= 1ull << i;
     bool goal = goal_step(now);
     if (goal) b |= 1ull << TB_UP;
@@ -447,7 +459,8 @@ static void icon_release(int f, bool cancelled) {  // (t_lock held)
     else if (IC[k].bit >= 0 && IC[k].bit < 16 && now - fingers[f].t0 < PULSE_MS) pulse_until[IC[k].bit] = fingers[f].t0 + PULSE_MS;
     // (mode_check: the icon layout stays until the game is back in the world - at most 5 s - unless a real menu follows)
     if (k == I_WEAPON || k == I_SHIELD || (k == I_POWER && fingers[f].wheel)) keep_icons_until = now + 5000;
-    if (k == I_INVENTORY || k == I_SLATE) keep_icons_until = 0;
+    if (k == I_INVENTORY) keep_icons_until = 0;
+    if (k == I_BLOCK) block_up_ms = now;  // (a second touch soon: shield surfing)
 }
 
 static void release_all(void) {
@@ -455,7 +468,7 @@ static void release_all(void) {
     nfingers = 0;
     stick_release(0);
     stick_release(1);
-    memset(pulse_until, 0, sizeof pulse_until);
+    memset(pulse_until, 0, sizeof pulse_until), surf_a_at = 0;
     aiming = false, fan_open = false, rune_goal = -1;
     g_touch_buttons = 0;
     pthread_mutex_unlock(&t_lock);
@@ -476,6 +489,10 @@ static void mode_check(void) {
     if (m && rune_goal < 0) keep_icons_until = 0;  // (back in the world: the picker has closed)
     if (m != icons_on) release_all(), icons_on = m;
 }
+
+// The on-screen controls are up (no controller, the setting on): the game's minimap group goes up to the top right,
+// out of the buttons' way (hle/widescreen.c widescreen_hud_top); with a controller it stays where the game puts it
+extern "C" bool touch_hud_top(void) { return !hide_auto && g_settings.touch_controls; }
 
 // ---- layout editing (the Controls tab)
 extern "C" bool touch_edit_available(void) {  // the overlay is up (in game): there is something to drag
@@ -596,6 +613,10 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
         else if (k >= 0) pos_of(k, &cx, &cy);
         else cx = x, cy = y;
         fingers[nfingers] = {e->tfinger.fingerID, ctl, x, y, cx - x, cy - y, x, y, SDL_GetTicks(), false};
+        if (!editing && ctl == C_ICON + I_BLOCK && SDL_GetTicks() - block_up_ms < SURF_TAP_MS) {  // (shield surfing)
+            uint64_t now = SDL_GetTicks();
+            pulse_until[TB_X] = now + PULSE_MS, surf_a_at = now + SURF_A_MS;
+        }
         if (editing && k >= 0 && ctl != C_NONE && !is_bar(ctl))  // (dragging layout entry k, now the one - / + resize)
             fingers[nfingers].ctl = (icons_on ? C_EDIT2 : 200) + k, edit_sel = k;
         nfingers++;
@@ -852,7 +873,7 @@ static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU3
     pthread_mutex_unlock(&t_lock);
     ImU32 img = IM_COL32(255, 255, 255, (int)(235 * alpha)), cyan = IM_COL32(66, 215, 245, (int)(220 * alpha));
     for (int k = 0; k < I_N; k++) {
-        if (k == I_MOVE) continue;
+        if (k == I_MOVE || IC[k].r == 0) continue;
         float x, y, r = radius2(k);
         pos_of2(k, &x, &y);
         ImVec2 c(x, y), a(x - r, y - r), b(x + r, y + r);
@@ -875,7 +896,7 @@ static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU3
         else if (gi >= 0 && gi_tex[gi]) dl->AddImage(gi_tex[gi], ia, ib, ImVec2(0, 0), ImVec2(1, 1), img);
         else if (k == I_SCOPE) spyglass(dl, c, r, text);
         else {  // (no picture: interact and throw, or the game's icons not read yet)
-            static const char *const label[I_N] = {"", "L3", ">", "<", "v", "-", "R3", "+", "Y", "L", "ZL", "ZR", "X", "B", "A", "R", ""};
+            static const char *const label[I_N] = {"", "L3", ">", "<", "v", "R3", "", "+", "Y", "L", "ZL", "ZR", "X", "B", "A", "R", ""};
             float fs = r * 0.9f;
             ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, label[k]);
             dl->AddText(font, fs, ImVec2(x - ts.x / 2, y - ts.y / 2), text, label[k]);
