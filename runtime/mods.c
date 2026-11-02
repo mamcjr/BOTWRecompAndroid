@@ -62,7 +62,7 @@ int mods_list(ModInfo *out, int max) {
         for (int k = 0; k < n && !dup; k++) dup = !strcmp(out[k].name, name);
         if (dup) continue;
         snprintf(out[n].name, sizeof out[n].name, "%s", name);
-        out[n].on = !is_off(e->d_name);
+        out[n].on = !is_off(name);  // (by the mod's name: a .link's file name stayed on for good - #167, #190)
         n++;
     }
     closedir(d);
