@@ -782,6 +782,18 @@ RT_ON_RESET(menu_reset) {
 
 static int name_filter(ImGuiInputTextCallbackData *d) { return d->EventChar < 0x20 ? 1 : 0; }
 
+// The name's length in letters (UTF-8 code points), cut to g_kbd_max of them: a byte count let Cyrillic through at half
+// the length, cut in the middle of a letter (#165)
+static int kbd_letters(void) {
+    int n = 0;
+    for (char *p = g_kbd_text; *p; p++) {
+        if ((*p & 0xc0) == 0x80) continue;
+        if (n == g_kbd_max) { *p = 0; break; }
+        n++;
+    }
+    return n;
+}
+
 #ifdef __ANDROID__
 // Touch (no controller): typed with Android's keyboard, which covers the lower half - so at the top, in the menu's
 // larger font, with OK / Cancel buttons (there's no Enter / Esc to press; the keyboard's own Enter still confirms)
@@ -804,7 +816,7 @@ static void keyboard_draw_touch(ImGuiIO &io, float scale, bool appearing) {
     ImGui::InputText("##name", g_kbd_text, (size_t)(g_kbd_max * 4 + 1 < (int)sizeof g_kbd_text ? g_kbd_max * 4 + 1 : sizeof g_kbd_text),
                      ImGuiInputTextFlags_CallbackCharFilter, name_filter);
     ImGui::PopFont();
-    if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
+    int letters = kbd_letters();
     float bw = 340 * scale, bh = 120 * scale, sp = ImGui::GetStyle().ItemSpacing.x;
     // one row: the count at the left, the buttons at the right (placed, not SameLine: the same top for both)
     float y = ImGui::GetCursorPosY(), x0 = ImGui::GetCursorPosX(), xr = ImGui::GetWindowWidth() - ImGui::GetStyle().WindowPadding.x;
@@ -816,7 +828,7 @@ static void keyboard_draw_touch(ImGuiIO &io, float scale, bool appearing) {
     ImGui::PopFont();
     ImGui::PushFont(small);
     ImGui::SetCursorPos(ImVec2(x0, y + (bh - ImGui::GetTextLineHeight()) * 0.5f));
-    ImGui::TextDisabled("%d / %d", (int)strlen(g_kbd_text), g_kbd_max);
+    ImGui::TextDisabled("%d / %d", letters, g_kbd_max);
     ImGui::PopFont();
     ImGui::End();
     ImGui::PopStyleVar(5);
@@ -850,8 +862,8 @@ static void keyboard_draw(ImGuiIO &io, float scale) {
         ImGui::InputText("##name", g_kbd_text, (size_t)(g_kbd_max * 4 + 1 < (int)sizeof g_kbd_text ? g_kbd_max * 4 + 1 : sizeof g_kbd_text),
                          ImGuiInputTextFlags_CallbackCharFilter, name_filter);
         ImGui::PopFont();
-        if ((int)strlen(g_kbd_text) > g_kbd_max) g_kbd_text[g_kbd_max] = 0;
-        ImGui::TextDisabled("Enter  confirm      Esc  cancel      (%d / %d)", (int)strlen(g_kbd_text), g_kbd_max);
+        int letters = kbd_letters();
+        ImGui::TextDisabled("Enter  confirm      Esc  cancel      (%d / %d)", letters, g_kbd_max);
     } else {  // controller: on-screen keyboard (osk.mm, shared with our menus' text fields)
         int r = osk_keys(g_kbd_text, sizeof g_kbd_text, g_kbd_max, appearing, scale, g_font_big);
         if (r) g_kbd = r > 0 ? 2 : 3;  // (Start / + confirms in menu_handle_event too)
