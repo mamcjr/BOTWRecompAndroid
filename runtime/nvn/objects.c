@@ -1405,13 +1405,16 @@ NVN(nvnWindowSetPresentInterval) {
     if (force > 0) c->x[1] = (uint64_t)force;
     // BOTW 1.8.2's frame loop (lr 0x7001012a34, 1.9.0: 0x70011267c4; x19 = the framework; [fw+0x234] the highest
     // interval it may pick): never 3 while the runtime sets the game's clock (runtime/hle/framepace.c), as
-    // SavageWindRecomp does. Frame rate 20 in the world is the other way round: 3 always, as the clock's own interval
-    // (rt_vfr_update) - the game's 20 fps mode as on the console. Left to pick, the frame loop went back to 2 within a
-    // frame or two, and Link sank into the ground after a hit (2026-11-02; with 3 held he didn't).
+    // SavageWindRecomp does - but while the clock is in its 20 fps way (rt_vfr_update's interval 3: Frame rate 20,
+    // or frames that slow), 3 always, as on the console. Left to pick, the frame loop went back to 2 within a frame or
+    // two, and Link sank into the ground after a hit (2026-11-02; with 3 held he didn't). Following the clock's
+    // interval, not the setting, keeps the two together while the frame rate changes too.
     if (framepace_on() && c->x[30] == GUEST_LO + (g_game_version == 190 ? 0x11267c4ull : 0x1012a34ull)) {
-        uint32_t *max_iv = (uint32_t *)(uintptr_t)(c->x[19] + 0x234), top = g_settings.fps_mode == 3 ? 3 : 2;
+        bool twenty = framepace_interval() == 3;
+        uint32_t *max_iv = (uint32_t *)(uintptr_t)(c->x[19] + 0x234), top = twenty ? 3 : 2;
         if (*max_iv > top) *max_iv = top;
-        if (force <= 0 && g_settings.fps_mode == 3 && framepace_target() == 20) c->x[1] = 3;
+        if (force <= 0 && twenty) c->x[1] = 3;
+        else if (force <= 0 && c->x[1] > 2) c->x[1] = 2;  // (out of it: not left at 3)
     }
     if ((int)A(1) != g_present_interval)
         LOG("[pace] the game sets its present interval to %d (lr %llx, x19 %llx [+0x240] %lld)\n", (int)A(1),

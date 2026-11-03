@@ -157,6 +157,11 @@ void framepace_presented(uint64_t t, bool on_grid) {
 #define VFR_INTERVAL 0x34
 #define VFR_RATIO 0x3c
 
+// The clock's interval (1 / 2 / 3: its 60 / 30 / 20 fps ways), as last set: the frame loop's follows it at 3
+// (nvn/objects.c nvnWindowSetPresentInterval)
+static uint32_t g_vfr_iv = 2;
+uint32_t framepace_interval(void) { return g_vfr_iv; }
+
 void rt_vfr_update(uint64_t vfr) {
     if (!framepace_on()) return;
     static uint64_t last_t;
@@ -185,6 +190,14 @@ void rt_vfr_update(uint64_t vfr) {
         int target = framepace_target();
         if (target != last_target) smooth = period, last_step = 0;  // (a new pace: start from it)
         last_target = target;
+        // Frame rate changed in the menu: the interval goes to the new one at once - its average took dozens of frames,
+        // the frame loop's interval (nvn/objects.c, following this one) and the clock's ratio not matching meanwhile,
+        // and Link sank into the ground going from 20 to 30 fps (2026-11-02)
+        static int last_mode = -1;
+        if (g_settings.fps_mode != last_mode) {
+            if (last_mode >= 0) slow = period * 30;
+            last_mode = g_settings.fps_mode;
+        }
         smooth += (s - smooth) * 0.05;
         real += s;
         // The step changes slowly: the game reads some deltas a frame late, and a step that jumps between frames
@@ -207,7 +220,7 @@ void rt_vfr_update(uint64_t vfr) {
     // The interval switches some of the game's code between its 60 fps and 30 fps ways: only on a lasting change of
     // the frame rate, never back and forth from one frame to the next.
     slow += (ratio - slow) * 0.05;
-    static uint32_t iv = 2;
+    uint32_t iv = g_vfr_iv;
     if (iv == 1 && slow > 0.85) iv = 2;
     else if (iv == 2 && slow < 0.7) iv = 1;
     else if (iv == 2 && slow > 1.3) iv = 3;
@@ -216,7 +229,7 @@ void rt_vfr_update(uint64_t vfr) {
     VF(float, vfr, VFR_NEW_RATIO) = ratio;
     VF(uint32_t, vfr, VFR_INTERVAL) = iv;
     VF(uint8_t, vfr, VFR_CHANGED) = last_iv && iv != last_iv;
-    last_iv = iv;
+    last_iv = g_vfr_iv = iv;
     if (log_every > 0 && nframe++ % (uint64_t)log_every == 0)
         LOG("[framepace] target %d fps, %.2f ms since the last update (avg %.2f), ratio %.3f, interval %u, owed "
             "%.2f ms%s%s\n", framepace_target(), s * 1e3, smooth * 1e3, ratio, iv, (real - given) * 1e3,

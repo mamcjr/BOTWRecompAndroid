@@ -21,3 +21,5 @@ void framepace_presented(uint64_t t, bool on_grid);
 // its clock's update (x19 of ksys::VFR::updateInterval).
 int rt_frame_wait(void);
 void rt_vfr_update(uint64_t vfr);
+// The game's clock's interval as the runtime last set it (1, 2, 3: its 60, 30, 20 fps ways)
+uint32_t framepace_interval(void);
