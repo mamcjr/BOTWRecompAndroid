@@ -1322,6 +1322,9 @@ void backend_present(NvnTexture *t) {
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
     vk_end_pass();
+#ifdef __ANDROID__
+    vk_bc_shadows_resolve(NULL, 0);  // (BC textures drawn into: decoded, as before anything outside a pass)
+#endif
     static const float black[4] = {0, 0, 0, 1};
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);

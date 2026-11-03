@@ -1862,6 +1862,7 @@ static void vk_end_pass_at(int line) {
 }
 
 static uint32_t level_extent(uint32_t v, uint32_t lv) { v >>= lv; return v ? v : 1; }
+static int rt_kind(uint32_t f);
 
 // The frame the 3D scene's G-buffer was last drawn in (a pass of 3+ scene-sized targets with depth): widescreen.c
 // keeps the title screen and loading screens - no scene - at 16:9
@@ -1905,6 +1906,9 @@ static void begin_pass(void) {
     }
 #endif
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
+#ifdef __ANDROID__
+    vk_bc_shadows_resolve(st.rt.color, st.rt.ncolor);  // (BC textures drawn into before: decoded, unless this pass draws on)
+#endif
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
     static int no_barrier = -1;  // (LARECOMP_VK_NO_PASS_BARRIER=1: none - unsafe, a measurement of what it costs)
@@ -1949,10 +1953,34 @@ static void begin_pass(void) {
         ca[i] = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         pass_color[i] = VK_FORMAT_UNDEFINED;
         if (!t) continue;
+        uint32_t lv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
+        if (lv) vk_tex_upload_for_mips(t);
         renderer_mark_gpu_owned(t);
-        VkImageView v = vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
+        VkFormat vf = VK_FORMAT_UNDEFINED;  // the attachment's format and extent
+        uint32_t ew = 0, eh = 0;
+        VkImageView v = VK_NULL_HANDLE;
+#ifdef __ANDROID__
+        if (st.rt.has_cview[i]) {  // (a decoded BC texture drawn into as blocks: its shadow image)
+            vk_tex(t, true);
+            v = vk_bc_shadow_view(t, &st.rt.cview[i], &vf, &ew, &eh);
+        }
+#endif
+        if (!v) v = vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
         TexBackend *b = t->backend;
         if (!v) continue;
+        if (!vf) {
+            bool view_fmt = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4);
+            if (view_fmt && vk_format(t->format) != b->format && rt_kind(st.rt.cview[i].format) != rt_kind(t->format)) {
+                // Through a view of another output type (the draws' shaders follow it: rt_format) into an image made
+                // in another format (ASTC / BC decoded, no shadow): outputs of the wrong type are undefined - not drawn.
+                static int nlog;
+                if (nlog++ < 4) LOG("[vk] target %ux%u (nvn %#x) drawn into as nvn %#x: not drawn (image format %d)\n",
+                                    t->width, t->height, t->format, st.rt.cview[i].format, b->format);
+                continue;
+            }
+            vf = view_fmt && vk_format(t->format) == b->format ? vk_format(st.rt.cview[i].format) : b->format;
+            ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
+        }
         ca[i].imageView = v;
         ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
@@ -1962,10 +1990,7 @@ static void begin_pass(void) {
             ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             ca[i].clearValue.color.float32[3] = fresh ? 0.0f : 1.0f;
         }
-        pass_color[i] = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4) && vk_format(t->format) == b->format
-                      ? vk_format(st.rt.cview[i].format) : b->format;
-        uint32_t lv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
-        uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
+        pass_color[i] = vf;
         if (wb_eligible(t, b, lv) && !(st.rt.has_cview[i] && ((st.rt.cview[i].setmask & ~3u) || st.rt.cview[i].min_layer)))
             wb_pass[wb_npass++] = t;  // (a view of its level 0 / layer 0 only)
         if (!w) { renderer_texture_scale(t, &pass_sx, &pass_sy); w = ew; }
@@ -2892,6 +2917,13 @@ static int rt_kind(uint32_t f) {
     case 0x04: case 0x09: case 0x0C: case 0x10: case 0x15: case 0x18: case 0x28: case 0x2D: case 0x30: return 1;
     default: return 0;
     }
+}
+
+// Colour target i's format as the draws write it: its view's, when the view names one. BOTW draws its BC4 noise volume
+// through a view as RGBA16_UINT (a texel a block); typed by the texture's own format (BC: float), the fragment shader
+// wrote floats to an integer target - zero blocks on Mali.
+static uint32_t rt_format(int i) {
+    return st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4) ? st.rt.cview[i].format : st.rt.color[i]->format;
 }
 
 // ================================================================== graphics pipelines
@@ -5807,6 +5839,9 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         }
     }
     vk_end_pass();
+#ifdef __ANDROID__
+    vk_bc_shadows_resolve(NULL, 0);  // (BC textures drawn into: decoded before anything outside a pass reads them)
+#endif
     VkCommandBuffer cb = vk_cmd();
     bool chained = dchain && cb == dchain_cb && dchain_ok();
     if (chained) stat_dchained++;
@@ -5989,7 +6024,7 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
-    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(st.rt.color[i]->format);
+    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(rt_format(i));
 #ifdef __ANDROID__
     if (maxwell_gmem_miss_log)  // (copy mode: early depth tests for the shaders that log misses - ShaderKey)
         fkey.no_ds_write = !st.rt.depth || !((st.ds[0] && st.ds[1]) || (st.ds[3] && ((st.stencil_mask[0] | st.stencil_mask[1]) & 0xFF)));
@@ -6457,7 +6492,7 @@ static void draw_(CmdRec *r, bool indexed) {
             // Targets the fragment shader doesn't output keep their contents on Metal, but are undefined in Vulkan
             // (NVIDIA writes black): mask them. Foliage depth pre-passes left black silhouettes (user 2026-10-08).
             k.write_mask[i] = ((pr->fs_out_mask >> (i * 4)) & 0xF) ? (st.channel_mask >> (i * 4)) & 0xF : 0;
-            if (((st.color_state[0] >> i) & 1) && !rt_kind(st.rt.color[i]->format)) {
+            if (((st.color_state[0] >> i) & 1) && !rt_kind(rt_format(i))) {
                 k.blend_on |= (uint8_t)(1u << i);
                 memcpy(k.blend[i], st.blend[i], 8);
             }
@@ -7070,6 +7105,9 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     if (!t || !dst || dst < HEAP_BASE) return;
     t = alias_read(t);
     vk_end_pass();
+#ifdef __ANDROID__
+    vk_bc_shadows_resolve(NULL, 0);
+#endif
     const FormatInfo *fi;
     int32_t rg[6];
     int level;
@@ -7138,6 +7176,9 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     NvnTexture *st_ = (NvnTexture *)(uintptr_t)src->tex, *dt = (NvnTexture *)(uintptr_t)dst->tex;
     if (!st_ || !dt) return;
     vk_end_pass();
+#ifdef __ANDROID__
+    vk_bc_shadows_resolve(NULL, 0);
+#endif
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each copy its own submission, waited on)
     gp_mark(vk_cmd(), "copy texture %ux%u -> %ux%u", st_->width, st_->height, dt->width, dt->height);
     dl_note("copy texture %ux%u f%#x -> %ux%u f%#x (%p -> %p)", st_->width, st_->height, st_->format, dt->width, dt->height,
