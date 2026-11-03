@@ -101,11 +101,11 @@ static void touch_layout_draw(void) {
     if (ImGui::Checkbox(tr("Camera by dragging"), &g_settings.touch_drag_camera)) settings_save();
     hint("The camera turns while a finger moves on the right half of the screen and stops when it stops, as in phone "
          "shooters, instead of a stick held to one side.");
-    if (g_settings.touch_drag_camera) {
+    if (g_settings.touch_drag_camera || g_settings.touch_scheme == 1) {  // (the action layout's camera drags too: #199)
         float sens = g_settings.touch_drag_sens * 100;
         ImGui::TextUnformatted(tr("Drag sensitivity"));
         ImGui::SetNextItemWidth(-1);
-        if (ImGui::SliderFloat("##DragSens", &sens, 25, 300, "%.0f%%")) g_settings.touch_drag_sens = sens / 100;
+        if (ImGui::SliderFloat("##DragSens", &sens, 25, 400, "%.0f%%")) g_settings.touch_drag_sens = sens / 100;
         if (ImGui::IsItemDeactivatedAfterEdit()) settings_save();
     }
     if (ImGui::Checkbox(tr("Sticks only while touched"), &g_settings.touch_sticks_hidden)) settings_save();
