@@ -1385,9 +1385,14 @@ NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
 // The last frame's duration as sead's frame loop reads it to pick the present interval (tools/patches.py,
 // 0x7000c4f4d4: Switch ticks, 19.2 MHz). A fixed frame rate in the menu caps it under 1.9 vsyncs, so the game keeps its
 // 30 fps mode (interval 2; BOTW never goes under 2) instead of dropping to 20 - where our GPU's clocks settle low and
-// it stayed. Auto (0): the game's own measurement.
+// it stayed. Auto (0): the game's own measurement. Frame rate 20: at least 2.5 vsyncs, its 20 fps mode (interval 3)
+// where the game picks (1.0.0 / 1.6.0; 1.8.2 and 1.9.0 keep the pace by the runtime's clock, hle/framepace.c).
 int64_t rt_frame_ticks(int64_t ticks) {
     if (!g_settings.fps_mode) return ticks;
+    if (g_settings.fps_mode == 3) {
+        const int64_t floor = 19200000ll * 25 / 10 / 60;  // (2.5 vsyncs)
+        return ticks < floor ? floor : ticks;
+    }
     const int64_t cap = 19200000ll * 185 / 100 / 60;  // (1.85 vsyncs)
     return ticks > cap ? cap : ticks;
 }
@@ -1400,10 +1405,11 @@ NVN(nvnWindowSetPresentInterval) {
     if (force > 0) c->x[1] = (uint64_t)force;
     // BOTW 1.8.2's frame loop (lr 0x7001012a34, 1.9.0: 0x70011267c4; x19 = the framework; [fw+0x234] the highest
     // interval it may pick): never 3 while the runtime sets the game's clock (runtime/hle/framepace.c), as
-    // SavageWindRecomp does
+    // SavageWindRecomp does - but with Frame rate 20, where the clock's own interval is 3 (rt_vfr_update): Link sank
+    // into the ground once with the frame loop held at 2 (2026-11-02; not seen again either way, kept consistent)
     if (framepace_on() && c->x[30] == GUEST_LO + (g_game_version == 190 ? 0x11267c4ull : 0x1012a34ull)) {
-        uint32_t *max_iv = (uint32_t *)(uintptr_t)(c->x[19] + 0x234);
-        if (*max_iv > 2) *max_iv = 2;
+        uint32_t *max_iv = (uint32_t *)(uintptr_t)(c->x[19] + 0x234), top = g_settings.fps_mode == 3 ? 3 : 2;
+        if (*max_iv > top) *max_iv = top;
     }
     if ((int)A(1) != g_present_interval)
         LOG("[pace] the game sets its present interval to %d (lr %llx, x19 %llx [+0x240] %lld)\n", (int)A(1),
@@ -1446,7 +1452,7 @@ NVN(nvnQueuePresentTexture) {
         if (on < 0) on = !getenv("LARECOMP_PRESENT_WAIT") || atoi(getenv("LARECOMP_PRESENT_WAIT"));
         extern volatile uint64_t g_vsync_count;
         extern __thread uint64_t g_blocked_ns;  // (kernel.c: the pacer counts this as idle, not frame work)
-        int cap = g_settings.fps_mode == 2 ? 1 : 2;
+        int cap = g_settings.fps_mode == 2 ? 1 : g_settings.fps_mode == 3 ? 3 : 2;  // (Frame rate 20: 3)
         int n = w->interval > cap ? w->interval : cap;
         if (on && framepace_on()) {
             // BOTW 1.8.2 (runtime/hle/framepace.c): a steady grid at the chosen frame rate, whatever the interval;

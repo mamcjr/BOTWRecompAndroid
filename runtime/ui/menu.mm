@@ -553,16 +553,22 @@ static void tab_display(void) {
         // isn't loaded yet: the 1.8.2 choices.)
         extern int g_game_version;
         bool sixty = g_game_version == 0 || g_game_version >= 182;
-        if (!sixty && g_settings.fps_mode > 1) g_settings.fps_mode = 1;
-        static const char *fr[] = {"Auto (20 / 30)", "30 fps"};
-        static const char *fr60[] = {"Auto (30 / 60)", "30 fps", "60 fps"};
-        opt_choice("Frame rate", &g_settings.fps_mode, sixty ? fr60 : fr, sixty ? 3 : 2, 1,
-                   sixty ? "Auto: 60 fps where your device keeps up, 30 where it doesn't (the game's clock stays right "
-                           "either way). 30 fps: steady and cooler - the phone heats less. 60 fps: always aims for 60 "
-                           "(game versions 1.8.2 and 1.9.0; 1.0.0 and 1.6.0 run at 30)."
-                         : "Auto: the game picks, as on the Switch, and drops to 20 fps where a frame doesn't fit in 30. "
-                           "30 fps: always 30 - where a frame takes longer, the game runs slightly slower instead of "
-                           "dropping to 20.");
+        if (!sixty && g_settings.fps_mode == 2) g_settings.fps_mode = 1;
+        // display order -> fps_mode (20 fps came last, 3, after the ini's values)
+        static const char *fr[] = {"Auto (20 / 30)", "20 fps", "30 fps"};
+        static const char *fr60[] = {"Auto (30 / 60)", "20 fps", "30 fps", "60 fps"};
+        static const int fr_mode[] = {0, 3, 1, 2};
+        int fi = 0;
+        for (int i = 0; i < 4; i++) if (fr_mode[i] == g_settings.fps_mode) fi = i;
+        if (opt_choice("Frame rate", &fi, sixty ? fr60 : fr, sixty ? 4 : 3, 2,
+                       sixty ? "Auto: 60 fps where your device keeps up, 30 where it doesn't (the game's clock stays right "
+                               "either way). 20 fps: for slower devices - steady, and the coolest. 30 fps: steady and "
+                               "cooler - the phone heats less. 60 fps: always aims for 60 (game versions 1.8.2 and 1.9.0; "
+                               "1.0.0 and 1.6.0 run at 30)."
+                             : "Auto: the game picks, as on the Switch, and drops to 20 fps where a frame doesn't fit in "
+                               "30. 20 fps: always 20, for slower devices. 30 fps: always 30 - where a frame takes longer, "
+                               "the game runs slightly slower instead of dropping to 20."))
+            g_settings.fps_mode = fr_mode[fi];
         if (sixty)
             opt_toggle("Cutscenes at 60 fps (experimental)", &g_settings.event_fps_unlock, false,
                        "In-game cutscenes and talks run at the chosen frame rate instead of 30. Some of them count frames "

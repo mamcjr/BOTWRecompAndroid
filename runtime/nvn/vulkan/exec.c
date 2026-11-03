@@ -297,7 +297,7 @@ void vk_pace_frame(void) {
         avg = 0;
         slow_since = probe_at = 0;
         probe_wait = 10000000000ull;
-        pace_slow = pace_on && g_settings.fps_mode == 1;
+        pace_slow = pace_on && (g_settings.fps_mode == 1 || g_settings.fps_mode == 3);
         last = 0;  // discard the transition frame's timing, including menu time and resource reallocation
         LOG("[pace] settings changed: fresh %s pacing history\n", g_settings.fps_mode ? "fixed" : "auto");
     }
@@ -340,8 +340,9 @@ void vk_pace_frame(void) {
         // running the threads at clocks that would finish them in 13 ms of their 33. LARECOMP_AB=<n>:adpf30: the 60
         // fps budget on side B)
         bool fixed30 = g_settings.fps_mode == 1 && AB("adpf30") != 1;
-        plat_frame_work_gpu((uint64_t)(hint_busy * 1e6), no_gpu ? 0 : gpu, (follow && pace_slow) || fixed30 ? 33333333ull : 16666667ull,
-                            (uint64_t)(game_busy * 1e6));
+        uint64_t budget = g_settings.fps_mode == 3 ? 50000000ull  // (Frame rate 20: 20 fps's)
+                          : (follow && pace_slow) || fixed30 ? 33333333ull : 16666667ull;
+        plat_frame_work_gpu((uint64_t)(hint_busy * 1e6), no_gpu ? 0 : gpu, budget, (uint64_t)(game_busy * 1e6));
     }
 #endif
 #ifdef __ANDROID__
@@ -412,9 +413,9 @@ void vk_pace_frame(void) {
     idx = (idx + 1) % 60;
     if (!pace_on) return;  // (measured and counted all the same: LARECOMP_LOG_PACE, the stats)
 #ifdef __ANDROID__
-    if (g_settings.fps_mode) {  // (Video: Frame rate 30 / 60) fixed: no measuring, no trials
-        bool slow = g_settings.fps_mode == 1;
-        if (slow != pace_slow) LOG("[pace] frame rate set to %d fps\n", slow ? 30 : 60);
+    if (g_settings.fps_mode) {  // (Video: Frame rate 20 / 30 / 60) fixed: no measuring, no trials
+        bool slow = g_settings.fps_mode == 1 || g_settings.fps_mode == 3;
+        if (slow != pace_slow) LOG("[pace] frame rate set to %d fps\n", g_settings.fps_mode == 3 ? 20 : slow ? 30 : 60);
         pace_slow = slow;
         return;
     }
