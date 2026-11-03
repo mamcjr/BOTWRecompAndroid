@@ -178,8 +178,15 @@ bool widescreen_minimap_at(float w, float h, float *x, float *y, float *r) {
 float widescreen_hud_shift(float x, float y) {
     extern uint64_t renderer_present_count(void);
     if (!widescreen_ui_centred() || widescreen_in_menu() || !in_world()) return 0;
-    if (talk_frame && renderer_present_count() - talk_frame <= 3 && y < -140.0f && y > -330.0f && x > -310.0f && x < 310.0f)
-        return 0;  // (a talk's box: its ends at +-284, the name; its answers - boxes at 450, texts from 352 - out to the edge)
+    // A talk's box on screen: nothing moves out. Its ends (+-284) and the name, and its answers (boxes at 450, texts from
+    // 352) split from it (#200); and the windows a talk opens - the stable's horse list and its card, the mane and saddle
+    // lists - are pieces whose centres sit at different x, moved by different amounts: the card's background left its
+    // frame, the list's names were cut at their start (#231). The game hides the HUD (hearts, minimap) during a talk.
+    if (talk_frame && renderer_present_count() - talk_frame <= 3) return 0;
+    // The button prompts' row along the bottom (y about -320; on a horse "Reset Camera ZL ... Yah! A", from x -250 to
+    // 365) is centred by the game: its texts (moved by their origin) and their dark shadows (by their centre) fell either
+    // side of the blend below and parted - "Yah!" off its shadow (2026-11-03). The minimap's group sits higher or past it.
+    if (y < -290.0f && x > -440.0f && x < 440.0f) return 0;  // (a text's origin: a little above its middle)
     float ax = x < 0 ? -x : x, t = (ax - 180.0f) / (260.0f - 180.0f);
     if (t <= 0) return 0;
     if (t > 1) t = 1;
