@@ -141,6 +141,14 @@ correções específicas. Relatos de bugs, testes em outros aparelhos e contribu
 - O driver Turnip do [Mesa](https://www.mesa3d.org) (MIT), que os jogadores carregam por conta própria.
 - Fontes: [Baloo 2](https://github.com/EkType/Baloo2) (OFL), DejaVu Sans (licença Bitstream Vera). O robô do Android
   é reproduzido ou modificado a partir de trabalho criado e compartilhado pelo Google (CC BY 3.0).
+- Contribuições por pull request:
+  - [3122380113](https://github.com/3122380113): a compilação sem FFmpeg de volta
+    ([#97](https://github.com/mamcjr/BOTWRecompAndroid/pull/97)); o som que voltava mudo depois de o app ficar em
+    segundo plano ([#96](https://github.com/mamcjr/BOTWRecompAndroid/pull/96)).
+  - [todwang96](https://github.com/todwang96): o heap da GPU ligado no Adreno 7xx com o Turnip, sem ele o texto ficava em
+    branco ([#103](https://github.com/mamcjr/BOTWRecompAndroid/pull/103)).
+  - [Ureta93](https://github.com/Ureta93): arquivos de configuração salvos com quebras de linha do Windows
+    ([#187](https://github.com/mamcjr/BOTWRecompAndroid/pull/187)).
 - Feito com o [Claude Code](https://claude.com/claude-code) (Anthropic).
 
 *The Legend of Zelda* e *Breath of the Wild* são marcas da Nintendo. Este projeto não é afiliado nem endossado pela

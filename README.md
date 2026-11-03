@@ -145,6 +145,14 @@ Bug reports, device tests, and contributions are also greatly appreciated.
 - [Mesa](https://www.mesa3d.org)'s Turnip driver (MIT), which players load themselves.
 - Fonts: [Baloo 2](https://github.com/EkType/Baloo2) (OFL), DejaVu Sans (Bitstream Vera license). The Android robot
   is reproduced or modified from work created and shared by Google (CC BY 3.0).
+- Contributions through pull requests:
+  - [3122380113](https://github.com/3122380113): builds without FFmpeg again
+    ([#97](https://github.com/mamcjr/BOTWRecompAndroid/pull/97)); sound that came back silent after the app sat in the
+    background ([#96](https://github.com/mamcjr/BOTWRecompAndroid/pull/96)).
+  - [todwang96](https://github.com/todwang96): the GPU heap kept on for Adreno 7xx under Turnip, blank text otherwise
+    ([#103](https://github.com/mamcjr/BOTWRecompAndroid/pull/103)).
+  - [Ureta93](https://github.com/Ureta93): settings files saved with Windows line endings
+    ([#187](https://github.com/mamcjr/BOTWRecompAndroid/pull/187)).
 - Made with [Claude Code](https://claude.com/claude-code) (Anthropic).
 
 *The Legend of Zelda* and *Breath of the Wild* are trademarks of Nintendo. This project is not affiliated with or
