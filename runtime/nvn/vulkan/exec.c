@@ -1505,8 +1505,10 @@ static uint64_t wb_max(void) {  // (LARECOMP_WRITEBACK_MAX=<bytes>: a larger lim
 // Linear render targets (NVN flag 0x40, rows nvn_linear_rt_pitch apart; or 0x10, at the texture's stride) are
 // written back whatever their size up to a slot: BOTW's terrain height tiles (8 levels of 256x256 R16) are drawn on
 // the GPU and read by the CPU's height queries (f_100f841cc) - the feet's placement on the terrain (f_100d1a080) put
-// Link and the NPCs into the ground without them. LARECOMP_WB_LINEAR=0: off.
-#define WB_LINEAR_MAX (512u * 1024)
+// Link and the NPCs into the ground without them. LARECOMP_WB_LINEAR=0: off. Up to 1 MB: a 512x512 RGBA8 linear
+// target (1 MB, at 3e8449000 in a 1.9.0 run) the CPU reads to place the ground's fallen leaves was left out at 512 KB -
+// it read zeros, and leaf patches came and went on any ground around Link (#168, 2026-11-03).
+#define WB_LINEAR_MAX (1024u * 1024)
 #define WB_SLOT (WB_MAX > WB_LINEAR_MAX ? WB_MAX : WB_LINEAR_MAX)
 // Two pools of slots: WB_SMALL of WB_MAX bytes for the small targets, WB_BIG of WB_SLOT for the linear ones (the terrain
 // heights). A 1.9.0 frame queues ~30 write-backs (1x1 to 24x24: exposure, depth bounds, the feet's 1x1 targets) and 32
@@ -1548,6 +1550,22 @@ static bool wb_eligible(NvnTexture *t, TexBackend *b, uint32_t lv) {
     if (only >= 0 && t->format != (uint32_t)only && tegra_total_size(&t->layout) > 4096) return false;
     static int lin = -1;  // (linear targets too, up to a slot; LARECOMP_WB_LINEAR=0: not)
     if (lin < 0) lin = !getenv("LARECOMP_WB_LINEAR") || atoi(getenv("LARECOMP_WB_LINEAR"));
+    {   // LARECOMP_WB_ADDR=<hex>[-<hex>][+...] (bisecting): targets at those addresses (or in those ranges) too, up to
+        // a slot
+        static uint64_t lo[16], hi[16];
+        static int nwant = -1;
+        if (nwant < 0) {
+            nwant = 0;
+            for (const char *e = getenv("LARECOMP_WB_ADDR"); e && *e && nwant < 16;) {
+                lo[nwant] = hi[nwant] = strtoull(e, (char **)&e, 16);
+                if (*e == '-') hi[nwant] = strtoull(e + 1, (char **)&e, 16);
+                nwant++;
+                while (*e == ',' || *e == '+') e++;
+            }
+        }
+        for (int i = 0; i < nwant; i++)
+            if (t->addr >= lo[i] && t->addr <= hi[i] && tegra_total_size(&t->layout) <= WB_SLOT) return true;
+    }
     return t->addr >= HEAP_BASE && tegra_total_size(&t->layout) <= ((lin && (t->flags & 0x50)) ? WB_SLOT : WB_MAX);
 }
 
@@ -6076,6 +6094,20 @@ static void draw_(CmdRec *r, bool indexed) {
             }
         }
         if (g_debug_frame && getenv("LARECOMP_LOG_FSHASH")) LOG("[fshash] fs=%llx hash %016llx\n", (unsigned long long)fs, (unsigned long long)last_hash);
+        {   // LARECOMP_COUNT_FS=<fs hash> (diagnosis): that fragment shader's draws a frame, logged when the count changes
+            // (#168: do the ground's leaves stop being drawn, or get drawn somewhere else?)
+            static uint64_t want = ~0ull, frame = ~0ull;
+            static unsigned n, last_n = ~0u;
+            if (want == ~0ull) want = getenv("LARECOMP_COUNT_FS") ? strtoull(getenv("LARECOMP_COUNT_FS"), NULL, 16) : 0;
+            if (want) {
+                uint64_t f = renderer_present_count();
+                if (f != frame) {
+                    if (n != last_n) LOG("[fscount] frame %llu: %u draws\n", (unsigned long long)frame, n);
+                    last_n = n, n = 0, frame = f;
+                }
+                if (last_hash == want) n++;
+            }
+        }
         g_cur_fs_hash = last_hash;
         {   // Widescreen: a menu's layout pane that shows a picture of the world (the blurred world behind the pause
             // menu: a copy of the scene, a target widened to the window's shape) widens with it - drawn in the middle
