@@ -175,9 +175,20 @@ bool widescreen_minimap_at(float w, float h, float *x, float *y, float *r) {
     return true;
 }
 
+// A pane as wide as the screen (vulkan/exec.c full_width_pane: a loading screen's band and its black, the Game Over's
+// black) was drawn this frame or in the last few: a screen of its own is up, nothing moves out. As a load ends the world
+// is drawn again under the loading screen (in_world): its title and tip went out to the left edge, cut, and "Next tip"
+// off the right one, for its last second (#195).
+static uint64_t band_frame;
+void widescreen_band_seen(void) {
+    extern uint64_t renderer_present_count(void);
+    band_frame = renderer_present_count();
+}
+
 float widescreen_hud_shift(float x, float y) {
     extern uint64_t renderer_present_count(void);
     if (!widescreen_ui_centred() || widescreen_in_menu() || !in_world()) return 0;
+    if (band_frame && renderer_present_count() - band_frame <= 3) return 0;
     // A talk's box on screen: nothing moves out. Its ends (+-284) and the name, and its answers (boxes at 450, texts from
     // 352) split from it (#200); and the windows a talk opens - the stable's horse list and its card, the mane and saddle
     // lists - are pieces whose centres sit at different x, moved by different amounts: the card's background left its

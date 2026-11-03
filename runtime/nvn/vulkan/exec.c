@@ -3908,6 +3908,8 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             } else if (size >= 0x230 && f[15] == 0 && f[0] > 0 && fabsf(f[5] / f[0] - 16.0f / 9.0f * g) < 0.01f &&
                        full_width_pane(f)) {
                 panefix_log("full-width", f);
+                extern void widescreen_band_seen(void);  // (a screen of its own: the HUD stays put, widescreen_hud_shift)
+                widescreen_band_seen();
                 // A pane as wide as the layout, about its middle (the Game Over screen's black, a menu's dimming, a
                 // loading screen's band) covers the widened screen, not only its middle 16:9 part (the world showed at
                 // the sides, 2026-10-28), at any scale (the Game Over fade animates it)
@@ -3950,8 +3952,11 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 VkSpan c = vk_transient_copy(f, size, 256);
                 float *m = (float *)c.ptr;
                 for (int i = 0; i < 4; i++) m[i] /= g;
-                if (full_width_pane(f))
+                if (full_width_pane(f)) {
                     for (int i = 16; i < 20; i++) m[i] *= g;
+                    extern void widescreen_band_seen(void);
+                    widescreen_band_seen();
+                }
                 return ubo_span(c, size);
             } else if (size >= 0x230 && f[15] == 0 && f[0] > 0 && fabsf(f[5] / f[0] - 16.0f / 9.0f * g) < 0.01f) {
                 float d = widescreen_hud_shift(f[19], f[23]);
