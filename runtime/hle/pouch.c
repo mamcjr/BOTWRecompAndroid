@@ -1,9 +1,9 @@
-// The player's equipped weapon, bow and shield, read from the game's inventory (uking::ui::PauseMenuDataMgr in
+// The player's equipped weapon, bow, shield and arrows, read from the game's inventory (uking::ui::PauseMenuDataMgr in
 // zeldaret/botw, uiPauseMenuDataMgr.h): the touch controls show their icons (ui/touch_controls.mm).
 // The manager is a singleton (sInstance, found by its 0x44808-byte allocation: build/find_pmdm.py). The object holds
 // its items' list at +0x68 (a sead::OffsetList: the head's prev / next, its count, then the node's offset in an item:
 // 8) and the 420 items' storage at +0x98, 0x298 bytes each. A PouchItem (as the game has it, 2026-11-02): its vtable,
-// the list node at +8, mType at +0x18 (0 sword, 1 bow, 3 shield), mEquipped at +0x24, mName (a
+// the list node at +8, mType at +0x18 (0 sword, 1 bow, 2 arrow, 3 shield), mEquipped at +0x24, mName (a
 // sead::FixedSafeString<64>) its text at +0x3C.
 // The game changes the list on its own threads while this reads it: every node is checked to be one of the storage's
 // items before it's read, so a list caught mid-change gives up (false) instead of following a stale pointer.
@@ -33,10 +33,10 @@ static uint64_t pmdm_instance_ref(void) {  // where sInstance is (canonical, 0x7
     }
 }
 
-// out[0] the equipped sword's actor name, out[1] the bow's, out[2] the shield's ("" none). false: not read (no game
+// out[0] the equipped sword's actor name, out[1] the bow's, out[2] the shield's, out[3] the arrows' ("" none). false: not read (no game
 // running, another version, the list changing).
-bool pouch_equipped(char out[3][64]) {
-    for (int i = 0; i < 3; i++) out[i][0] = 0;
+bool pouch_equipped(char out[4][64]) {
+    for (int i = 0; i < 4; i++) out[i][0] = 0;
     uint64_t ref = pmdm_instance_ref();
     if (!ref) return false;
     uint64_t inst = *(volatile uint64_t *)(uintptr_t)(ref - 0x7000000000ull + GUEST_LO);
@@ -49,7 +49,7 @@ bool pouch_equipped(char out[3][64]) {
         if (n > PM_NITEMS || item < lo || item >= hi || (item - lo) % PM_ITEM_SIZE) return false;
         int32_t type = *(volatile int32_t *)(uintptr_t)(item + PI_TYPE);
         uint8_t equipped = *(volatile uint8_t *)(uintptr_t)(item + PI_EQUIPPED);
-        int slot = type == 0 ? 0 : type == 1 ? 1 : type == 3 ? 2 : -1;
+        int slot = type == 0 ? 0 : type == 1 ? 1 : type == 3 ? 2 : type == 2 ? 3 : -1;
         if (equipped && slot >= 0) {
             const char *s = (const char *)(uintptr_t)(item + PI_NAME);
             int k = 0;

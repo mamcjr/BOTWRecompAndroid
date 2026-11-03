@@ -60,7 +60,7 @@ typedef struct {
     float touch_pos[TOUCH_NCTL][2];  // each on-screen control's place, a share of the screen (negative: default)
     // The icon layout (ui/touch_controls.mm), in the world only - the classic one above stays in the game's menus:
     // touch_scheme 1 (0: the classic one everywhere), its controls' places of their own
-#define TOUCH_NCTL2 22
+#define TOUCH_NCTL2 24
     int touch_scheme;
     float touch_pos2[TOUCH_NCTL2][2];
     float touch_size[TOUCH_NCTL], touch_size2[TOUCH_NCTL2];  // each control's own size (times touch_scale; 0: 1)

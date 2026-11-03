@@ -57,7 +57,7 @@ _Static_assert(K_N == TOUCH_NCTL, "settings.h TOUCH_NCTL");
 // The icon layout's controls, in g_settings.touch_pos2 order (TOUCH_NCTL2 entries): what each holds (a Switch button
 // bit, -1 none), its default place (a share of the screen) and radius (a share of its height)
 enum { I_MOVE, I_CROUCH, I_WEAPON, I_SHIELD, I_WHISTLE, I_SLATE, I_SCOPE, I_INVENTORY, I_ATTACK, I_POWER, I_BLOCK, I_BOW,
-       I_JUMP, I_SPRINT, I_A, I_R, I_MENU, I_PUSH, I_PULL, I_MLEFT, I_MRIGHT, I_CANCEL, I_N };
+       I_JUMP, I_SPRINT, I_A, I_R, I_MENU, I_PUSH, I_PULL, I_MLEFT, I_MRIGHT, I_CANCEL, I_ARROWS, I_ALBUM, I_N };
 _Static_assert(I_N == TOUCH_NCTL2, "settings.h TOUCH_NCTL2");
 static const struct { int bit; float x, y, r; } IC[I_N] = {
     {-1, 0.09f, 0.77f, 0},               // the left stick's resting place
@@ -82,6 +82,10 @@ static const struct { int bit; float x, y, r; } IC[I_N] = {
     {TB_LEFT, 0.695f, 0.44f, 0.04f},     //   left
     {TB_RIGHT, 0.775f, 0.44f, 0.04f},    //   right
     {TB_B, 0.085f, 0.40f, 0.05f},        // cancel (B): only while the bow or a throw is held - the left thumb's (shown2)
+    {TB_LEFT, 0.19f, 0.40f, 0.05f},      // arrows: only while the bow is held - held, the game's arrow picker (the d-pad's
+                                         //   left with the bow drawn), picked by the same finger's drag as the weapons
+    {TB_MINUS, 0.735f, 0.44f, 0.045f},   // the album (Minus): only with the camera rune selected, where Magnesis's cross
+                                         //   sits - the map moved to the minimap and left the camera without it (#202)
 };
 enum { C_ICON = 300, C_EDIT2 = 400 };  // (a finger's ctl: an icon control, C_ICON + I_*; dragged while editing, C_EDIT2 + I_*)
 #define POWER_HOLD_MS 280  // (the power held this long: the rune wheel, and no L)
@@ -358,6 +362,7 @@ static const char *const rune_item[8] = {"Obj_RemoteBombBall", "Obj_RemoteBombCu
 static int rune_now = -1;  // the game's selected rune (0-7; -1 unknown)
 
 static bool bow_held;  // (icon layout) a finger holds the bow or throw (recompute)
+static bool bow_drawn;  // (icon layout) a finger holds the bow (recompute)
 
 // (icon layout) a control on screen: Magnesis's d-pad (up pushes, down pulls; #199) only while it's the rune selected,
 // the cancel only while the bow or a throw is held (or editing the layout); the others always, but the old scope's place
@@ -366,6 +371,8 @@ static bool shown2(int k) {
     if (talk_on()) return k == I_A || k == I_SPRINT || k == I_MENU;  // (a talk: A, B, the app's menu - and the stick)
     if (k >= I_PUSH && k <= I_MRIGHT) return editing || rune_now == 2;
     if (k == I_CANCEL) return editing || bow_held;
+    if (k == I_ARROWS) return editing || bow_drawn;
+    if (k == I_ALBUM) return editing || rune_now == 5;
     return true;
 }
 
@@ -430,7 +437,8 @@ static void recompute(void) {  // (t_lock held; also once a frame: the power's h
     bool wheel_start = false;
     if (icons_on) rune_now = gdt_rune(&runes_owned);
     fan_open = false;
-    bow_held = false;
+    bow_held = bow_drawn = false;
+    int pick = -1;  // (a picker's finger: its drag picks, before the bow's aims)
     for (int i = 0; i < nfingers && !editing; i++) {
         int c = fingers[i].ctl;
         if (c >= 0 && c < 16) b |= 1ull << c;
@@ -444,10 +452,12 @@ static void recompute(void) {  // (t_lock held; also once a frame: the power's h
             continue;
         }
         if (IC[k].bit >= 0 && IC[k].bit < 16) b |= 1ull << IC[k].bit;
-        if (k == I_WEAPON || k == I_SHIELD) aim = i;
+        if (k == I_WEAPON || k == I_SHIELD || k == I_ARROWS) aim = pick = i;
         if ((k == I_BOW || k == I_R) && !g_settings.motion) aim = i;  // (with motion controls on, the phone aims)
         if (k == I_BOW || k == I_R) bow_held = true;
+        if (k == I_BOW) bow_drawn = true;
     }
+    if (pick >= 0) aim = pick;
     if (surf_a_at && now >= surf_a_at) pulse_until[TB_A] = now + PULSE_MS, surf_a_at = 0;  // (shield surfing: A in the air)
     for (int i = 0; i < 16; i++) if (pulse_until[i] > now) b |= 1ull << i;
     bool goal = goal_step(now);
@@ -459,7 +469,7 @@ static void recompute(void) {  // (t_lock held; also once a frame: the power's h
     // take its drag as a held stick, from where it landed - the camera's speed-driven tilt picked nothing; with the
     // bow or a throw it keeps turning the camera (drag_frame)
     int ak = aim >= 0 ? fingers[aim].ctl - C_ICON : -1;
-    bool picker = ak == I_WEAPON || ak == I_SHIELD;
+    bool picker = ak == I_WEAPON || ak == I_SHIELD || ak == I_ARROWS;
     float ox = 0, oy = 0;  // (the drag that tilts it)
     if (aim >= 0 && stick[1].on && picker) ox = stick[1].kx - stick[1].cx, oy = stick[1].ky - stick[1].cy;
     else if (aim >= 0 && !stick[1].on) ox = fingers[aim].x - fingers[aim].sx, oy = fingers[aim].y - fingers[aim].sy;
@@ -495,7 +505,7 @@ static void icon_release(int f, bool cancelled) {  // (t_lock held)
     }
     else if (IC[k].bit >= 0 && IC[k].bit < 16 && now - fingers[f].t0 < PULSE_MS) pulse_until[IC[k].bit] = fingers[f].t0 + PULSE_MS;
     // (mode_check: the icon layout stays until the game is back in the world - at most 5 s - unless a real menu follows)
-    if (k == I_WEAPON || k == I_SHIELD || (k == I_POWER && fingers[f].wheel)) keep_icons_until = now + 5000;
+    if (k == I_WEAPON || k == I_SHIELD || k == I_ARROWS || (k == I_POWER && fingers[f].wheel)) keep_icons_until = now + 5000;
     if (k == I_INVENTORY) keep_icons_until = 0;
     if (k == I_BLOCK) block_up_ms = now;  // (a second touch soon: shield surfing)
 }
@@ -823,8 +833,8 @@ static ImTextureID decode_item_icon(const char *item) {  // (UI/StockItem/<item>
 
 // The equipped weapon, bow and shield (hle/pouch.c), by actor name - their icons read once each and kept (a DLC item,
 // in the DLC's own files: none, the fixed icon stays)
-extern "C" bool pouch_equipped(char out[3][64]);
-static char equipped[3][64];
+extern "C" bool pouch_equipped(char out[4][64]);
+static char equipped[4][64];
 static ImTextureID item_icon(const char *item) {
     static struct { char name[64]; ImTextureID tex; } cache[64];
     static int n;
@@ -839,10 +849,11 @@ static void poll_equipped(void) {  // twice a second
     uint64_t now = SDL_GetTicks();
     if (now - last < 500) return;
     last = now;
-    char e[3][64] = {};
+    char e[4][64] = {};
     if (!pouch_equipped(e) || !memcmp(e, equipped, sizeof e)) return;
     memcpy(equipped, e, sizeof equipped);
-    fprintf(stderr, "[touch] equipped: %s, %s, %s\n", e[0][0] ? e[0] : "-", e[1][0] ? e[1] : "-", e[2][0] ? e[2] : "-");
+    fprintf(stderr, "[touch] equipped: %s, %s, %s, %s\n", e[0][0] ? e[0] : "-", e[1][0] ? e[1] : "-", e[2][0] ? e[2] : "-",
+            e[3][0] ? e[3] : "-");
 }
 
 static void load_icon_art(void) {
@@ -942,7 +953,7 @@ static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU3
             dl->AddLine(ImVec2(x - t, y + t), ImVec2(x + t, y - t), red, w);
             continue;
         }
-        if (k >= I_PUSH) {  // (Magnesis's d-pad: an arrow its way, the magnet's cyan)
+        if (k >= I_PUSH && k <= I_MRIGHT) {  // (Magnesis's d-pad: an arrow its way, the magnet's cyan)
             static const float dir[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};  // (I_PUSH, I_PULL, I_MLEFT, I_MRIGHT)
             float dx = dir[k - I_PUSH][0], dy = dir[k - I_PUSH][1], t = r * 0.45f;
             dl->AddTriangleFilled(ImVec2(x + dx * t, y + dy * t), ImVec2(x - dx * t * 0.6f - dy * t, y - dy * t * 0.6f + dx * t),
@@ -953,11 +964,11 @@ static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU3
                 : k == I_INVENTORY ? ACT_BAG : -1;
         int gi = k == I_ATTACK || k == I_WEAPON ? GI_SWORD : k == I_BOW ? GI_BOW : k == I_BLOCK || k == I_SHIELD ? GI_SHIELD
                : k == I_SLATE ? GI_SLATE : k == I_POWER ? GI_BOMB : -1;
-        float box = r * (k == I_BOW ? 0.5f : k == I_WEAPON || k == I_SHIELD ? 0.52f : 0.66f);  // (half the picture's side)
+        float box = r * (k == I_BOW ? 0.5f : k == I_WEAPON || k == I_SHIELD || k == I_ARROWS ? 0.52f : 0.66f);  // (half the picture's side)
         ImVec2 ia(x - box, y - box), ib(x + box, y + box);
         // (the equipped item's icon where there is one: the weapon picker shows the bow while it's drawn)
         int eq = k == I_ATTACK || k == I_WEAPON ? (k == I_WEAPON && (pressed >> I_BOW & 1) ? 1 : 0) : k == I_BOW ? 1
-               : k == I_BLOCK || k == I_SHIELD ? 2 : -1;
+               : k == I_BLOCK || k == I_SHIELD ? 2 : k == I_ARROWS ? 3 : -1;
         ImTextureID it = eq >= 0 ? item_icon(equipped[eq]) : 0;
         if (k == I_POWER && rune_now >= 0) it = item_icon(rune_item[rune_now]);  // (the selected rune)
         if (act >= 0 && act_tex) dl->AddImage(act_tex, ia, ib, ImVec2(act / (float)ACT_N, 0), ImVec2((act + 1) / (float)ACT_N, 1), img);
@@ -965,12 +976,12 @@ static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU3
         else if (gi >= 0 && gi_tex[gi]) dl->AddImage(gi_tex[gi], ia, ib, ImVec2(0, 0), ImVec2(1, 1), img);
         else if (k == I_SCOPE) spyglass(dl, c, r, text);
         else {  // (no picture: interact and throw, or the game's icons not read yet)
-            static const char *const label[I_N] = {"", "L3", ">", "<", "v", "R3", "", "+", "Y", "L", "ZL", "ZR", "X", "B", "A", "R", "", "^", "v", "<", ">", "B"};
+            static const char *const label[I_N] = {"", "L3", ">", "<", "v", "R3", "", "+", "Y", "L", "ZL", "ZR", "X", "B", "A", "R", "", "^", "v", "<", ">", "B", "<", "-"};
             float fs = r * 0.9f;
             ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, label[k]);
             dl->AddText(font, fs, ImVec2(x - ts.x / 2, y - ts.y / 2), text, label[k]);
         }
-        if (k == I_WEAPON || k == I_SHIELD) swap_arrows(dl, c, r, cyan);
+        if (k == I_WEAPON || k == I_SHIELD || k == I_ARROWS) swap_arrows(dl, c, r, cyan);
     }
     // the rune fan, while the power is held
     pthread_mutex_lock(&t_lock);
