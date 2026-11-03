@@ -1396,11 +1396,18 @@ static BcShadow *bc_shadow_create(NvnTexture *t, TexBackend *b, VkFormat vf, uin
     bool is3d = b->base_type == VK_IMAGE_VIEW_TYPE_3D;
     uint32_t nlv = b->levels < 16 ? b->levels : 16, w = 1, h = 1, nslices = 0;
     BcShadow *s = calloc(1, sizeof *s);
-    for (uint32_t lv = 0; lv < nlv; lv++) {  // (level 0 wide enough that each level's blocks fit: 20 texels - 5, 3, 2, 1, 1)
-        if (bc_blocks(b->width, lv) << lv > w) w = bc_blocks(b->width, lv) << lv;
-        if (bc_blocks(b->height, lv) << lv > h) h = bc_blocks(b->height, lv) << lv;
+    if (!s) return NULL;
+    for (uint32_t lv = 0; lv < nlv; lv++) {  // (level 0 wide enough that each level's blocks fit: 20 texels - 5, 3, 2, 1, 1;
+        uint32_t bw = bc_blocks(b->width, lv), bh = bc_blocks(b->height, lv);  // a level of one block fits any: its extent is
+        if (bw > 1 && bw << lv > w) w = bw << lv;                               // at least 1)
+        if (bh > 1 && bh << lv > h) h = bh << lv;
         s->first[lv] = nslices;
         nslices += level_slices(b, lv);
+    }
+    {   // (as many levels as the image's largest side allows: that side at least 2^(levels - 1))
+        uint32_t big = w > h ? w : h;
+        if (is3d && b->depth > big) big = b->depth;
+        if (big < 1u << (nlv - 1)) *(w >= h ? &w : &h) = 1u << (nlv - 1);
     }
     TexBackend *i = &s->img;
     i->width = w, i->height = h, i->depth = b->depth, i->layers = b->layers, i->levels = nlv, i->samples = 1;
@@ -1470,6 +1477,12 @@ static void bc_shadow_resolve(TexBackend *b) {
     bool is3d = b->base_type == VK_IMAGE_VIEW_TYPE_3D;
     uint32_t nlv = s->img.levels, nslices = s->first[nlv - 1] + level_slices(b, nlv - 1), n = 0;
     VkBufferImageCopy *rg = malloc(nslices * sizeof *rg);
+    if (!rg) {
+        LOG("[vk] BC %ux%ux%u: no memory to decode its shadow\n", b->width, b->height, b->depth);
+        memset(s->drawn, 0, nslices);  // (what was drawn is lost; the shadow stays usable)
+        s->dirty = false;
+        return;
+    }
     uint64_t total = 0;
     for (uint32_t lv = 0; lv < nlv; lv++)
         for (uint32_t z = 0; z < level_slices(b, lv); z++) {

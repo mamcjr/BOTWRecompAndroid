@@ -78,15 +78,18 @@ PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
 
 static int failures;
 static void check(const char *name, bool ok) {
-    printf("%s %s (shadows %d, readbacks %d of %d regions, uploads %d, shadow fills %d of %llu blocks, shadow copies %d of %d levels)\n",
-           ok ? "ok  " : "FAIL", name, images, readbacks, readback_regions, uploads, fills, (unsigned long long)filled_blocks,
+    printf("%s %s (shadows %d, last %llux%llux%llu, readbacks %d of %d regions, uploads %d, shadow fills %d of %llu blocks, shadow copies %d of %d levels)\n",
+           ok ? "ok  " : "FAIL", name, images, (unsigned long long)image_extent[0], (unsigned long long)image_extent[1],
+           (unsigned long long)image_extent[2], readbacks, readback_regions, uploads, fills, (unsigned long long)filled_blocks,
            image_copies, image_copy_regions);
     failures += !ok;
 }
 
 // A 32x32x32 BC4 volume (6 levels) in guest memory, decoded into R8 (bc_vf), as BOTW's dissolve noise.
 static uint8_t guest[1 << 20];
+static void outside(void);
 static void setup(void) {
+    if (tex.backend) outside();  // (the previous case's shadows decoded: off the dirty list)
     memset(&tex, 0, sizeof tex), memset(&be, 0, sizeof be);
     tex.width = tex.height = tex.depth = 32, tex.format = 0x49, tex.backend = &be, tex.addr = (uintptr_t)guest;
     tex.layout = (TexLayout){.width = 32, .height = 32, .depth = 32, .layers = 1, .levels = 6, .fmt = &bc4};
@@ -120,6 +123,7 @@ static void outside(void) {  // anything outside a pass
 }
 
 int main(void) {
+    setvbuf(stdout, NULL, _IONBF, 0);  // (a crash keeps what was printed)
     setenv("LARECOMP_3D_RT", "2", 1);  // (3D targets at every level: the dissolve volume's mips are drawn)
     // P1: level 0 drawn as RGBA16_UINT, then level 1 as RG32_UINT (another 8-byte format): level 0's blocks are decoded
     // before its shadow goes, and level 1's afterwards
@@ -144,6 +148,25 @@ int main(void) {
     outside();
     draw(0x17, 2);  // another format: the old shadow's blocks (level 1 drawn since) go into the new one
     check("P2: a shadow in another format takes the old one's blocks", image_copies == 1 && image_copy_regions == 6 && fills == 6);
+    // P3: the shadow's level 0 as small as its levels allow - the 32x32x32 volume's 8x8 blocks (not 32x32); a 2048x16
+    // texture with 12 levels: 512x4 blocks, widened to 2048 for the level count (not 2048x2048); 20x20 with 5 levels
+    setup();
+    draw(0x2C, 0);
+    check("P3: 32x32x32, 6 levels: shadow 8x8x32", image_extent[0] == 8 && image_extent[1] == 8 && image_extent[2] == 32);
+    setup();
+    tex.width = be.width = 2048, tex.height = be.height = 16, tex.depth = be.depth = 1, be.levels = 12;
+    be.base_type = VK_IMAGE_VIEW_TYPE_2D;
+    tex.layout = (TexLayout){.width = 2048, .height = 16, .depth = 1, .layers = 1, .levels = 12, .fmt = &bc4};
+    tegra_layout_init(&tex.layout);
+    draw(0x2C, 0);
+    check("P3: 2048x16, 12 levels: shadow 2048x4", image_extent[0] == 2048 && image_extent[1] == 4 && image_extent[2] == 1);
+    setup();
+    tex.width = be.width = 20, tex.height = be.height = 20, tex.depth = be.depth = 1, be.levels = 5;
+    be.base_type = VK_IMAGE_VIEW_TYPE_2D;
+    tex.layout = (TexLayout){.width = 20, .height = 20, .depth = 1, .layers = 1, .levels = 5, .fmt = &bc4};
+    tegra_layout_init(&tex.layout);
+    draw(0x2C, 0);
+    check("P3: 20x20, 5 levels: shadow 16x8", image_extent[0] == 16 && image_extent[1] == 8 && image_extent[2] == 1);
     if (failures) { printf("test_bc_shadow: %d check(s) failed\n", failures); return 1; }
     printf("test_bc_shadow: all passed\n");
     return 0;
