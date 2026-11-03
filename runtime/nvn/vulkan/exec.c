@@ -1907,7 +1907,7 @@ static void begin_pass(void) {
 #endif
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each pass its own submission)
 #ifdef __ANDROID__
-    vk_bc_shadows_resolve(st.rt.color, st.rt.ncolor);  // (BC textures drawn into before: decoded, unless this pass draws on)
+    vk_bc_shadows_resolve(st.rt.color, st.rt.cview, st.rt.has_cview, st.rt.ncolor);  // (BC textures drawn into before: decoded, unless this pass draws on)
 #endif
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
@@ -5840,7 +5840,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     vk_end_pass();
 #ifdef __ANDROID__
-    vk_bc_shadows_resolve(NULL, 0);  // (BC textures drawn into: decoded before anything outside a pass reads them)
+    vk_bc_shadows_resolve(NULL, NULL, NULL, 0);  // (BC textures drawn into: decoded before anything outside a pass reads them)
 #endif
     VkCommandBuffer cb = vk_cmd();
     bool chained = dchain && cb == dchain_cb && dchain_ok();
@@ -7106,7 +7106,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     t = alias_read(t);
     vk_end_pass();
 #ifdef __ANDROID__
-    vk_bc_shadows_resolve(NULL, 0);
+    vk_bc_shadows_resolve(NULL, NULL, NULL, 0);
 #endif
     const FormatInfo *fi;
     int32_t rg[6];
@@ -7177,7 +7177,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     if (!st_ || !dt) return;
     vk_end_pass();
 #ifdef __ANDROID__
-    vk_bc_shadows_resolve(NULL, 0);
+    vk_bc_shadows_resolve(NULL, NULL, NULL, 0);
 #endif
     if (dl_on == 2) renderer_flush();  // (LARECOMP_VK_DEVLOST_TRACE=2: each copy its own submission, waited on)
     gp_mark(vk_cmd(), "copy texture %ux%u -> %ux%u", st_->width, st_->height, dt->width, dt->height);

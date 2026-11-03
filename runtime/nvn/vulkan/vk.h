@@ -148,10 +148,10 @@ VkImageView vk_dummy_view(int textype);
 #ifdef __ANDROID__
 // A render target view of a CPU-decoded BC texture in a format of the block's size (GPU compression): a view of its
 // shadow image (*fmt, *w x *h: that format and level extent), else VK_NULL_HANDLE. vk_bc_shadows_resolve: the blocks
-// drawn decoded into the textures, but those the next pass draws into (outside any pass, before anything reads them;
-// waits for the GPU).
+// drawn decoded into the textures, but those the next pass draws into in their shadow's format (targets through
+// views[i] when has_view[i]; outside any pass, before anything reads them; waits for the GPU).
 VkImageView vk_bc_shadow_view(NvnTexture *t, const NvnTextureView *v, VkFormat *fmt, uint32_t *w, uint32_t *h);
-void vk_bc_shadows_resolve(NvnTexture *const *targets, int ntargets);
+void vk_bc_shadows_resolve(NvnTexture *const *targets, const NvnTextureView *views, const uint8_t *has_view, int ntargets);
 #endif
 VkSampler vk_sampler(NvnSamplerDesc *d);
 VkSampler vk_sampler_plain(NvnSamplerDesc *d);  // (the same without depth comparison: for non-shadow lookups)

@@ -1401,7 +1401,10 @@ VkImageView vk_bc_shadow_view(NvnTexture *t, const NvnTextureView *v, VkFormat *
         return VK_NULL_HANDLE;  // (LARECOMP_3D_RT: as vk_view)
     VkFormat vf = vk_format(v->format);
     BcShadow *s = b->bc_shadow;
-    if (s && s->img.format != vf) bc_shadow_destroy(b), s = NULL;
+    if (s && s->img.format != vf) {  // (one drawn into in another format: vk_bc_shadows_resolve decoded it, unless it is
+        if (s->dirty) return VK_NULL_HANDLE;  // a target of this pass too)
+        bc_shadow_destroy(b), s = NULL;
+    }
     if (!s && nbc_dirty < (int)(sizeof bc_dirty / sizeof *bc_dirty)) s = bc_shadow_create(t, b, vf, bf->bpb);
     if (!s || (!s->dirty && nbc_dirty == (int)(sizeof bc_dirty / sizeof *bc_dirty))) return VK_NULL_HANDLE;
     uint32_t n = level_slices(b, lv);
@@ -1468,11 +1471,14 @@ static void bc_shadow_resolve(TexBackend *b) {
     s->dirty = false;
 }
 
-void vk_bc_shadows_resolve(NvnTexture *const *targets, int ntargets) {
+void vk_bc_shadows_resolve(NvnTexture *const *targets, const NvnTextureView *views, const uint8_t *has_view, int ntargets) {
     for (int k = 0; k < nbc_dirty; k++) {
         TexBackend *b = bc_dirty[k];
-        bool drawn = false;  // (still being drawn into: the next pass's target)
-        for (int i = 0; i < ntargets; i++) drawn |= targets[i] && targets[i]->backend == b;
+        bool drawn = false;  // (still being drawn into: the next pass's target, through a view in the shadow's format -
+                             // another one replaces the shadow, vk_bc_shadow_view)
+        for (int i = 0; i < ntargets; i++)
+            drawn |= targets[i] && targets[i]->backend == b && has_view[i] && (views[i].setmask & 4) &&
+                     vk_format(views[i].format) == b->bc_shadow->img.format;
         if (drawn) continue;
         bc_shadow_resolve(b);
         bc_dirty[k--] = bc_dirty[--nbc_dirty];
