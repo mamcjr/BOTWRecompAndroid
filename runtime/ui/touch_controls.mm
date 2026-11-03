@@ -247,10 +247,17 @@ static int hit2(float x, float y, int *k) {
 }
 
 static int hit(float x, float y, int *k) {  // the control under (x, y) (*k: its layout entry)
-    float mx, my, mr;  // (the minimap, up top with the on-screen controls: a touch opens the map - Minus)
+    // (the minimap, up top with the on-screen controls: a double tap opens the map - Minus. One tap goes on to what's
+    // under it - the classic layout's R and ZR sit there, and a touch meant for them opened the map: #209, #218)
+    float mx, my, mr;
+    static uint64_t map_tap_ms;
     if (!editing && widescreen_minimap_at(disp_w, disp_h, &mx, &my, &mr) && (x - mx) * (x - mx) + (y - my) * (y - my) <= mr * mr) {
-        *k = -1;
-        return TB_MINUS;
+        uint64_t now = SDL_GetTicks();
+        if (map_tap_ms && now - map_tap_ms < 350) {
+            map_tap_ms = 0, *k = -1;
+            return TB_MINUS;
+        }
+        map_tap_ms = now;
     }
     if (icons_on) return hit2(x, y, k);
     Ctl c[32];

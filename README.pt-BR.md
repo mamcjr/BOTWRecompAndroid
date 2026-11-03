@@ -70,7 +70,7 @@ Desde a **0.2.12-beta**, enquanto você joga no mundo, os controles de toque mos
   - **Troca de arma e de escudo:** segure e escolha com um segundo dedo.
   - **Surf com escudo:** toque duas vezes no escudo e segure.
 - **Minimapa no alto:** com os controles de toque na tela, o minimapa, a hora, a temperatura e o sensor vão para o
-  canto superior direito. Com um controle, ficam no lugar de sempre. Toque no minimapa para abrir o mapa; o botão da
+  canto superior direito. Com um controle, ficam no lugar de sempre. Toque duas vezes no minimapa para abrir o mapa; o botão da
   Sheikah Slate abre a luneta.
 - **Seu próprio layout:** em **Controles**, edite o layout de ação ou o clássico. Arraste os botões, e selecione um
   para aumentá-lo ou diminuí-lo com **−** e **+**.

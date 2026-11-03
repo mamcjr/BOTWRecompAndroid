@@ -151,13 +151,16 @@ void widescreen_talk_seen(void) {
 
 // The minimap group up at the top right while the on-screen controls are up (ui/touch_controls.mm touch_hud_top: their
 // buttons sat over it) and the player is in the world with the minimap on screen: a pane of the game's 1280x720 layouts in
-// its lower right (x > 290, y < -140: the minimap, the time, temperature and noise meters, the Sheikah Sensor; 2026-11-02,
-// LARECOMP_LOG_PANES) goes up this many layout units (y up); 0 elsewhere. vulkan/exec.c moves those panes, their texts
-// and scissors.
+// its lower right (x > 290, y -140 to -315: the minimap, the time, temperature and noise meters, the Sheikah Sensor;
+// 2026-11-02, LARECOMP_LOG_PANES) goes up this many layout units (y up); 0 elsewhere. vulkan/exec.c moves those panes,
+// their texts and scissors. Not lower: the scope's and the camera's frames have pieces along the screen's bottom edge
+// (y about -345), which went up with the minimap - a bar across the scope's view (#230, #226), the camera frame's corner
+// cut in half (#220). Right after a menu (the pause, the inventory) too: widescreen_world_play waits 30 frames, and the
+// minimap showed down in its usual place for a second, then jumped up (#229, #220); its own disc tells it's back.
 float widescreen_hud_top(float x, float y) {
     extern bool touch_hud_top(void);
     extern uint64_t renderer_present_count(void);
-    if (x < 290.0f || y > -140.0f || !touch_hud_top() || !widescreen_world_play()) return 0;
+    if (x < 290.0f || y > -140.0f || y < -315.0f || !touch_hud_top() || !in_world() || framepace_in_menu()) return 0;
     if (!minimap_frame || renderer_present_count() - minimap_frame > 3) return 0;
     return 490.0f;
 }
