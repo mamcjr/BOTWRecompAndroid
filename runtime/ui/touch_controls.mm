@@ -41,6 +41,7 @@ _Atomic int32_t g_touch_lx, g_touch_ly;  // left stick, -32767..32767, y up
 _Atomic int32_t g_touch_rx, g_touch_ry;  // right stick
 bool widescreen_world_play(void);                       // hle/widescreen.c
 bool widescreen_minimap_at(float w, float h, float *x, float *y, float *r);
+bool widescreen_talk(void);
 uint8_t *fs_romfs_read(const char *path, size_t *size);  // services/fs.c
 }
 
@@ -56,7 +57,7 @@ _Static_assert(K_N == TOUCH_NCTL, "settings.h TOUCH_NCTL");
 // The icon layout's controls, in g_settings.touch_pos2 order (TOUCH_NCTL2 entries): what each holds (a Switch button
 // bit, -1 none), its default place (a share of the screen) and radius (a share of its height)
 enum { I_MOVE, I_CROUCH, I_WEAPON, I_SHIELD, I_WHISTLE, I_SLATE, I_SCOPE, I_INVENTORY, I_ATTACK, I_POWER, I_BLOCK, I_BOW,
-       I_JUMP, I_SPRINT, I_A, I_R, I_MENU, I_N };
+       I_JUMP, I_SPRINT, I_A, I_R, I_MENU, I_PUSH, I_PULL, I_MLEFT, I_MRIGHT, I_CANCEL, I_N };
 _Static_assert(I_N == TOUCH_NCTL2, "settings.h TOUCH_NCTL2");
 static const struct { int bit; float x, y, r; } IC[I_N] = {
     {-1, 0.09f, 0.77f, 0},               // the left stick's resting place
@@ -76,6 +77,11 @@ static const struct { int bit; float x, y, r; } IC[I_N] = {
     {TB_A, 0.94f, 0.80f, 0.05f},         // interact (talk, pick up, open)
     {TB_R, 0.94f, 0.47f, 0.045f},        // throw: held, the same finger's drag aims (as the bow)
     {C_MENU, 0.5f, 0.06f, 0.045f},       // the app's menu (the Sheikah eye)
+    {TB_UP, 0.735f, 0.375f, 0.04f},      // Magnesis: the d-pad, a cross (only with Magnesis selected: shown2) - up
+    {TB_DOWN, 0.735f, 0.505f, 0.04f},    //   pushes the object away, down pulls it closer
+    {TB_LEFT, 0.695f, 0.44f, 0.04f},     //   left
+    {TB_RIGHT, 0.775f, 0.44f, 0.04f},    //   right
+    {TB_B, 0.085f, 0.40f, 0.05f},        // cancel (B): only while the bow or a throw is held - the left thumb's (shown2)
 };
 enum { C_ICON = 300, C_EDIT2 = 400 };  // (a finger's ctl: an icon control, C_ICON + I_*; dragged while editing, C_EDIT2 + I_*)
 #define POWER_HOLD_MS 280  // (the power held this long: the rune wheel, and no L)
@@ -92,6 +98,7 @@ static uint64_t keep_icons_until;  // (icon layout) kept through a game menu unt
 // second touch jumps (X) and presses A a moment later, the shield up while it's held
 #define SURF_TAP_MS 300  // (the second touch this soon after the first let go)
 #define SURF_A_MS 150    // (A this long after the jump: in the air)
+#define PARRY_MS 600     // (a parry, a slide on the held shield: the next no sooner - a controller's A mashed: 0.45-0.63 s)
 static uint64_t block_up_ms, surf_a_at;
 static bool icons_on;  // the icon layout is the one in use (as of the last event or frame)
 static int nfingers;
@@ -161,6 +168,8 @@ static void pos_of2(int k, float *x, float *y) {  // (icon layout) in pixels
     else *x = IC[k].x * disp_w, *y = IC[k].y * disp_h;
 }
 static float radius2(int k) { return IC[k].r * disp_h * size_scale() * size_of2(k); }
+static bool shown2(int k);
+static bool talk_on(void);
 
 enum { C_SMALLER = 106, C_BIGGER = 107 };
 static bool is_bar(int bit) { return (bit >= C_DONE && bit <= C_CANCEL) || bit == C_SMALLER || bit == C_BIGGER; }
@@ -213,7 +222,7 @@ static int hit2(float x, float y, int *k) {
     int best = -1;
     float bd = 1e30f;
     for (int i = 0; i < I_N; i++) {
-        if (i == I_MOVE || IC[i].r == 0) continue;
+        if (i == I_MOVE || !shown2(i)) continue;
         float cx, cy, r = radius2(i) * 1.25f;  // (thumbs)
         pos_of2(i, &cx, &cy);
         float d = ((x - cx) * (x - cx) + (y - cy) * (y - cy)) / (r * r);
@@ -340,6 +349,22 @@ extern "C" int gdt_rune(uint32_t *owned);
 static const char *const rune_item[8] = {"Obj_RemoteBombBall", "Obj_RemoteBombCube", "Obj_Magnetglove", "Obj_StopTimer",
                                          "Obj_IceMaker", "Obj_Camera", "Obj_Motorcycle", "Obj_AmiiboItem"};
 static int rune_now = -1;  // the game's selected rune (0-7; -1 unknown)
+
+static bool bow_held;  // (icon layout) a finger holds the bow or throw (recompute)
+
+// (icon layout) a control on screen: Magnesis's d-pad (up pushes, down pulls; #199) only while it's the rune selected,
+// the cancel only while the bow or a throw is held (or editing the layout); the others always, but the old scope's place
+static bool shown2(int k) {
+    if (IC[k].r == 0) return false;
+    if (talk_on()) return k == I_A || k == I_SPRINT || k == I_MENU;  // (a talk: A, B, the app's menu - and the stick)
+    if (k >= I_PUSH && k <= I_MRIGHT) return editing || rune_now == 2;
+    if (k == I_CANCEL) return editing || bow_held;
+    return true;
+}
+
+// A talk (hle/widescreen.c widescreen_talk: its box on screen) in the icon layout: the controls give way to it but the
+// stick, A and B (its answers picked with them, as on a controller: tapping them sent the game past the stable's horse list)
+static bool talk_on(void) { return icons_on && !editing && g_settings.touch_talk && widescreen_talk(); }
 static uint32_t runes_owned = 0xFF;
 static bool fan_open;
 static int fan_items[8], fan_n, fan_sel = -1;  // (open) the runes shown, the one under the finger
@@ -398,6 +423,7 @@ static void recompute(void) {  // (t_lock held; also once a frame: the power's h
     bool wheel_start = false;
     if (icons_on) rune_now = gdt_rune(&runes_owned);
     fan_open = false;
+    bow_held = false;
     for (int i = 0; i < nfingers && !editing; i++) {
         int c = fingers[i].ctl;
         if (c >= 0 && c < 16) b |= 1ull << c;
@@ -413,6 +439,7 @@ static void recompute(void) {  // (t_lock held; also once a frame: the power's h
         if (IC[k].bit >= 0 && IC[k].bit < 16) b |= 1ull << IC[k].bit;
         if (k == I_WEAPON || k == I_SHIELD) aim = i;
         if ((k == I_BOW || k == I_R) && !g_settings.motion) aim = i;  // (with motion controls on, the phone aims)
+        if (k == I_BOW || k == I_R) bow_held = true;
     }
     if (surf_a_at && now >= surf_a_at) pulse_until[TB_A] = now + PULSE_MS, surf_a_at = 0;  // (shield surfing: A in the air)
     for (int i = 0; i < 16; i++) if (pulse_until[i] > now) b |= 1ull << i;
@@ -634,6 +661,18 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
     } else if (e->type == SDL_EVENT_FINGER_MOTION && f >= 0) {
         float px = fingers[f].x, py = fingers[f].y;
         fingers[f].x = x, fingers[f].y = y;
+        if (fingers[f].ctl == C_ICON + I_BLOCK && !editing) {
+            // Parry (the game's: A with the shield up): the finger slid some way, any way - the shield stays up; again
+            // from where it got to, as it slides again - not sooner than PARRY_MS after the last: a parry each slide would
+            // beat any timing
+            static uint64_t parry_ms;
+            uint64_t now = SDL_GetTicks();
+            float dx = x - fingers[f].sx, dy = y - fingers[f].sy, r = radius2(I_BLOCK) * 0.6f;
+            if (dx * dx + dy * dy > r * r) {
+                if (now - parry_ms > PARRY_MS) pulse_until[TB_A] = now + PULSE_MS, parry_ms = now;
+                fingers[f].sx = x, fingers[f].sy = y;
+            }
+        }
         if (fingers[f].ctl == C_RSTICK && drag_camera()) {  // (its travel: drag_frame turns it into the tilt)
             drag_dx += x - px, drag_dy += y - py;
             stick[1].kx = x, stick[1].ky = y;
@@ -876,14 +915,28 @@ static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU3
     pthread_mutex_unlock(&t_lock);
     ImU32 img = IM_COL32(255, 255, 255, (int)(235 * alpha)), cyan = IM_COL32(66, 215, 245, (int)(220 * alpha));
     for (int k = 0; k < I_N; k++) {
-        if (k == I_MOVE || IC[k].r == 0) continue;
+        if (k == I_MOVE || !shown2(k)) continue;
         float x, y, r = radius2(k);
         pos_of2(k, &x, &y);
         ImVec2 c(x, y), a(x - r, y - r), b(x + r, y + r);
         dl->AddCircleFilled(c, r, pressed >> k & 1 ? fill_on : fill, 40);
         if (!skin_image(dl, SKIN_BUTTON, a, b, line)) dl->AddCircle(c, r, line, 40, fmaxf(1, r * 0.04f));
         if (k == I_MENU) { sheikah_eye(dl, c, r, IM_COL32(66, 215, 245, (int)(200 * alpha))); continue; }
-        int act = k == I_JUMP ? ACT_JUMP : k == I_SPRINT ? ACT_SPRINT : k == I_CROUCH ? ACT_CROUCH : k == I_WHISTLE ? ACT_WHISTLE
+        if (k == I_CANCEL) {  // (a cross)
+            float t = r * 0.38f, w = fmaxf(2.0f, r * 0.12f);
+            ImU32 red = IM_COL32(240, 90, 80, (int)(235 * alpha));
+            dl->AddLine(ImVec2(x - t, y - t), ImVec2(x + t, y + t), red, w);
+            dl->AddLine(ImVec2(x - t, y + t), ImVec2(x + t, y - t), red, w);
+            continue;
+        }
+        if (k >= I_PUSH) {  // (Magnesis's d-pad: an arrow its way, the magnet's cyan)
+            static const float dir[4][2] = {{0, -1}, {0, 1}, {-1, 0}, {1, 0}};  // (I_PUSH, I_PULL, I_MLEFT, I_MRIGHT)
+            float dx = dir[k - I_PUSH][0], dy = dir[k - I_PUSH][1], t = r * 0.45f;
+            dl->AddTriangleFilled(ImVec2(x + dx * t, y + dy * t), ImVec2(x - dx * t * 0.6f - dy * t, y - dy * t * 0.6f + dx * t),
+                                  ImVec2(x - dx * t * 0.6f + dy * t, y - dy * t * 0.6f - dx * t), cyan);
+            continue;
+        }
+        int act = k == I_SPRINT && talk_on() ? -1 : k == I_JUMP ? ACT_JUMP : k == I_SPRINT ? ACT_SPRINT : k == I_CROUCH ? ACT_CROUCH : k == I_WHISTLE ? ACT_WHISTLE
                 : k == I_INVENTORY ? ACT_BAG : -1;
         int gi = k == I_ATTACK || k == I_WEAPON ? GI_SWORD : k == I_BOW ? GI_BOW : k == I_BLOCK || k == I_SHIELD ? GI_SHIELD
                : k == I_SLATE ? GI_SLATE : k == I_POWER ? GI_BOMB : -1;
@@ -899,7 +952,7 @@ static void draw_icons(ImDrawList *dl, ImFont *font, float alpha, float op, ImU3
         else if (gi >= 0 && gi_tex[gi]) dl->AddImage(gi_tex[gi], ia, ib, ImVec2(0, 0), ImVec2(1, 1), img);
         else if (k == I_SCOPE) spyglass(dl, c, r, text);
         else {  // (no picture: interact and throw, or the game's icons not read yet)
-            static const char *const label[I_N] = {"", "L3", ">", "<", "v", "R3", "", "+", "Y", "L", "ZL", "ZR", "X", "B", "A", "R", ""};
+            static const char *const label[I_N] = {"", "L3", ">", "<", "v", "R3", "", "+", "Y", "L", "ZL", "ZR", "X", "B", "A", "R", "", "^", "v", "<", ">", "B"};
             float fs = r * 0.9f;
             ImVec2 ts = font->CalcTextSizeA(fs, FLT_MAX, 0, label[k]);
             dl->AddText(font, fs, ImVec2(x - ts.x / 2, y - ts.y / 2), text, label[k]);

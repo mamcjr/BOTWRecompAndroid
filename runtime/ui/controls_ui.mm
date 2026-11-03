@@ -94,6 +94,8 @@ static void touch_layout_draw(void) {
         ImGui::SetNextItemWidth(-1);
         if (ImGui::SliderFloat("##AimSens", &as, 25, 200, "%.0f%%")) g_settings.touch_aim_sens = as / 100;
         if (ImGui::IsItemDeactivatedAfterEdit()) settings_save();
+        if (ImGui::Checkbox(tr("Simple controls in talks"), &g_settings.touch_talk)) settings_save();
+        hint("In a conversation only the stick, A and B stay on the screen. Off: all the buttons stay.");
     }
     ImGui::Spacing();
     if (ImGui::Checkbox(tr("Camera by dragging"), &g_settings.touch_drag_camera)) settings_save();

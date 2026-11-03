@@ -43,11 +43,13 @@ Settings g_settings = {
                   {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}},
     .touch_scheme = 1,
     .touch_pos2 = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
-                   {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}},
+                   {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
+                   {-1, -1}},
     .touch_scale = 1.0f,
     .touch_opacity = 1.0f,
     .touch_drag_sens = 1.0f,
     .touch_aim_sens = 1.0f,
+    .touch_talk = true,
     .gpu_heap = -1,
     .inplace_reads = -1,
     .turnip_lrz = -1,
@@ -286,6 +288,7 @@ void settings_load(void) {
         }
         else if (!strcmp(key, "touch_scheme")) g_settings.touch_scheme = atoi(val);
         else if (!strcmp(key, "touch_aim_sens")) g_settings.touch_aim_sens = (float)atof(val);
+        else if (!strcmp(key, "touch_talk")) g_settings.touch_talk = atoi(val) != 0;
         else if (!strcmp(key, "touch_sizes") || !strcmp(key, "touch_icons_sizes")) {  // (a size per control)
             bool two = key[6] == 'i';
             float *s = two ? g_settings.touch_size2 : g_settings.touch_size;
@@ -378,7 +381,8 @@ void settings_save(void) {
     fprintf(f, "touch_scale = %.2f\ntouch_opacity = %.2f\ntouch_layout = ", g_settings.touch_scale, g_settings.touch_opacity);
     for (int i = 0; i < TOUCH_NCTL; i++)
         fprintf(f, "%s%.4f,%.4f", i ? "," : "", g_settings.touch_pos[i][0], g_settings.touch_pos[i][1]);
-    fprintf(f, "\ntouch_scheme = %d\ntouch_aim_sens = %.2f\ntouch_icons_layout = ", g_settings.touch_scheme, g_settings.touch_aim_sens);
+    fprintf(f, "\ntouch_scheme = %d\ntouch_aim_sens = %.2f\ntouch_talk = %d\ntouch_icons_layout = ", g_settings.touch_scheme,
+            g_settings.touch_aim_sens, g_settings.touch_talk ? 1 : 0);
     for (int i = 0; i < TOUCH_NCTL2; i++)
         fprintf(f, "%s%.4f,%.4f", i ? "," : "", g_settings.touch_pos2[i][0], g_settings.touch_pos2[i][1]);
     fprintf(f, "\ntouch_sizes = ");
