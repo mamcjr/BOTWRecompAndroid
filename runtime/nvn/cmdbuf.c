@@ -351,8 +351,21 @@ NVN(nvnCommandBufferBindSeparateSampler) {
         LOG("[nvn] BindSeparateSampler #%u stage %llu slot %llu handle %llx\n", n, (unsigned long long)A(1), (unsigned long long)A(2),
             (unsigned long long)A(3));
 }
-NVN(nvnCommandBufferBindTransformFeedbackBuffers) { (void)c; }
-NVN(nvnCommandBufferBindTransformFeedbackBuffer) { (void)c; }
+// Transform feedback (stream out): not done - logged, should a game use it. BOTW 1.9.0 doesn't (none with #168's
+// leaves on screen, 2026-11-02)
+static void xfb_log(const char *what, Cpu *c) {
+    static unsigned n[8];
+    static const char *names[8];
+    int i = 0;
+    while (i < 7 && names[i] && names[i] != what) i++;
+    names[i] = what;
+    unsigned k = ++n[i];
+    if (k <= 4 || (k & (k - 1)) == 0)
+        LOG("[nvn] %s #%u: %llx %llx %llx %llx\n", what, k, (unsigned long long)c->x[1], (unsigned long long)c->x[2],
+            (unsigned long long)c->x[3], (unsigned long long)c->x[4]);
+}
+NVN(nvnCommandBufferBindTransformFeedbackBuffers) { xfb_log("BindTransformFeedbackBuffers", c); }
+NVN(nvnCommandBufferBindTransformFeedbackBuffer) { xfb_log("BindTransformFeedbackBuffer", c); }
 NVN(nvnCommandBufferBindCoverageModulationTable) { (void)c; }
 
 NVN(nvnCommandBufferSetTexturePool) {
@@ -542,14 +555,14 @@ PLAIN(nvnCommandBufferDrawArraysIndirect, CMD_DRAW_ARRAYS_INDIRECT)
 PLAIN(nvnCommandBufferDrawElementsIndirect, CMD_DRAW_ELEMENTS_INDIRECT)
 NVN(nvnCommandBufferMultiDrawArraysIndirectCount) { (void)c; }
 NVN(nvnCommandBufferMultiDrawElementsIndirectCount) { (void)c; }
-NVN(nvnCommandBufferDrawTransformFeedback) { (void)c; }
+NVN(nvnCommandBufferDrawTransformFeedback) { xfb_log("DrawTransformFeedback", c); }
 NVN(nvnCommandBufferDrawTexture) { (void)c; }
 PLAIN(nvnCommandBufferDispatchCompute, CMD_DISPATCH)
 PLAIN(nvnCommandBufferDispatchComputeIndirect, CMD_DISPATCH_INDIRECT)
-NVN(nvnCommandBufferBeginTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferEndTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferPauseTransformFeedback) { (void)c; }
-NVN(nvnCommandBufferResumeTransformFeedback) { (void)c; }
+NVN(nvnCommandBufferBeginTransformFeedback) { xfb_log("BeginTransformFeedback", c); }
+NVN(nvnCommandBufferEndTransformFeedback) { xfb_log("EndTransformFeedback", c); }
+NVN(nvnCommandBufferPauseTransformFeedback) { xfb_log("PauseTransformFeedback", c); }
+NVN(nvnCommandBufferResumeTransformFeedback) { xfb_log("ResumeTransformFeedback", c); }
 
 // ---- copies
 typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRef;
