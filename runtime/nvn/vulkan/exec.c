@@ -1965,6 +1965,7 @@ static void begin_pass(void) {
             v = vk_bc_shadow_view(t, &st.rt.cview[i], &vf, &ew, &eh);
         }
 #endif
+        bool bc_shadow = v != VK_NULL_HANDLE;
         if (!v) v = vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
         TexBackend *b = t->backend;
         if (!v) continue;
@@ -1986,7 +1987,7 @@ static void begin_pass(void) {
         ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
         bool fresh = (int)renderer_texture_level_fresh(t) | (int)renderer_texture_frame_fresh(t);  // both: each marks its state
-        if (renderer_texture_first_write(t) || fresh) {
+        if ((renderer_texture_first_write(t) || fresh) && !bc_shadow) {  // (a shadow holds the blocks: bc_shadow_fill)
             ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
             ca[i].clearValue.color.float32[3] = fresh ? 0.0f : 1.0f;
         }

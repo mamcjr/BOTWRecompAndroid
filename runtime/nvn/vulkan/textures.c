@@ -1354,7 +1354,45 @@ static void bc_shadow_destroy(TexBackend *b) {
     b->bc_shadow = NULL;
 }
 
-static BcShadow *bc_shadow_create(NvnTexture *t, TexBackend *b, VkFormat vf, uint32_t bsize) {
+// A new shadow holds the texture's blocks before anything is drawn into it: a draw may cover only part of a slice,
+// and the whole slice is decoded. From guest memory (the CPU's blocks; tegra layout as upload_texture reads it), or
+// from the shadow in another format it replaces (`from`: the blocks drawn since, same size).
+static void bc_shadow_fill(NvnTexture *t, TexBackend *b, BcShadow *s, const BcShadow *from) {
+    bool is3d = b->base_type == VK_IMAGE_VIEW_TYPE_3D;
+    uint32_t nlv = s->img.levels;
+    if (from) {
+        VkImageCopy c[16];
+        for (uint32_t lv = 0; lv < nlv; lv++)
+            c[lv] = (VkImageCopy){.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, b->layers},
+                                  .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, 0, b->layers},
+                                  .extent = {bc_blocks(b->width, lv), bc_blocks(b->height, lv), is3d ? level_slices(b, lv) : 1}};
+        VkCommandBuffer cb = vk_cmd();
+        vkCmdCopyImage(cb, from->img.image, VK_IMAGE_LAYOUT_GENERAL, s->img.image, VK_IMAGE_LAYOUT_GENERAL, nlv, c);
+        vk_full_barrier(cb);
+        return;
+    }
+    if (!t->addr) return;
+    VkCommandBuffer cb = vk_upload_cmd();
+    uint32_t layers = t->layout.layers ? t->layout.layers : 1, levels = t->layout.levels < nlv ? t->layout.levels : nlv;
+    if (layers > b->layers) layers = b->layers;
+    uint64_t layer_size = tegra_layer_size(&t->layout);
+    for (uint32_t layer = 0; layer < layers; layer++)
+        for (uint32_t lv = 0; lv < levels; lv++) {
+            LevelLayout l = tegra_level(&t->layout, lv);
+            uint32_t d = is3d ? l.d : 1, row = l.wb * s->bsize;
+            VkSpan sp = vk_transient((uint64_t)row * l.hb * d, 16);
+            const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
+            if (t->flags & 0x50)  // (linear: rows t->stride apart with flag 0x10, packed with 0x40 - upload_texture)
+                for (uint32_t y = 0; y < l.hb * d; y++)
+                    memcpy((uint8_t *)sp.ptr + (uint64_t)y * row, src + (uint64_t)y * ((t->flags & 0x10) ? t->stride : row), row);
+            else tegra_deswizzle(src, sp.ptr, l.wb, l.hb, d, s->bsize, l.block_height_log2, l.block_depth_log2);
+            VkBufferImageCopy r = {.bufferOffset = sp.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, layer, 1},
+                                   .imageExtent = {l.wb, l.hb, d}};
+            vkCmdCopyBufferToImage(cb, sp.buf, s->img.image, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
+        }
+}
+
+static BcShadow *bc_shadow_create(NvnTexture *t, TexBackend *b, VkFormat vf, uint32_t bsize, BcShadow *from) {
     bool is3d = b->base_type == VK_IMAGE_VIEW_TYPE_3D;
     uint32_t nlv = b->levels < 16 ? b->levels : 16, w = 1, h = 1, nslices = 0;
     BcShadow *s = calloc(1, sizeof *s);
@@ -1372,7 +1410,8 @@ static BcShadow *bc_shadow_create(NvnTexture *t, TexBackend *b, VkFormat vf, uin
                             .imageType = is3d ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D, .format = vf,
                             .extent = {w, h, b->depth}, .mipLevels = nlv, .arrayLayers = b->layers,
                             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
-                            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT};
+                            .usage = VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT |
+                                     VK_IMAGE_USAGE_TRANSFER_DST_BIT};  // (bc_shadow_fill)
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     if (!(s->drawn = calloc(nslices, 1)) || vmaCreateImage(g_vk.vma, &ci, &ai, &i->image, &i->mem, NULL) != VK_SUCCESS) {
         static int nfail;
@@ -1383,6 +1422,13 @@ static BcShadow *bc_shadow_create(NvnTexture *t, TexBackend *b, VkFormat vf, uin
     }
     vk_image_init_layout(vk_upload_cmd(), i->image, VK_IMAGE_ASPECT_COLOR_BIT);
     s->bsize = bsize;
+    bc_shadow_fill(t, b, s, from);
+    if (from) {  // (replaced: not dirty - vk_bc_shadows_resolve decoded it)
+        views_forget(&from->img);
+        defer((Dead){.img = from->img.image, .mem = from->img.mem});
+        free(from->drawn);
+        free(from);
+    }
     b->bc_shadow = s;
     static int nlog;
     if (nlog++ < 8) LOG("[vk] BC texture %ux%ux%u (nvn %#x) drawn into as %d: blocks decoded after the draws\n",
@@ -1400,12 +1446,12 @@ VkImageView vk_bc_shadow_view(NvnTexture *t, const NvnTextureView *v, VkFormat *
     if (lv >= b->levels || lv >= 16 || (b->base_type == VK_IMAGE_VIEW_TYPE_3D && (rt3d == 0 || (rt3d == 1 && lv > 0))))
         return VK_NULL_HANDLE;  // (LARECOMP_3D_RT: as vk_view)
     VkFormat vf = vk_format(v->format);
-    BcShadow *s = b->bc_shadow;
+    BcShadow *s = b->bc_shadow, *from = NULL;
     if (s && s->img.format != vf) {  // (one drawn into in another format: vk_bc_shadows_resolve decoded it, unless it is
-        if (s->dirty) return VK_NULL_HANDLE;  // a target of this pass too)
-        bc_shadow_destroy(b), s = NULL;
+        if (s->dirty) return VK_NULL_HANDLE;  // a target of this pass too; a new one takes its blocks)
+        from = s, s = NULL;
     }
-    if (!s && nbc_dirty < (int)(sizeof bc_dirty / sizeof *bc_dirty)) s = bc_shadow_create(t, b, vf, bf->bpb);
+    if (!s && nbc_dirty < (int)(sizeof bc_dirty / sizeof *bc_dirty)) s = bc_shadow_create(t, b, vf, bf->bpb, from);
     if (!s || (!s->dirty && nbc_dirty == (int)(sizeof bc_dirty / sizeof *bc_dirty))) return VK_NULL_HANDLE;
     uint32_t n = level_slices(b, lv);
     if (z >= n) z = n - 1;

@@ -1,11 +1,13 @@
 // BC textures drawn into as blocks without BC on the GPU (runtime/nvn/vulkan/textures.c: shadow images, decoded after
-// the draws): what was drawn into a shadow is decoded before the shadow goes. Includes the implementation, the Vulkan
-// work stubbed and counted. TEXTURES_C: another textures.c to test (the same checks on an older version).
+// the draws): what was drawn into a shadow is decoded before the shadow goes, and a new shadow holds the texture's
+// blocks before the first draw. Includes the implementation, the Vulkan work stubbed and counted. TEXTURES_C: another
+// textures.c to test (the same checks on an older version).
 #include <stdio.h>
 #ifndef TEXTURES_C
 #define TEXTURES_C "../runtime/nvn/vulkan/textures.c"
 #endif
 #include TEXTURES_C
+#include "../runtime/nvn/tegra.c"
 
 // ---- the rest of the runtime, as far as the shadows reach it
 VkG g_vk;
@@ -29,13 +31,15 @@ uint64_t SDL_GetTicksNS(void) { return 0; }
 uint64_t prof_views_created;
 const FormatInfo *nvn_format_info(uint32_t f) { return f == 0x49 ? &bc4 : &texel8; }
 
-static int images, readbacks, readback_regions, uploads;
-static uint64_t image_size;
+static NvnTexture tex;
+static TexBackend be;
+static int images, readbacks, readback_regions, uploads, fills, image_copies, image_copy_regions;
+static uint64_t filled_blocks, image_extent[3];
 VkResult vmaCreateImage(VmaAllocator a, const VkImageCreateInfo *ci, const VmaAllocationCreateInfo *ai, VkImage *img,
                         VmaAllocation *mem, VmaAllocationInfo *info) {
     (void)a, (void)ai, (void)info;
     images++;
-    image_size = (uint64_t)ci->extent.width * ci->extent.height * ci->extent.depth * ci->arrayLayers;
+    image_extent[0] = ci->extent.width, image_extent[1] = ci->extent.height, image_extent[2] = ci->extent.depth;
     *img = (VkImage)(uintptr_t)(0x100 + images);
     *mem = (VmaAllocation)(uintptr_t)(0x100 + images);
     return VK_SUCCESS;
@@ -46,8 +50,15 @@ static VKAPI_ATTR void VKAPI_CALL copy_i2b(VkCommandBuffer cb, VkImage i, VkImag
     readbacks++, readback_regions += (int)n;
 }
 static VKAPI_ATTR void VKAPI_CALL copy_b2i(VkCommandBuffer cb, VkBuffer b, VkImage i, VkImageLayout l, uint32_t n, const VkBufferImageCopy *r) {
-    (void)cb, (void)i, (void)l, (void)b, (void)r;
-    uploads += (int)n;
+    (void)cb, (void)l, (void)b;
+    if (i == be.image) { uploads += (int)n; return; }  // (decoded blocks into the texture's own image)
+    fills += (int)n;  // (blocks into a shadow)
+    for (uint32_t k = 0; k < n; k++) filled_blocks += (uint64_t)r[k].imageExtent.width * r[k].imageExtent.height * r[k].imageExtent.depth;
+}
+static VKAPI_ATTR void VKAPI_CALL copy_i2i(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n,
+                                           const VkImageCopy *r) {
+    (void)cb, (void)s, (void)sl, (void)d, (void)dl, (void)r;
+    image_copies++, image_copy_regions += (int)n;
 }
 static VKAPI_ATTR void VKAPI_CALL barrier2(VkCommandBuffer cb, const VkDependencyInfo *d) { (void)cb, (void)d; }
 static VKAPI_ATTR VkResult VKAPI_CALL create_view(VkDevice d, const VkImageViewCreateInfo *ci, const VkAllocationCallbacks *a, VkImageView *v) {
@@ -59,6 +70,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL create_view(VkDevice d, const VkImageViewC
 static VKAPI_ATTR void VKAPI_CALL destroy_view(VkDevice d, VkImageView v, const VkAllocationCallbacks *a) { (void)d, (void)v, (void)a; }
 PFN_vkCmdCopyImageToBuffer vkCmdCopyImageToBuffer = copy_i2b;
 PFN_vkCmdCopyBufferToImage vkCmdCopyBufferToImage = copy_b2i;
+PFN_vkCmdCopyImage vkCmdCopyImage = copy_i2i;
 PFN_vkCmdPipelineBarrier2 vkCmdPipelineBarrier2 = barrier2;
 PFN_vkCreateImageView vkCreateImageView = create_view;
 PFN_vkDestroyImageView vkDestroyImageView = destroy_view;
@@ -66,20 +78,23 @@ PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
 
 static int failures;
 static void check(const char *name, bool ok) {
-    printf("%s %s (shadows %d, readbacks %d of %d regions, uploads %d)\n", ok ? "ok  " : "FAIL", name, images, readbacks,
-           readback_regions, uploads);
+    printf("%s %s (shadows %d, readbacks %d of %d regions, uploads %d, shadow fills %d of %llu blocks, shadow copies %d of %d levels)\n",
+           ok ? "ok  " : "FAIL", name, images, readbacks, readback_regions, uploads, fills, (unsigned long long)filled_blocks,
+           image_copies, image_copy_regions);
     failures += !ok;
 }
 
-// A 32x32x32 BC4 volume (6 levels), decoded into R8 (bc_vf), as BOTW's dissolve noise.
-static NvnTexture tex;
-static TexBackend be;
+// A 32x32x32 BC4 volume (6 levels) in guest memory, decoded into R8 (bc_vf), as BOTW's dissolve noise.
+static uint8_t guest[1 << 20];
 static void setup(void) {
     memset(&tex, 0, sizeof tex), memset(&be, 0, sizeof be);
-    tex.width = tex.height = tex.depth = 32, tex.format = 0x49, tex.layout.fmt = &bc4, tex.backend = &be;
+    tex.width = tex.height = tex.depth = 32, tex.format = 0x49, tex.backend = &be, tex.addr = (uintptr_t)guest;
+    tex.layout = (TexLayout){.width = 32, .height = 32, .depth = 32, .layers = 1, .levels = 6, .fmt = &bc4};
+    tegra_layout_init(&tex.layout);
     be.bc_vf = VK_FORMAT_BC4_UNORM_BLOCK, be.format = VK_FORMAT_R8_UNORM, be.base_type = VK_IMAGE_VIEW_TYPE_3D;
     be.width = be.height = be.depth = 32, be.layers = 1, be.levels = 6, be.samples = 1, be.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-    images = readbacks = readback_regions = uploads = 0;
+    images = readbacks = readback_regions = uploads = fills = image_copies = image_copy_regions = 0;
+    filled_blocks = 0;
 }
 
 static VkImageView draw(uint16_t fmt, uint8_t level) {  // a pass drawing into `level` through a view of nvn format fmt
@@ -121,6 +136,14 @@ int main(void) {
     check("control: same format - nothing decoded between the passes", readbacks == 0 && images == 1);
     outside();
     check("control: both levels decoded together", readbacks == 1 && readback_regions == 2);  // (a slice each)
+    // P2: a new shadow holds the texture's blocks before the first draw (a draw may cover part of a slice; the whole
+    // slice is decoded): every level's blocks from guest memory - 8x8x32 + 4x4x16 + 2x2x8 + 1x1x4 + 1x1x2 + 1x1x1
+    setup();
+    draw(0x2C, 1);
+    check("P2: new shadow filled from guest memory, all 6 levels", fills == 6 && filled_blocks == 2048 + 256 + 32 + 4 + 2 + 1);
+    outside();
+    draw(0x17, 2);  // another format: the old shadow's blocks (level 1 drawn since) go into the new one
+    check("P2: a shadow in another format takes the old one's blocks", image_copies == 1 && image_copy_regions == 6 && fills == 6);
     if (failures) { printf("test_bc_shadow: %d check(s) failed\n", failures); return 1; }
     printf("test_bc_shadow: all passed\n");
     return 0;
