@@ -2121,10 +2121,11 @@ static VkRect2D scissor_rect(void) {
         if (t0 && !ox && !oy && fabsf(sx - sy) > 0.01f * sy && !(x <= 0 && y <= 0 && x + sw >= (int)t0->width && y + sh >= (int)t0->height) &&
             widescreen_ui_centred() && vk_texture_scale_group(t0) == RS_OUT) {
             // (and moves with the HUD's panes out to the edge: widescreen_hud_shift, in 1280-wide layout units)
-            extern float widescreen_hud_shift(float x);
+            extern float widescreen_hud_shift(float x, float y);
             extern float widescreen_factor(void);
             float k = t0->width / 1280.0f, g = widescreen_factor();
-            x += (int)lroundf(widescreen_hud_shift(((float)x + sw * 0.5f - t0->width * 0.5f) / k) * k);
+            x += (int)lroundf(widescreen_hud_shift(((float)x + sw * 0.5f - t0->width * 0.5f) / k,
+                                                   (t0->height * 0.5f - (y + sh * 0.5f)) / (t0->height / 720.0f)) * k);
             if (map_open(g)) {  // (the map's clips spread out with it, g times as wide about the middle: cbuf_info)
                 float c = (x + sw * 0.5f - t0->width * 0.5f) * g;
                 sw = (int)lroundf(sw * g), x = (int)lroundf(t0->width * 0.5f + c - sw * 0.5f);
@@ -3819,17 +3820,20 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
         // (widescreen.c widescreen_hud_shift), in its own copy. nn::ui2d's panes: the layout camera's projection in
         // cb3[0..3], the pane's matrix in cb3[4..6] (its x at [4][3]); its text: one matrix, projection times the pane's,
         // whose origin (the text's start) shows where it is - its rows 0 plus a share of row 3 move it on the screen.
-        extern float widescreen_hud_shift(float x);
+        extern float widescreen_hud_shift(float x, float y);
         extern float widescreen_factor(void);
         extern bool widescreen_ui_centred(void);
         const float *f = (const float *)(uintptr_t)r.addr;
         NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : NULL;
-        {   // LARECOMP_LOG_PANES=1 (finding the HUD's pieces: widescreen.c widescreen_hud_top): every 600th frame, the
+        {   // LARECOMP_LOG_PANES=n (finding the HUD's pieces: widescreen.c widescreen_hud_top): every nth frame (1: 600th), the
             // layouts' panes (x, y in layout units) and texts (their matrix)
             static int lp = -1;
-            if (lp < 0) lp = getenv("LARECOMP_LOG_PANES") != NULL;
+            if (lp < 0) {
+                const char *e = getenv("LARECOMP_LOG_PANES");
+                lp = e ? atoi(e) > 1 ? atoi(e) : 600 : 0;
+            }
             uint64_t pf = renderer_present_count();
-            if (lp && pf % 600 == 0 && t0 && f[12] == 0 && f[13] == 0 && f[14] == -1.0f && f[1] == 0 && f[2] == 0)
+            if (lp && pf % lp == 0 && t0 && f[12] == 0 && f[13] == 0 && f[14] == -1.0f && f[1] == 0 && f[2] == 0)
                 LOG("[panes] frame %llu fs %016llx size %#llx %s x %.1f y %.1f sx %.3f sy %.3f proj %.4f %.4f row0 %.3f %.3f %.3f %.3f row1 %.3f %.3f %.3f %.3f w %.3f\n",
                     (unsigned long long)pf, (unsigned long long)g_cur_fs_hash, (unsigned long long)size, f[15] == 0 ? "pane" : "text",
                     size >= 0x230 ? f[19] : 0, size >= 0x230 ? f[23] : 0, size >= 0x230 ? f[16] : 0, size >= 0x230 ? f[21] : 0, f[0], f[5],
@@ -3841,16 +3845,24 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             // layout units) and a text's origin (its rows 1 plus a share of row 3: 360 layout units an NDC unit) - and
             // the widescreen move out to the edge below, done here too
             extern float widescreen_hud_top(float x, float y);
-            extern float widescreen_hud_shift(float x);
+            extern float widescreen_hud_shift(float x, float y);
             bool centred = widescreen_ui_centred();
             float g = centred ? widescreen_factor() : 1.0f, a = fabsf(f[5] / f[0]);
             bool pane = size >= 0x230 && f[15] == 0 && (fabsf(a - 16.0f / 9.0f * g) < 0.01f || fabsf(a - 16.0f / 9.0f) < 0.01f);
             bool text = !pane && f[15] > 1.0f;
             float lx = pane ? f[19] : text ? f[3] / f[15] * g * 640.0f : 0, ly = pane ? f[23] : text ? f[7] / f[15] * 360.0f : 0;
+            if (pane && g_cur_fs_hash == 0xd1d87dfe0c81ad63ull && lx > 290.0f && ly < -140.0f) {
+                extern void widescreen_minimap_seen(void);  // (the minimap's disc, at 510, -240: it's on screen)
+                widescreen_minimap_seen();
+            }
+            if (pane && g_cur_fs_hash == 0x9b989759db6e6606ull && fabsf(lx) < 1.0f && ly < -200.0f && ly > -270.0f) {
+                extern void widescreen_talk_seen(void);  // (a talk's box, at 0, -235)
+                widescreen_talk_seen();
+            }
             float dy = pane || text ? widescreen_hud_top(lx, ly) : 0;
             if (dy != 0) {
                 VkSpan c = vk_transient_copy(f, size, 256);
-                float *m = (float *)c.ptr, dx = centred ? widescreen_hud_shift(lx) : 0;
+                float *m = (float *)c.ptr, dx = centred ? widescreen_hud_shift(lx, ly) : 0;
                 if (pane) m[23] += dy, m[19] += dx;
                 else {
                     for (int i = 0; i < 4; i++) m[4 + i] += dy / 360.0f * m[12 + i];
@@ -3923,7 +3935,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                     for (int i = 16; i < 20; i++) m[i] *= g;
                 return ubo_span(c, size);
             } else if (size >= 0x230 && f[15] == 0 && f[0] > 0 && fabsf(f[5] / f[0] - 16.0f / 9.0f * g) < 0.01f) {
-                float d = widescreen_hud_shift(f[19]);
+                float d = widescreen_hud_shift(f[19], f[23]);
                 if (d != 0) {
                     panefix_log("hud-shift", f);
                     VkSpan c = vk_transient_copy(f, size, 256);
@@ -3937,7 +3949,7 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 for (int i = 0; i < 4; i++) ((float *)c.ptr)[i] /= g;
                 return ubo_span(c, size);
             } else if (f[15] > 1.0f) {
-                float d = widescreen_hud_shift(f[3] / f[15] * g * 640.0f);  // (layout x of the origin: 640 g units a side)
+                float d = widescreen_hud_shift(f[3] / f[15] * g * 640.0f, f[7] / f[15] * 360.0f);  // (layout x, y of the origin)
                 if (d != 0) {
                     VkSpan c = vk_transient_copy(f, size, 256);
                     float *m = (float *)c.ptr, k = d / (640.0f * g);  // (that many NDC units)

@@ -133,34 +133,62 @@ bool widescreen_in_menu(void) {
 // icon layout (ui/touch_controls.mm); the classic one stays in the menus
 bool widescreen_world_play(void) { return in_world() && !widescreen_in_menu(); }
 
+// The minimap's disc (vulkan/exec.c: its pane's shader) was drawn this frame or in the last few: the minimap is on screen.
+// A talk's answers sit where it would be (x 450, y -133 to -237) while it's hidden; moved up with it, they split (#200).
+static uint64_t minimap_frame;
+void widescreen_minimap_seen(void) {
+    extern uint64_t renderer_present_count(void);
+    minimap_frame = renderer_present_count();
+}
+
+// A talk's box (vulkan/exec.c: its pane, about 0, -235) was drawn this frame or in the last few: its rounded ends
+// (x +-284) and the speaker's name stay with it instead of moving out to the screen's edges (widescreen_hud_shift; #200)
+static uint64_t talk_frame;
+void widescreen_talk_seen(void) {
+    extern uint64_t renderer_present_count(void);
+    talk_frame = renderer_present_count();
+}
+
 // The minimap group up at the top right while the on-screen controls are up (ui/touch_controls.mm touch_hud_top: their
-// buttons sat over it) and the player is in the world: a pane of the game's 1280x720 layouts in its lower right (x > 290,
-// y < -140: the minimap, the time, temperature and noise meters, the Sheikah Sensor; 2026-11-02, LARECOMP_LOG_PANES) goes
-// up this many layout units (y up); 0 elsewhere. vulkan/exec.c moves those panes, their texts and scissors.
+// buttons sat over it) and the player is in the world with the minimap on screen: a pane of the game's 1280x720 layouts in
+// its lower right (x > 290, y < -140: the minimap, the time, temperature and noise meters, the Sheikah Sensor; 2026-11-02,
+// LARECOMP_LOG_PANES) goes up this many layout units (y up); 0 elsewhere. vulkan/exec.c moves those panes, their texts
+// and scissors.
 float widescreen_hud_top(float x, float y) {
     extern bool touch_hud_top(void);
+    extern uint64_t renderer_present_count(void);
     if (x < 290.0f || y > -140.0f || !touch_hud_top() || !widescreen_world_play()) return 0;
+    if (!minimap_frame || renderer_present_count() - minimap_frame > 3) return 0;
     return 490.0f;
 }
 
 // Where the minimap is on a w x h screen, moved up as above (its centre at layout 515, -245; about 100 units across):
 // a touch there opens the map (ui/touch_controls.mm). false: not up there now.
-float widescreen_hud_shift(float x);
+float widescreen_hud_shift(float x, float y);
 bool widescreen_minimap_at(float w, float h, float *x, float *y, float *r) {
     if (widescreen_hud_top(515.0f, -245.0f) == 0) return false;
-    float k = h / 720.0f, lx = 515.0f + (widescreen_ui_centred() ? widescreen_hud_shift(515.0f) : 0), ly = -245.0f + 490.0f;
+    float k = h / 720.0f, lx = 515.0f + (widescreen_ui_centred() ? widescreen_hud_shift(515.0f, -245.0f) : 0), ly = -245.0f + 490.0f;
     *x = w * 0.5f + lx * k, *y = h * 0.5f - ly * k, *r = 105.0f * k;
     return true;
 }
 
-float widescreen_hud_shift(float x) {
+float widescreen_hud_shift(float x, float y) {
+    extern uint64_t renderer_present_count(void);
     if (!widescreen_ui_centred() || widescreen_in_menu() || !in_world()) return 0;
+    if (talk_frame && renderer_present_count() - talk_frame <= 3 && y < -140.0f && y > -330.0f && x > -310.0f && x < 310.0f)
+        return 0;  // (a talk's box: its ends at +-284, the name; its answers - boxes at 450, texts from 352 - out to the edge)
     float ax = x < 0 ? -x : x, t = (ax - 180.0f) / (260.0f - 180.0f);
     if (t <= 0) return 0;
     if (t > 1) t = 1;
     t = t * t * (3 - 2 * t);
     float d = 640.0f * (g_wide - 1.0f) * t;
     return x < 0 ? -d : d;
+}
+
+// A talk's box is on screen (in the world): the touch controls give way to it (ui/touch_controls.mm)
+bool widescreen_talk(void) {
+    extern uint64_t renderer_present_count(void);
+    return talk_frame && renderer_present_count() - talk_frame <= 3 && widescreen_world_play();
 }
 
 void widescreen_frame_end(uint64_t frame) { (void)frame; }
