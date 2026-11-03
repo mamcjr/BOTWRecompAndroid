@@ -140,6 +140,12 @@ int main(void) {
     check("control: same format - nothing decoded between the passes", readbacks == 0 && images == 1);
     outside();
     check("control: both levels decoded together", readbacks == 1 && readback_regions == 2);  // (a slice each)
+    // a pass in the shadow's format through a view that draws without a shadow (here: a level past the texture's):
+    // the shadow is decoded first, the pass drawing into the decoded image itself
+    setup();
+    draw(0x2C, 0);
+    draw(0x2C, 7);
+    check("P1: same format, view without a shadow: decoded first", readbacks == 1);
     // P2: a new shadow holds the texture's blocks before the first draw (a draw may cover part of a slice; the whole
     // slice is decoded): every level's blocks from guest memory - 8x8x32 + 4x4x16 + 2x2x8 + 1x1x4 + 1x1x2 + 1x1x1
     setup();

@@ -1443,16 +1443,25 @@ static BcShadow *bc_shadow_create(NvnTexture *t, TexBackend *b, VkFormat vf, uin
     return s;
 }
 
-VkImageView vk_bc_shadow_view(NvnTexture *t, const NvnTextureView *v, VkFormat *fmt, uint32_t *w, uint32_t *h) {
-    TexBackend *b = t->backend;
-    if (!b || !b->bc_vf || !v || !(v->setmask & 4) || b->samples > 1) return VK_NULL_HANDLE;
+// The format of the shadow a render target view of t draws into, VK_FORMAT_UNDEFINED when it draws without one
+static VkFormat bc_shadow_format(const NvnTexture *t, const NvnTextureView *v) {
+    const TexBackend *b = t->backend;
+    if (!b || !b->bc_vf || !v || !(v->setmask & 4) || b->samples > 1) return VK_FORMAT_UNDEFINED;
     const FormatInfo *bf = t->layout.fmt, *vfi = nvn_format_info(v->format);
-    if (!bf || !vfi || bf->bw != 4 || bf->bh != 4 || vfi->bw != 1 || vfi->bh != 1 || vfi->bpb != bf->bpb) return VK_NULL_HANDLE;
-    uint32_t lv = v->setmask & 1 ? v->base_level : 0, z = v->setmask & 2 ? v->min_layer : 0;
+    if (!bf || !vfi || bf->bw != 4 || bf->bh != 4 || vfi->bw != 1 || vfi->bh != 1 || vfi->bpb != bf->bpb) return VK_FORMAT_UNDEFINED;
+    uint32_t lv = v->setmask & 1 ? v->base_level : 0;
     int rt3d = rt3d_mode();
     if (lv >= b->levels || lv >= 16 || (b->base_type == VK_IMAGE_VIEW_TYPE_3D && (rt3d == 0 || (rt3d == 1 && lv > 0))))
-        return VK_NULL_HANDLE;  // (LARECOMP_3D_RT: as vk_view)
-    VkFormat vf = vk_format(v->format);
+        return VK_FORMAT_UNDEFINED;  // (LARECOMP_3D_RT: as vk_view)
+    return vk_format(v->format);
+}
+
+VkImageView vk_bc_shadow_view(NvnTexture *t, const NvnTextureView *v, VkFormat *fmt, uint32_t *w, uint32_t *h) {
+    TexBackend *b = t->backend;
+    VkFormat vf = bc_shadow_format(t, v);
+    if (!vf) return VK_NULL_HANDLE;
+    const FormatInfo *bf = t->layout.fmt;
+    uint32_t lv = v->setmask & 1 ? v->base_level : 0, z = v->setmask & 2 ? v->min_layer : 0;
     BcShadow *s = b->bc_shadow, *from = NULL;
     if (s && s->img.format != vf) {  // (one drawn into in another format: vk_bc_shadows_resolve decoded it, unless it is
         if (s->dirty) return VK_NULL_HANDLE;  // a target of this pass too; a new one takes its blocks)
@@ -1536,8 +1545,8 @@ void vk_bc_shadows_resolve(NvnTexture *const *targets, const NvnTextureView *vie
         bool drawn = false;  // (still being drawn into: the next pass's target, through a view in the shadow's format -
                              // another one replaces the shadow, vk_bc_shadow_view)
         for (int i = 0; i < ntargets; i++)
-            drawn |= targets[i] && targets[i]->backend == b && has_view[i] && (views[i].setmask & 4) &&
-                     vk_format(views[i].format) == b->bc_shadow->img.format;
+            drawn |= targets[i] && targets[i]->backend == b && has_view[i] &&
+                     bc_shadow_format(targets[i], &views[i]) == b->bc_shadow->img.format;
         if (drawn) continue;
         bc_shadow_resolve(b);
         bc_dirty[k--] = bc_dirty[--nbc_dirty];
