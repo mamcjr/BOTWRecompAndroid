@@ -529,6 +529,50 @@ void plat_print_backtrace(void) {
     }
 }
 
+// The game's code reading the null page (an address under 64 KB): the load answers zero and the code goes on. The game
+// checks some pointers that are still being set up only by what they point to - a rune's or the Slate camera's target
+// tag (0x88 off a null or -1 pointer, #235 #241 #247) - and both modes crashed there. Only plain loads into general
+// registers (LDR / LDRB / LDRH / LDRS*, LDP) without a base write-back; in the game's code only (recompiled:
+// botwgame.so; Native: the guest window). Each place logged once. LARECOMP_NO_NULL_READS=1: off.
+static bool null_read(ucontext_t *uc, uint64_t fa, uint64_t pc) {
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_NO_NULL_READS") != NULL;
+    if (off || fa >= 0x10000 || (pc & 3)) return false;
+    bool game = pc >= GUEST_LO && pc < GUEST_HI;
+    if (!game) {
+        Dl_info di = {0};
+        game = dladdr((void *)(uintptr_t)pc, &di) && di.dli_fname && strstr(di.dli_fname, "botwgame");
+    }
+    if (!game) return false;
+    uint32_t in = *(const uint32_t *)(uintptr_t)pc;
+    int rt = in & 31, rt2 = -1;
+    if ((in & 0x3B000000u) == 0x39000000u) {  // (LDR* unsigned offset: opc 01, or 10 / 11 sign-extending but PRFM)
+        int opc = (in >> 22) & 3, size = in >> 30;
+        if (opc == 0 || (opc == 2 && size == 3)) return false;
+    } else if ((in & 0x3B200C00u) == 0x38000000u || (in & 0x3B200C00u) == 0x38200800u) {  // (unscaled; register offset)
+        int opc = (in >> 22) & 3, size = in >> 30;
+        if (opc == 0 || (opc == 2 && size == 3)) return false;
+    } else if ((in & 0x3BC00000u) == 0x29400000u) {  // (LDP / LDPSW, signed offset: no write-back)
+        rt2 = (in >> 10) & 31;
+    } else return false;
+    if (rt < 31) uc->uc_mcontext.regs[rt] = 0;
+    if (rt2 >= 0 && rt2 < 31) uc->uc_mcontext.regs[rt2] = 0;
+    uc->uc_mcontext.pc = pc + 4;
+    static uint64_t seen[32];
+    static int nseen;
+    bool known = false;
+    for (int i = 0; i < nseen && !known; i++) known = seen[i] == pc;
+    if (!known && nseen < 32) {
+        seen[nseen++] = pc;
+        Dl_info di = {0};
+        uint64_t mo = dladdr((void *)(uintptr_t)pc, &di) ? pc - (uint64_t)(uintptr_t)di.dli_fbase : pc;
+        fprintf(stderr, "[android] the game's code read address %#llx: zero, and on (%s+%llx, lr %llx)\n",
+                (unsigned long long)fa, game && pc >= GUEST_LO && pc < GUEST_HI ? "guest" : "botwgame.so",
+                (unsigned long long)mo, (unsigned long long)uc->uc_mcontext.regs[30]);
+    }
+    return true;
+}
+
 // (installed through ART's signal chain: ART still handles its own faults first)
 static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = ctx;
@@ -544,6 +588,10 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
             if (h->magic == ESR_MAGIC) { g_fault_wnr = (int)((((struct esr_context *)h)->esr >> 6) & 1); break; }
     }
     if (rt_fault_watch(fa, pc)) return;  // (debugging watches first: a watched page may be write-tracked too)
+    {   // (the null page read: zero, above)
+        extern int g_fault_wnr;
+        if (sig == SIGSEGV && g_fault_wnr != 1 && null_read(uc, fa, pc)) return;
+    }
     if (sig == SIGSEGV && wt_fault(fa)) return;  // (write tracking - whatever the code: mprotect decides, #70)
     if (sig == SIGSEGV) {  // (what the next report needs: the kernel's code, and the page's tracking state)
         extern int g_fault_wnr;
