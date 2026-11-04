@@ -1261,6 +1261,9 @@ bool backend_vsync_offset(uint64_t t, uint64_t grid, int64_t *off, uint64_t *per
     uint64_t d = __atomic_load_n(&vs_delay, __ATOMIC_RELAXED);
     // (no timings yet, or none for 2 s: the app in the background, a surface made again)
     if (!a || !p || !d || !__atomic_load_n(&vs_fit, __ATOMIC_RELAXED) || t < a || t - a > 2000000000ull) return false;
+    // (60 Hz only, for now: at 120 Hz the half-vsync lead is 4 ms, and on a POCO F7 Ultra the frames shown 25 / 42 ms
+    // rose from 2% to 10-12% with it, where at 60 Hz they fell from 6% to 0.2% - SurfaceFlinger's present times, 2026-11-03)
+    if (p < 12000000ull) return false;
     uint64_t k = (grid + p / 2) / p, kp = k * p;
     if (!k || (grid > kp ? grid - kp : kp - grid) > p / 16) return false;
     uint64_t q = t + d;                                  // when it would reach queueBuffer
