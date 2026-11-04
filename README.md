@@ -12,7 +12,7 @@ It is built on the engine of **[LAS Recomp](https://github.com/peiikai/LASRecomp
 > [!WARNING]
 > **Beta.** Tested primarily on one phone (POCO F7 Ultra, Adreno 830, Mesa Turnip driver). Performance and compatibility
 > vary by device; expect bugs, especially on GPUs that have not been tested on physical hardware. See the
-> [0.2.3-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.2.3-beta) and the
+> [0.3.0-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.3.0-beta) and the
 > [development notes](docs/BOTW-PORT.md) (in Portuguese).
 
 ## Supported platform
@@ -35,12 +35,13 @@ Windows, Linux or macOS may still be used as development hosts with the Android 
 - **Video and controls:** optional 60 fps on supported game versions and experimental 60 fps in-engine cutscenes,
   unlocked aspect ratio, internal/output resolution, FSR 1 or Snapdragon GSR 1 upscaling, FXAA/SMAA, touch controls,
   physical controllers and gyro. The app offers a Vulkan driver selector and compatibility settings.
-- **0.2.3 fixes:** dark dots and lines on grassy ground, smoke spikes on hits, partial GAME OVER text, white water
-  with Sync lag enabled before loading, several unlocked aspect-ratio UI issues, and some crashes. The Mali shared
-  memory fix has not yet been confirmed on a physical Mali device.
+- **0.3.0:** crashes and freezes after 30+ minutes on Mali GPUs, the fast travel's dissolve, stray leaves on the
+  ground, the stable's windows and the loading screens in unlocked aspect, a 40 / 45 fps frame rate, even 30 fps on
+  60 Hz screens, touch buttons for the arrows and the album, and two Driver compatibility options: the driver's own
+  variables, and game memory through a shared file for Mali and Xclipse (experimental).
 - **Known issues:** short grass appears only up close; water reflections can move with the camera; the pause menu
-  background can be black on Qualcomm's stock driver; Link may flicker on the first hit in Native Mode. After a
-  Sheikah Tower activation, terrain may stretch into vertical "curtains"; reload a save made after activation.
+  background can be black on Qualcomm's stock driver; Link may flicker on the first hit in Native Mode; rain falls
+  slower than on the console.
 
 > [!IMPORTANT]
 > Like LAS Recomp, this project is made almost entirely with AI (Claude, by Anthropic, through Claude Code), directed,
@@ -63,6 +64,10 @@ icons read from your game files. The game's menus keep the classic buttons.
 - **Rune fan:** tap power to use the rune; hold it to open a fan of your runes and let go over the one you want.
 - **Gestures:**
   - **Bow and throw:** hold and drag the same finger to aim (with motion controls on, move the phone instead); its sensitivity is in Controls.
+    While you hold them, a ✕ cancels the shot or the throw; with the bow drawn, an arrow button picks the arrows.
+  - **Parry:** slide the finger on the held shield.
+  - **Magnesis and the camera:** with Magnesis selected, a d-pad cross moves the object; with the camera rune, a − button
+    opens the album.
   - **Camera:** drag anywhere on the right half.
   - **Weapon and shield pickers:** hold, then choose with a second finger.
   - **Shield surfing:** double-tap the shield and hold.
@@ -88,7 +93,7 @@ icons read from your game files. The game's menus keep the classic buttons.
    Files > Vulkan driver**. If the app reports that the Vulkan driver is too old at startup, long-press the app icon
    and choose **Choose driver** before launching the game.
 
-Updating from 0.2.x to 0.2.3-beta does not require rebuilding game code. Shaders compile again once, so the first
+Updating from 0.2.x to 0.3.0-beta does not require rebuilding game code. Shaders compile again once, so the first
 minutes may stutter. To report a problem, open an [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) with
 your phone, GPU, driver, game version and a log from **Settings > Files > Save a log file**.
 
