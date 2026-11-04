@@ -307,7 +307,7 @@ static bool parse_scenes(const char *path, char *err, size_t nerr) {
             ok = sscanf(val, "%31[A-Za-z0-9_-]", s->name) == 1 && !strcmp(s->name, val);
             have |= HAVE_NAME;
         } else if (!strcmp(key, "pos")) {
-            ok = sscanf(val, "%f %f %f", &s->pos[0], &s->pos[1], &s->pos[2]) == 3;
+            ok = sscanf(val, "%f %f %f", &s->pos[0], &s->pos[1], &s->pos[2]) == 3 && isfinite(s->pos[0]) && isfinite(s->pos[1]) && isfinite(s->pos[2]);
             have |= HAVE_POS;
         } else if (!strcmp(key, "time")) {
             s->time = (float)atof(val);
@@ -319,9 +319,11 @@ static bool parse_scenes(const char *path, char *err, size_t nerr) {
             have |= HAVE_WEATHER;
         } else if (!strcmp(key, "yaw")) {
             s->yaw = (float)atof(val);
+            ok = fabsf(s->yaw) <= 360;
             have |= HAVE_YAW;
         } else if (!strcmp(key, "pitch")) {
             s->pitch = (float)atof(val);
+            ok = fabsf(s->pitch) <= 360;
             have |= HAVE_PITCH;
         } else {
             ok = false;
@@ -415,22 +417,32 @@ static void stop_run(const char *status, const char *message) {
     FATAL("Benchmark: %s\n", message);
 }
 
+static bool under(const char *dir, const char *p) {
+    size_t n = strlen(dir);
+    return !strncmp(dir, p, n) && (p[n] == '/' || !p[n]);
+}
+
 // Before the start screen and anything that opens a save or the settings
 void benchmark_init(void) {
     const char *path = getenv("LARECOMP_BENCHMARK");
     if (!path || !*path) return;
     g_benchmark = true;
+    const char *from = getenv("LARECOMP_SAVE_DIR");  // (the save this run would have used)
+    snprintf(source, sizeof source, "%s", from && *from ? from : "save");
+    if (strlen(path) > 900 || strlen(source) > 900) stop_run("bad_output", "a path over 900 characters");
     snprintf(out_dir, sizeof out_dir, "%s.out", path);
+    {   // the output beside the scene file, and the save never under one another
+        char a[4096], b[4096];  // (>= PATH_MAX: Bionic's fortified realpath checks)
+        if (realpath(source, a) && realpath(path, b) && under(a, b)) stop_run("bad_save", "the scene file is inside the save's folder");
+    }
     mkdir(out_dir, 0755);
     char err[300] = "", old[1200];
     snprintf(old, sizeof old, "%s/frames.csv", out_dir);  // (a run before this one; it's appended to, scene by scene)
     remove(old);
     if (!parse_scenes(path, err, sizeof err)) stop_run("bad_scene_file", err);
-    const char *from = getenv("LARECOMP_SAVE_DIR");  // (the save this run would have used)
-    snprintf(source, sizeof source, "%s", from && *from ? from : "save");
-    {   // never under what's replaced for each scene
-        char a[4096], b[4096];  // (>= PATH_MAX: Bionic's fortified realpath checks)
-        if (realpath(source, a) && realpath(out_dir, b) && !strncmp(a, b, strlen(b))) stop_run("bad_save", "the save is inside the output folder");
+    {
+        char a[4096], b[4096];
+        if (realpath(source, a) && realpath(out_dir, b) && under(b, a)) stop_run("bad_save", "the save is inside the output folder");
     }
     // The game plays the copy, the settings are a copy too: the player's never change
     static char save_dir[1100], settings[1100];
@@ -540,7 +552,8 @@ void benchmark_vfr(void) {
 void benchmark_frame(double period, double busy, double game, double render, double gpu) {
     if (!win_on || win_n >= win_cap) return;
     float *r = win[win_n];
-    r[0] = (float)period, r[1] = (float)busy, r[2] = (float)game, r[3] = (float)render, r[4] = (float)gpu;
+    // (the frame after a long one: vk_pace_frame's GPU time has both in it)
+    r[0] = (float)period, r[1] = (float)busy, r[2] = (float)game, r[3] = (float)render, r[4] = win_n && win[win_n - 1][4] < 0 ? -1 : (float)gpu;
     win_n = win_n + 1;
 }
 
@@ -587,8 +600,7 @@ static void next_or_exit(void) {
     cur_scene = 0;
     write_report("done");
     LOG("[benchmark] done: %s/report.json\n", out_dir);
-    fflush(stderr);
-    _exit(0);
+    exit(0);  // (the pipeline cache is kept: device.c quick_exit_handler)
 }
 
 static void end_scene(Result *r, bool ok, const char *step, const char *why) {
@@ -748,11 +760,13 @@ void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t
         break;
     }
     case S_MEASURED: {  // (a frame later: the window's last frame is written)
+        if (!win_n) { end_scene(NULL, false, "window", "no frames recorded"); break; }
         Result *r = measure();
         r->cam_err = hypot(ey, ep);
         r->moved = hypot(pos[0] - pos0[0], pos[2] - pos0[2]);
         double drift = fabs(RDF(time_mgr + TM_TIME) - s->time);
-        if (r->moved > MOVE_TOLERANCE) end_scene(r, false, "check", "Link moved in the window");
+        if (!angles) end_scene(r, false, "check", "the camera can't be read");
+        else if (r->moved > MOVE_TOLERANCE) end_scene(r, false, "check", "Link moved in the window");
         else if (r->cam_err > CAM_DRIFT) end_scene(r, false, "check", "the camera drifted in the window");
         else if (drift > TIME_DRIFT) end_scene(r, false, "check", "the time of day didn't hold");
         else if (!w || RD8(w + W_WEATHER) != (uint8_t)s->weather) end_scene(r, false, "check", "the weather didn't hold");
