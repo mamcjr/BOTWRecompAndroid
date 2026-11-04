@@ -250,6 +250,20 @@ void plat_write_tracking_enable(uint64_t lo, uint64_t hi) {
 // taken for ours; not on the POCO F7 Ultra with the same path. wt_odd counts those (the crash report shows it).
 static uint64_t wt_odd, wt_odd_addr;
 static int wt_odd_repeats;
+
+// Each page made read-only or writable on its own splits the window's mapping: after half an hour the process ran into
+// Android's limit on mappings (~65000), mprotect failed, the page written to stayed read-only, and the same store
+// faulted until it was taken for a real fault - a crash in the game's code on a page marked written (Mali-G720, #196;
+// "page tracking 2"). Then the whole window is made writable again in one call (a single mapping), every page counts as
+// written (state 0), and tracking starts over from there. (wt_lock held; signal-safe: no allocation, no logging.)
+static volatile int wt_reopened;  // (times it happened: plat_written_pages logs it)
+static bool wt_reopen_all(void) {
+    if (mprotect((void *)(uintptr_t)wt_lo, wt_hi - wt_lo, PROT_READ | PROT_WRITE)) return false;
+    memset(wt_state, 0, (size_t)((wt_hi - wt_lo) >> 12));
+    wt_reopened++;
+    return true;
+}
+
 static bool wt_fault(uint64_t a) {
     if (!wt_state || a < wt_lo || a >= wt_hi) return false;
     uint64_t p = (a - wt_lo) >> 12, np = (wt_hi - wt_lo) >> 12;
@@ -265,12 +279,18 @@ static bool wt_fault(uint64_t a) {
     for (uint64_t k = p; k < p + 2 && k < np; k++) {
         if (k != p && wt_state[k] != 1) continue;
         if (k == p && wt_state[k] == 0) {  // (untracked: writable unless mprotect can't make it so - a real fault)
-            if (mprotect((void *)(uintptr_t)(wt_lo + (k << 12)), 4096, PROT_READ | PROT_WRITE)) break;
+            if (mprotect((void *)(uintptr_t)(wt_lo + (k << 12)), 4096, PROT_READ | PROT_WRITE)) {
+                if (errno == ENOMEM && wt_reopen_all()) ours = true;  // (out of mappings, above)
+                break;
+            }
             ours = true;
             continue;
         }
         wt_state[k] = 2;
-        mprotect((void *)(uintptr_t)(wt_lo + (k << 12)), 4096, PROT_READ | PROT_WRITE);
+        if (mprotect((void *)(uintptr_t)(wt_lo + (k << 12)), 4096, PROT_READ | PROT_WRITE)) {
+            ours = wt_reopen_all();  // (out of mappings, above; else it stays a fault)
+            break;
+        }
         ours = true;
     }
     wt_unlock();
@@ -302,9 +322,37 @@ void plat_write_prepare(uint64_t addr, uint64_t size) {
 int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, uint64_t *page) {
     if (!wt_state || addr < wt_lo || addr + size > wt_hi) return -1;
     *page = 4096;
+    {   // (the process's mappings, every 5 minutes - how near the limit the tracked pages bring it; and wt_reopen_all)
+        static int logged;
+        static uint64_t next;
+        uint64_t now = plat_now_ns();
+        if (wt_reopened != logged) {
+            logged = wt_reopened;
+            fprintf(stderr, "[android] page write tracking: out of memory mappings, the window reopened whole (%d)\n", logged);
+        }
+        if (now >= next) {
+            next = now + 300000000000ull;
+            FILE *f = fopen("/proc/self/maps", "r");
+            int n = 0, c;
+            while (f && (c = getc_unlocked(f)) != EOF) n += c == '\n';
+            if (f) fclose(f);
+            fprintf(stderr, "[android] memory mappings: %d\n", n);
+        }
+    }
     uint64_t p0 = (addr - wt_lo) >> 12, p1 = (addr + size - wt_lo + 0xFFF) >> 12;
     int n = 0;
     wt_lock();
+    {   // LARECOMP_WT_REOPEN_TEST=<s> (test): the out-of-mappings path (wt_reopen_all) taken every that many seconds
+        static int every = -1;
+        static uint64_t next;
+        if (every < 0) every = getenv("LARECOMP_WT_REOPEN_TEST") ? atoi(getenv("LARECOMP_WT_REOPEN_TEST")) : 0;
+        uint64_t now = plat_now_ns();
+        if (every > 0 && now >= next) {
+            bool first = !next;
+            next = now + (uint64_t)every * 1000000000ull;
+            if (!first && wt_reopen_all()) { wt_unlock(); return -1; }
+        }
+    }
     for (uint64_t p = p0; p < p1;) {
         if (wt_state[p] == 1) { p++; continue; }
         uint64_t q = p;
@@ -316,6 +364,8 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
             // (state first, then the protection: a write in between lands before the caller copies the page)
             for (uint64_t k = p; k < q; k++) wt_state[k] = 1;
             if (mprotect((void *)(uintptr_t)(wt_lo + (p << 12)), (q - p) << 12, PROT_READ)) {
+                if (errno == ENOMEM && wt_reopen_all()) { wt_unlock(); return -1; }  // (out of mappings: start over - all
+                                                                                    // counts as written, wt_reopen_all)
                 for (uint64_t k = p; k < q; k++) wt_state[k] = 0;
                 mprotect((void *)(uintptr_t)(wt_lo + (p << 12)), (q - p) << 12, PROT_READ | PROT_WRITE);
                 wt_broken = true;
