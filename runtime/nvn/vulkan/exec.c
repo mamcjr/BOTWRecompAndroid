@@ -422,9 +422,11 @@ void vk_pace_frame(void) {
     idx = (idx + 1) % 60;
     if (!pace_on) return;  // (measured and counted all the same: LARECOMP_LOG_PACE, the stats)
 #ifdef __ANDROID__
-    if (g_settings.fps_mode) {  // (Video: Frame rate 20 / 30 / 60) fixed: no measuring, no trials
+    if (g_settings.fps_mode) {  // (Video: Frame rate 20 / 30 / 40-45 / 60) fixed: no measuring, no trials
+        extern int vk_between_fps(void);
         bool slow = g_settings.fps_mode == 1 || g_settings.fps_mode == 3;
-        if (slow != pace_slow) LOG("[pace] frame rate set to %d fps\n", g_settings.fps_mode == 3 ? 20 : slow ? 30 : 60);
+        if (slow != pace_slow)
+            LOG("[pace] frame rate set to %d fps\n", g_settings.fps_mode == 3 ? 20 : slow ? 30 : g_settings.fps_mode == 4 ? vk_between_fps() : 60);
         pace_slow = slow;
         return;
     }
@@ -490,7 +492,8 @@ static uint64_t pace_end_counter(const uint64_t *start_entry, const uint64_t *en
 #ifdef __ANDROID__
     static int fast = -1;
     if (fast < 0) fast = getenv("LARECOMP_FAST_COUNTERS") ? atoi(getenv("LARECOMP_FAST_COUNTERS")) : 0;
-    if ((!pace_slow && pace_on > 0 && (fast || g_settings.fps_mode == 2)) || fast == 2) {  // (2: with LARECOMP_PACE=0 too, a test)
+    // (Frame rate 45 as 60: the game in its 60 fps way)
+    if ((!pace_slow && pace_on > 0 && (fast || g_settings.fps_mode == 2 || g_settings.fps_mode == 4)) || fast == 2) {  // (2: with LARECOMP_PACE=0 too, a test)
         uint64_t max = start_entry[1] + ns_to_gpu_ticks(PACE_FAST_NS);
         return value > max ? max : value;
     }

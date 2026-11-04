@@ -262,7 +262,7 @@ void settings_load(void) {
 #ifdef __ANDROID__
         else if (!strcmp(key, "touch_controls")) g_settings.touch_controls = atoi(val) != 0;
         else if (!strcmp(key, "cutscenes_60")) g_settings.event_fps_unlock = atoi(val) != 0;
-        else if (!strcmp(key, "frame_rate")) g_settings.fps_mode = !strcmp(val, "30") ? 1 : !strcmp(val, "60") ? 2 : !strcmp(val, "20") ? 3 : 0;
+        else if (!strcmp(key, "frame_rate")) g_settings.fps_mode = !strcmp(val, "30") ? 1 : !strcmp(val, "60") ? 2 : !strcmp(val, "20") ? 3 : !strcmp(val, "45") ? 4 : 0;
         else if (!strcmp(key, "shader_int32")) g_settings.shader_int32 = atoi(val) != 0;
         else if (!strcmp(key, "sync_lag")) g_settings.sync_lag = atoi(val) != 0;
         else if (!strcmp(key, "native_code")) g_settings.native_code = atoi(val) != 0;
@@ -367,7 +367,8 @@ void settings_save(void) {
 #endif
 #ifdef __ANDROID__
     fprintf(f, "touch_controls = %d\n", g_settings.touch_controls);
-    fprintf(f, "frame_rate = %s\n", g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : g_settings.fps_mode == 3 ? "20" : "auto");
+    fprintf(f, "frame_rate = %s\n", g_settings.fps_mode == 1 ? "30" : g_settings.fps_mode == 2 ? "60" : g_settings.fps_mode == 3 ? "20" :
+               g_settings.fps_mode == 4 ? "45" : "auto");
     fprintf(f, "cutscenes_60 = %d\n", g_settings.event_fps_unlock);
     fprintf(f, "shader_int32 = %d\nsync_lag = %d\nnative_code = %d\nfiles_in_place = %d\n", g_settings.shader_int32,
             g_settings.sync_lag, g_settings.native_code, g_settings.files_in_place);

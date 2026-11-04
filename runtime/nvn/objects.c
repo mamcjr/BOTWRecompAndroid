@@ -1389,6 +1389,10 @@ NVN(nvnWindowGetPresentInterval) { RET(WIN->interval); }
 // where the game picks (1.0.0 / 1.6.0; 1.8.2 and 1.9.0 keep the pace by the runtime's clock, hle/framepace.c).
 int64_t rt_frame_ticks(int64_t ticks) {
     if (!g_settings.fps_mode) return ticks;
+    if (g_settings.fps_mode == 4) {  // (Frame rate 40 / 45: its 25 / 22 ms frames picked the 30 fps mode, interval 2)
+        const int64_t cap = 19200000ll * 90 / 100 / 60;  // (0.9 vsyncs: interval 1)
+        return ticks > cap ? cap : ticks;
+    }
     if (g_settings.fps_mode == 3) {
         const int64_t floor = 19200000ll * 25 / 10 / 60;  // (2.5 vsyncs)
         return ticks < floor ? floor : ticks;
@@ -1414,6 +1418,7 @@ NVN(nvnWindowSetPresentInterval) {
         uint32_t *max_iv = (uint32_t *)(uintptr_t)(c->x[19] + 0x234), top = twenty ? 3 : 2;
         if (*max_iv > top) *max_iv = top;
         if (force <= 0 && twenty) c->x[1] = 3;
+        else if (force <= 0 && g_settings.fps_mode == 4) c->x[1] = 1;  // (Frame rate 40 / 45: the clock's interval 1 too)
         else if (force <= 0 && c->x[1] > 2) c->x[1] = 2;  // (out of it: not left at 3)
     }
     if ((int)A(1) != g_present_interval)
@@ -1457,7 +1462,7 @@ NVN(nvnQueuePresentTexture) {
         if (on < 0) on = !getenv("LARECOMP_PRESENT_WAIT") || atoi(getenv("LARECOMP_PRESENT_WAIT"));
         extern volatile uint64_t g_vsync_count;
         extern __thread uint64_t g_blocked_ns;  // (kernel.c: the pacer counts this as idle, not frame work)
-        int cap = g_settings.fps_mode == 2 ? 1 : g_settings.fps_mode == 3 ? 3 : 2;  // (Frame rate 20: 3)
+        int cap = g_settings.fps_mode == 2 || g_settings.fps_mode == 4 ? 1 : g_settings.fps_mode == 3 ? 3 : 2;  // (20: 3; 45: 60's)
         int n = w->interval > cap ? w->interval : cap;
         if (on && framepace_on()) {
             // BOTW 1.8.2 (runtime/hle/framepace.c): a steady grid at the chosen frame rate, whatever the interval;

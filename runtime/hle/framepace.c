@@ -103,8 +103,11 @@ int framepace_target(void) {
     if (movie == -2) movie = env_int("LARECOMP_MOVIE_FPS", 30);
     if (menu == -2) menu = env_int("LARECOMP_MENU_FPS", 30);
     if (event == -2) event = env_int("LARECOMP_EVENT_FPS", -1);  // (-1: the setting - Cutscenes at 60 fps, else 30)
-    // (Video > Frame rate: 20, 30, 60; Auto is 60 here - the clock follows whatever the frames really take)
-    int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 : g_settings.fps_mode == 3 ? 20 : 60;
+    // (Video > Frame rate: 20, 30, 40 / 45, 60; Auto is 60 here - the clock follows whatever the frames really take.
+    // 40 / 45: whichever the screen shows evenly, vulkan/device.c vk_between_fps - the game in its 60 fps way)
+    extern int vk_between_fps(void);
+    int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 : g_settings.fps_mode == 3 ? 20
+            : g_settings.fps_mode == 4 ? vk_between_fps() : 60;
     if (movie > 0 && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0 && (fps == 0 || fps > movie)) fps = movie;
     if (menu > 0 && (fps == 0 || fps > menu) && in_menu()) fps = menu;
     int ev = event >= 0 ? event : g_settings.event_fps_unlock ? 0 : 30;
@@ -221,7 +224,10 @@ void rt_vfr_update(uint64_t vfr) {
     // the frame rate, never back and forth from one frame to the next.
     slow += (ratio - slow) * 0.05;
     uint32_t iv = g_vfr_iv;
-    if (iv == 1 && slow > 0.85) iv = 2;
+    // (Frame rate 40 / 45: the game's 60 fps way, interval 1, whatever the ratio - at 40 (0.75) the rule below kept 2
+    // while the frame loop ran at 1 (nvn/objects.c), the mismatch that sank Link at 20 fps)
+    if (g_settings.fps_mode == 4) iv = 1, slow = ratio;
+    else if (iv == 1 && slow > 0.85) iv = 2;
     else if (iv == 2 && slow < 0.7) iv = 1;
     else if (iv == 2 && slow > 1.3) iv = 3;
     else if (iv == 3 && slow < 1.15) iv = 2;

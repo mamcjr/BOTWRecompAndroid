@@ -37,7 +37,7 @@ static void dyn_update(double now, double gpu_ms) {
 #ifdef __ANDROID__
     // the frame rate it keeps: 60 with Frame rate at 60 fps, else 30 - Auto's 60 comes by itself where the GPU has room.
     // (Aiming at Auto's tries for 60 took the scale to its floor while the game stayed at 30: POCO F7 Ultra, 2026-10-25)
-    want = g_settings.fps_mode == 2 ? want : g_settings.fps_mode == 3 ? 1000.0 / 20 : 1000.0 / 30;
+    want = g_settings.fps_mode == 2 || g_settings.fps_mode == 4 ? want : g_settings.fps_mode == 3 ? 1000.0 / 20 : 1000.0 / 30;  // (45: its 22 ms)
 #endif
     g_dyn_dt_sum += dt;
     g_dyn_n++;
