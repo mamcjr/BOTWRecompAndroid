@@ -153,6 +153,8 @@ Bug reports, device tests, and contributions are also greatly appreciated.
     ([#103](https://github.com/mamcjr/BOTWRecompAndroid/pull/103)).
   - [Ureta93](https://github.com/Ureta93): settings files saved with Windows line endings
     ([#187](https://github.com/mamcjr/BOTWRecompAndroid/pull/187)).
+  - [Propinbo](https://github.com/Propinbo): Link breaking up into light again on a fast travel, instead of turning flat
+    blue and vanishing ([#210](https://github.com/mamcjr/BOTWRecompAndroid/pull/210)).
 - Made with [Claude Code](https://claude.com/claude-code) (Anthropic).
 
 *The Legend of Zelda* and *Breath of the Wild* are trademarks of Nintendo. This project is not affiliated with or

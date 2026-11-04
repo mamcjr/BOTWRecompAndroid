@@ -149,6 +149,8 @@ correções específicas. Relatos de bugs, testes em outros aparelhos e contribu
     branco ([#103](https://github.com/mamcjr/BOTWRecompAndroid/pull/103)).
   - [Ureta93](https://github.com/Ureta93): arquivos de configuração salvos com quebras de linha do Windows
     ([#187](https://github.com/mamcjr/BOTWRecompAndroid/pull/187)).
+  - [Propinbo](https://github.com/Propinbo): o Link volta a se desfazer em luz na viagem rápida, em vez de ficar azul
+    chapado e sumir ([#210](https://github.com/mamcjr/BOTWRecompAndroid/pull/210)).
 - Feito com o [Claude Code](https://claude.com/claude-code) (Anthropic).
 
 *The Legend of Zelda* e *Breath of the Wild* são marcas da Nintendo. Este projeto não é afiliado nem endossado pela
