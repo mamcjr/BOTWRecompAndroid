@@ -446,6 +446,16 @@ void vk_device_fault_report(void) {
             (unsigned long long)vend[i].vendorFaultData);
 }
 
+#ifdef __ANDROID__
+// The display's vsync for the frame pacer (nvn/objects.c). The pacer's 30 fps grid had no tie to the display: its
+// phase was wherever the last long frame (a load, a menu) left it, and when that put the queueBuffer within ~1.5 ms
+// before the compositor's latch, frames went out alternately one vsync late and one early (50 / 16.7 ms at 60 Hz,
+// 41.7 / 25 ms at 120 Hz) for minutes, at a steady 30 fps. VK_GOOGLE_display_timing (Android's own swapchain, any
+// GPU) gives the vsync period and when earlier frames reached the screen; the pacer keeps each frame queued half a
+// vsync before one (backend_vsync_offset). LARECOMP_PACE_VSYNC=0: off, the extension not even enabled.
+static bool display_timing;
+#endif
+
 static void create_device(void) {
     uint32_t ne = 0;
     vkEnumerateDeviceExtensionProperties(g_vk.phys, NULL, &ne, NULL);
@@ -556,6 +566,9 @@ static void create_device(void) {
         ext[n_ext++] = VK_KHR_MAP_MEMORY_2_EXTENSION_NAME;
         ext[n_ext++] = VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME;
     }
+    const char *pv = getenv("LARECOMP_PACE_VSYNC");
+    display_timing = has_ext(ep, ne, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) && (!pv || atoi(pv));
+    if (display_timing) ext[n_ext++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
 #endif
     free(ep);
 
@@ -1189,6 +1202,74 @@ static void save_window_image(VkCommandBuffer cb, VkSpan *out) {
     image_barrier(cb, g_vk.sc_images[cur_frame.image], VK_IMAGE_LAYOUT_TRANSFER_SRC_OPTIMAL, VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL);
 }
 
+#ifdef __ANDROID__
+// (display_timing) Written by the render thread after each present, read by the game's thread (the pacer): a vsync
+// (when the latest timed frame reached the screen), the vsync period, and the time from the game's hand-over of a
+// frame to its queueBuffer (the median of the last 9: after a load the render thread's backlog runs to tens of ms,
+// and an average of it kept moving for seconds after), ns. vs_fit: the latest frame reached the screen on the grid.
+static uint64_t vs_anchor, vs_period, vs_delay;
+static bool vs_fit;
+static uint32_t present_id;
+static uint64_t present_asked;  // when the game's thread handed over the frame being presented (vk_present_now)
+
+static void vsync_update(uint64_t queued) {
+    uint64_t asked = present_asked, d = asked && queued > asked ? queued - asked : 0;
+    present_asked = 0;
+    if (d && d < 100000000) {
+        static uint64_t last_d[9];
+        static unsigned n_d;
+        last_d[n_d++ % 9] = d;
+        uint64_t s[9];
+        unsigned n = n_d < 9 ? n_d : 9;
+        for (unsigned i = 0; i < n; i++) {  // (insertion sort: 9 at most)
+            unsigned j = i;
+            for (; j && s[j - 1] > last_d[i]; j--) s[j] = s[j - 1];
+            s[j] = last_d[i];
+        }
+        __atomic_store_n(&vs_delay, s[n / 2], __ATOMIC_RELAXED);
+    }
+    uint64_t p = vs_period;
+    if (present_id % 32 == 1 || !p || !vs_fit) {  // (about once a second: the panel's rate may change)
+        VkRefreshCycleDurationGOOGLE rc;
+        if (vkGetRefreshCycleDurationGOOGLE(g_vk.dev, g_vk.swapchain, &rc) == VK_SUCCESS)
+            p = rc.refreshDuration >= 4000000 && rc.refreshDuration <= 50000000 ? rc.refreshDuration : 0;
+        uint64_t was = vs_period;  // (the period is measured: it moves by microseconds)
+        if (!p != !was || (p > was ? p - was : was - p) > was / 100) LOG("[pace] display vsync %.3f ms\n", p / 1e6);
+        __atomic_store_n(&vs_period, p, __ATOMIC_RELAXED);
+    }
+    VkPastPresentationTimingGOOGLE past[8];
+    uint32_t n = 8;
+    if (vkGetPastPresentationTimingGOOGLE(g_vk.dev, g_vk.swapchain, &n, past) < 0) n = 0;  // (INCOMPLETE: the newest 8)
+    uint64_t a = 0;
+    for (uint32_t i = 0; i < n; i++) if (past[i].actualPresentTime > a) a = past[i].actualPresentTime;
+    if (a <= vs_anchor) return;
+    if (vs_anchor && p) {
+        uint64_t r = (a - vs_anchor) % p;
+        __atomic_store_n(&vs_fit, (r < p - r ? r : p - r) < p / 8, __ATOMIC_RELAXED);
+    }
+    __atomic_store_n(&vs_anchor, a, __ATOMIC_RELAXED);
+}
+
+bool backend_vsync_offset(uint64_t t, uint64_t grid, int64_t *off, uint64_t *period) {
+    uint64_t a = __atomic_load_n(&vs_anchor, __ATOMIC_RELAXED), p = __atomic_load_n(&vs_period, __ATOMIC_RELAXED);
+    uint64_t d = __atomic_load_n(&vs_delay, __ATOMIC_RELAXED);
+    // (no timings yet, or none for 2 s: the app in the background, a surface made again)
+    if (!a || !p || !d || !__atomic_load_n(&vs_fit, __ATOMIC_RELAXED) || t < a || t - a > 2000000000ull) return false;
+    uint64_t k = (grid + p / 2) / p, kp = k * p;
+    if (!k || (grid > kp ? grid - kp : kp - grid) > p / 16) return false;
+    uint64_t q = t + d;                                  // when it would reach queueBuffer
+    int64_t lead = (int64_t)((p - (q - a) % p) % p);     // ... that long before the next vsync
+    *off = lead - (int64_t)(p / 2);
+    *period = p;
+    return true;
+}
+#else
+bool backend_vsync_offset(uint64_t t, uint64_t grid, int64_t *off, uint64_t *period) {
+    (void)t, (void)grid, (void)off, (void)period;
+    return false;
+}
+#endif
+
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -1209,9 +1290,16 @@ void vk_frame_end(const char *shot_path) {
                            .swapchainCount = 1, .pSwapchains = &g_vk.swapchain, .pImageIndices = &img};
 #ifdef __ANDROID__
     uint64_t trace_start = vk_timing_trace_on() ? SDL_GetTicksNS() : 0;
+    // (Android times only the presents that carry an id; desiredPresentTime 0: shown as soon as it can be, as before)
+    VkPresentTimeGOOGLE when = {.presentID = ++present_id};
+    VkPresentTimesInfoGOOGLE times = {.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1,
+                                      .pTimes = &when};
+    if (display_timing) pi.pNext = &times;
+    uint64_t queued = plat_now_ns();
 #endif
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
 #ifdef __ANDROID__
+    if (display_timing && r >= 0) vsync_update(queued);
     if (trace_start) vk_timing_trace_wait(VK_TIMING_PRESENT, SDL_GetTicksNS() - trace_start);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) recreate_swapchain();  // (SUBOPTIMAL: every frame of an unrotated swapchain)
     else if (r == VK_ERROR_SURFACE_LOST_KHR) surface_lost = true;
@@ -1297,10 +1385,10 @@ static void present_game_half(void) {
     reboot_test_frame(renderer_present_count());
 }
 
-void vk_present_now(NvnTexture *t);
+void vk_present_now(NvnTexture *t, uint64_t asked);
 void backend_present(NvnTexture *t) {
     if (!vk_async_on()) {
-        vk_present_now(t);
+        vk_present_now(t, plat_now_ns());
         return;
     }
     g_game_frames++;
@@ -1314,7 +1402,8 @@ void backend_represent(void) {
 }
 
 #ifdef __ANDROID__
-void vk_present_now(NvnTexture *t) {  // (the window's half of backend_present)
+void vk_present_now(NvnTexture *t, uint64_t asked) {  // (the window's half of backend_present; asked: when the game's
+    present_asked = asked;                              // thread handed it over)
 #else
 void backend_present(NvnTexture *t) {
 #endif
