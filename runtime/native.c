@@ -187,9 +187,10 @@ static int fix_persp_matrix(Cpu *c) { rt_persp_update(c->x[0]); return 0; }
 static int fix_persp_aspect(Cpu *c) { c->v[0] = rt_persp_aspect(c->x[0]); return 3; }
 // An actor's tag check (`if (!a) return 0; return hasTag(a->[0x570]->[0x88], hash)`) reached with the actor's +0x570
 // still null - a rune's target (Magnesis, Stasis) being made or let go: the game read address 0x88 and Native mode
-// crashed (#235, #241, #248; Recompiled reads its own memory there and goes on). The same answer as for no actor.
+// crashed (#235, #241, #248). The same answer as for no actor. Not only null: opening the Slate's camera it was -1
+// (#247, 1.8.2) - anything outside the game's memory.
 static int fix_tag_null(Cpu *c) {
-    if (c->x[8]) return 0;
+    if (c->x[8] >= GUEST_LO && c->x[8] < GUEST_HI) return 0;
     c->x[0] = 0;
     return 2;
 }
