@@ -2,6 +2,8 @@
 
 **English** | [Português](README.pt-BR.md)
 
+[![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/754-the-legend-of-zelda-breath-of-the-wild/)
+
 A port of *The Legend of Zelda: Breath of the Wild* (Nintendo Switch, versions **1.0.0, 1.6.0, 1.8.2 and 1.9.0**) for
 Android. This is **not Switch emulation**: the game code can be recompiled into C for the phone or, in the experimental
 Native Mode, run directly on its ARM64 CPU. The game's graphics API (NVN) is translated to Vulkan.
