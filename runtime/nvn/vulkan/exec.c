@@ -339,9 +339,15 @@ void vk_pace_frame(void) {
         // (Frame rate 30, fixed: no 60 fps trial to make room for - the budget is 30 fps's, so the governor stops
         // running the threads at clocks that would finish them in 13 ms of their 33. LARECOMP_AB=<n>:adpf30: the 60
         // fps budget on side B)
+        // Three quarters of the frame, not all of it: the governor lowers the clocks until the work just fits its
+        // target, and a phone whose frames weigh near 33 ms then went over it every few frames - each a vsync late, 50
+        // ms: 17-20 fps at any quality where 0.2.6 held 30 (Mali-G925, #89; 0.2.9 brought the 33 ms budget)
         bool fixed30 = g_settings.fps_mode == 1 && AB("adpf30") != 1;
-        uint64_t budget = g_settings.fps_mode == 3 ? 50000000ull  // (Frame rate 20: 20 fps's)
-                          : (follow && pace_slow) || fixed30 ? 33333333ull : 16666667ull;
+        uint64_t budget = g_settings.fps_mode == 3 ? 37500000ull  // (Frame rate 20: 20 fps's, three quarters)
+                          : (follow && pace_slow) || fixed30 ? 25000000ull : 16666667ull;
+        static double budget30 = -1;  // (LARECOMP_ADPF30_MS=<ms>, a test: the 30 fps budget instead of 25 ms)
+        if (budget30 < 0) budget30 = getenv("LARECOMP_ADPF30_MS") ? atof(getenv("LARECOMP_ADPF30_MS")) : 0;
+        if (budget30 > 0 && budget == 25000000ull) budget = (uint64_t)(budget30 * 1e6);
         plat_frame_work_gpu((uint64_t)(hint_busy * 1e6), no_gpu ? 0 : gpu, budget, (uint64_t)(game_busy * 1e6));
     }
 #endif
