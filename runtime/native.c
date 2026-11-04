@@ -185,20 +185,31 @@ static int fix_frame_wait(Cpu *c) { (void)c; return rt_frame_wait() ? 2 : 0; }
 static int fix_vfr(Cpu *c) { rt_vfr_update(c->x[19]); return 0; }
 static int fix_persp_matrix(Cpu *c) { rt_persp_update(c->x[0]); return 0; }
 static int fix_persp_aspect(Cpu *c) { c->v[0] = rt_persp_aspect(c->x[0]); return 3; }
+// An actor's tag check (`if (!a) return 0; return hasTag(a->[0x570]->[0x88], hash)`) reached with the actor's +0x570
+// still null - a rune's target (Magnesis, Stasis) being made or let go: the game read address 0x88 and Native mode
+// crashed (#235, #241, #248; Recompiled reads its own memory there and goes on). The same answer as for no actor.
+static int fix_tag_null(Cpu *c) {
+    if (c->x[8]) return 0;
+    c->x[0] = 0;
+    return 2;
+}
 typedef struct { int version; uint64_t addr, alt; uint32_t word; int (*fn)(Cpu *); const char *what; } Fix;
 static const Fix fixes[] = {  // (canonical addresses, 0x7000000000 + the offset in main)
     {100, 0x70010c1aa0, 0x70010c1ad8, 0xf9400008, fix_clustered_100, "ClusteredRenderer teardown"},
     {100, 0x7000c4f4d4, 0, 0xf9412269, fix_ticks_100, "frame duration"},
+    {100, 0x7000d5dce0, 0, 0xf9404500, fix_tag_null, "tag check, no target yet"},
     {160, 0x7001861440, 0x7001861470, 0xf9400008, fix_clustered_160, "ClusteredRenderer teardown"},
     {160, 0x700161495c, 0, 0xf9412668, fix_ticks_160, "frame duration"},
     {182, 0x7000d811fc, 0, 0xa9bd7bfd, fix_frame_wait, "frame wait"},
     {182, 0x70014092f4, 0, 0xb9407a68, fix_vfr, "VFR ratio"},
     {182, 0x7000da13f4, 0, 0xbd409800, fix_persp_matrix, "projection matrix"},
     {182, 0x7000da13d8, 0, 0xbd40b000, fix_persp_aspect, "projection aspect"},
+    {182, 0x70010f7eb8, 0, 0xf9404500, fix_tag_null, "tag check, no target yet"},
     {190, 0x7000e9487c, 0, 0xa9bd7bfd, fix_frame_wait, "frame wait"},
     {190, 0x700151d494, 0, 0xb9407a68, fix_vfr, "VFR ratio"},
     {190, 0x7000eb4a44, 0, 0xbd409800, fix_persp_matrix, "projection matrix"},
     {190, 0x7000eb4a28, 0, 0xbd40b000, fix_persp_aspect, "projection aspect"},
+    {190, 0x700120bc48, 0, 0xf9404500, fix_tag_null, "tag check, no target yet"},
 };
 int native_patch_c(Cpu *c, uint32_t i) { return fixes[i].fn(c); }
 
