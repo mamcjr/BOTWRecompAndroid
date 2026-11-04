@@ -579,6 +579,7 @@ extern "C" bool vk_adreno_8xx(const char *name);  // (Driver compatibility's Aut
 extern "C" bool vk_turnip_heap_on(int setting);
 extern "C" bool vk_lrz_at_start(void);
 extern "C" const char *vk_driver_env_at_start(void);
+extern "C" bool vk_heap_file_possible(void);
 extern "C" const char *vk_gpu_name(void);
 extern "C" const char *vk_driver_rejected(void);  // (runtime/nvn/vulkan/android_driver.c)
 extern "C" const char *vk_driver_desc(void);      // (its own name and version: runtime/nvn/vulkan/device.c)
@@ -1589,6 +1590,14 @@ static void prelaunch_tab(float sc) {
                                   "runs at about half the frame rate (15 fps instead of 35 on an Adreno 830). Automatic: on "
                                   "wherever Turnip can map it - without it an Adreno 7xx shows no text. Applies when the "
                                   "game starts."));
+        ImGui::Spacing();
+        changed |= ImGui::Checkbox(tr("Game memory through a shared file (experimental)"), &g_settings.heap_file);
+        ImGui::TextDisabled("%s", tr("For GPUs where the option above can't work (Mali, Xclipse): the game's memory is shared "
+                                  "with the GPU through a file the driver exports, instead of being copied each frame - "
+                                  "possibly much faster, but untested on those GPUs: if the game draws wrong, runs slower "
+                                  "or closes, turn it off. Needs 8 GB of RAM or more. Applies when the game starts."));
+        if (!vk_heap_file_possible())
+            ImGui::TextDisabled("%s", tr("This driver can't export its memory: the option does nothing here."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Draw-target reads in place (Turnip)"));
         changed |= tri("inplace", &g_settings.inplace_reads, a8);

@@ -1432,8 +1432,8 @@ void vk_exec_init(void) {
     if (gcopy_mode) LOG("[vk] no heap import: shader global memory through CPU copies\n");
     // (for good, without placed memory: the vertex cache and the texture checks fed by write tracking - vc_flush)
     // (nor with an exported file to map there: vk_heap_place turns it on if that fails)
-    bool memfd_asked = g_vk.mem_fd && getenv("LARECOMP_VK_MEMFD") && atoi(getenv("LARECOMP_VK_MEMFD")) != 0;
-    if (gcopy_mode && !g_vk.map_placed && !memfd_asked) plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX);
+    extern bool vk_heap_file_asked(void);
+    if (gcopy_mode && !g_vk.map_placed && !vk_heap_file_asked()) plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX);
 #endif
     if (prof) {
         prof_up_ns = 0;
@@ -4191,6 +4191,14 @@ static uint64_t gmem_tried;  // heap size the import was last attempted for (gme
 // own bytes, as with the desktop's import - no CPU copies (gcopy_prepare), and what a compute pass writes the next
 // draw reads (the game's lighting: lights listed by compute, read by the fragment shaders). Freed on reset (vkFreeMemory
 // unmaps it; runtime/main.c then remaps the whole window). LARECOMP_VK_NO_PLACED=1: off (CPU copies).
+bool vk_heap_file_possible(void) { return g_vk.mem_fd; }  // (the start screen's Driver compatibility)
+
+// The heap through an exported file asked for (the setting, or LARECOMP_VK_MEMFD) and possible here (vk_heap_place)
+bool vk_heap_file_asked(void) {
+    const char *e = getenv("LARECOMP_VK_MEMFD");
+    return g_vk.mem_fd && (e ? atoi(e) != 0 : g_settings.heap_file);
+}
+
 bool vk_heap_place(uint64_t size) {
 #ifdef __ANDROID__
     extern void vk_async_drain(void);
@@ -4207,11 +4215,12 @@ bool vk_heap_place(uint64_t size) {
     // Without placed maps, the same through an exported file (VK_KHR_external_memory_fd, a dma-buf) mapped at the heap's
     // address by mmap (after legendszaonandroid's VULKAN_BACKEND.md, MIT; memfd_probe.c tests it): Mali and Xclipse
     // have neither the placed map nor the import, and their CPU copies with write tracking were slow and ran the
-    // process out of memory mappings (#196). Off unless LARECOMP_VK_MEMFD=1 - untried on a Mali yet (the import there
-    // lost the menus' text and ran out of memory, #44 #118), and Settings > Driver variables can set it; on the POCO's
-    // Turnip, forced in place of the placed map, the world played as with it (2026-11-03).
-    const char *mfe = getenv("LARECOMP_VK_MEMFD");
-    bool memfd = g_vk.mem_fd && mfe && atoi(mfe) != 0;
+    // process out of memory mappings (#196). Off unless the start screen's Driver compatibility turns it on
+    // (g_settings.heap_file) - untried on a Mali yet (the import there lost the menus' text and ran out of memory, #44
+    // #118); on the POCO's Turnip, forced in place of the placed map, the world played as with it (2026-11-03).
+    // LARECOMP_VK_MEMFD=1 / 0: on / off whatever the setting.
+    extern bool vk_heap_file_asked(void);
+    bool memfd = vk_heap_file_asked();
     if ((!g_vk.map_placed && !memfd) || getenv("LARECOMP_VK_NO_PLACED")) return NOT_PLACED();
     extern bool vk_turnip_heap_on(int setting);
     if (memfd ? g_settings.gpu_heap == 0 : !vk_turnip_heap_on(g_settings.gpu_heap)) {
