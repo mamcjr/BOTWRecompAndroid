@@ -560,8 +560,14 @@ static void create_device(void) {
     g_vk.exec_stats = getenv("LARECOMP_SHADER_STATS") &&
                       has_ext(ep, ne, VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME) && executable_have.pipelineExecutableInfo;
     if (g_vk.exec_stats) ext[n_ext++] = VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME;
+    // ... or by exporting device memory as a file (a dma-buf) and mapping that at the heap's address ourselves: the same
+    // result on drivers without placed maps or the host import (Mali, Xclipse; exec.c vk_heap_place - after
+    // legendszaonandroid's VULKAN_BACKEND.md, MIT). Before the placed ones: those two are dropped by count below.
+    g_vk.mem_fd = has_ext(ep, ne, VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME) &&
+                  (g_vk.api >= VK_API_VERSION_1_1 || has_ext(ep, ne, VK_KHR_EXTERNAL_MEMORY_EXTENSION_NAME));
+    if (g_vk.mem_fd) ext[n_ext++] = VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME;
     // the guest heap as GPU memory mapped at its own address (exec.c vk_heap_place; Turnip has it)
-    g_vk.map_placed = has_ext(ep, ne, VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_MAP_MEMORY_2_EXTENSION_NAME);
+    g_vk.map_placed =has_ext(ep, ne, VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME) && has_ext(ep, ne, VK_KHR_MAP_MEMORY_2_EXTENSION_NAME);
     if (g_vk.map_placed) {
         ext[n_ext++] = VK_KHR_MAP_MEMORY_2_EXTENSION_NAME;
         ext[n_ext++] = VK_EXT_MAP_MEMORY_PLACED_EXTENSION_NAME;

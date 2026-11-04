@@ -55,6 +55,7 @@ typedef struct {
                                   // pipeline state (exec.c PipeKey.prim_restart)
 #ifdef __ANDROID__
     bool map_placed;              // VK_EXT_map_memory_placed: the guest heap mapped as GPU memory (exec.c vk_heap_place)
+    bool mem_fd;                  // VK_KHR_external_memory_fd: the same through an exported file mapped there (vk_heap_place)
     uint64_t placed_align;
     bool exec_stats;              // (Android, LARECOMP_SHADER_STATS=1) the compiler's statistics of each pipeline, logged
     uint32_t api;                 // the device's Vulkan version as used: 1.3, or 1.1 / 1.2 with extensions (device.c)

@@ -11,6 +11,9 @@
 #include <string.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#ifdef __ANDROID__
+#include <sys/mman.h>
+#endif
 
 #include "../../hle.h"
 #include "../../kernel.h"
@@ -1423,10 +1426,14 @@ static void st_defaults(void) {
 void vk_exec_init(void) {
     prof = getenv("LARECOMP_VK_PROF") != NULL;
 #ifdef __ANDROID__
+    extern void vk_memfd_probe(void);
+    vk_memfd_probe();  // (LARECOMP_MEMFD_PROBE=1: memfd_probe.c)
     gcopy_mode = !g_vk.host_import && !getenv("LARECOMP_VK_NO_GCOPY");
     if (gcopy_mode) LOG("[vk] no heap import: shader global memory through CPU copies\n");
     // (for good, without placed memory: the vertex cache and the texture checks fed by write tracking - vc_flush)
-    if (gcopy_mode && !g_vk.map_placed) plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX);
+    // (nor with an exported file to map there: vk_heap_place turns it on if that fails)
+    bool memfd_asked = g_vk.mem_fd && getenv("LARECOMP_VK_MEMFD") && atoi(getenv("LARECOMP_VK_MEMFD")) != 0;
+    if (gcopy_mode && !g_vk.map_placed && !memfd_asked) plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX);
 #endif
     if (prof) {
         prof_up_ns = 0;
@@ -4197,9 +4204,17 @@ bool vk_heap_place(uint64_t size) {
     // isn't an Adreno 8xx (Automatic) had neither: every vertex and index buffer copied each frame, ~150 MB, 7-9 fps
     // on an Adreno 730 (issue #31). A page not tracked yet counts as written, so turning it on late is safe.
 #define NOT_PLACED() (gcopy_mode ? plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX) : (void)0, false)
-    if (!g_vk.map_placed || getenv("LARECOMP_VK_NO_PLACED")) return NOT_PLACED();
+    // Without placed maps, the same through an exported file (VK_KHR_external_memory_fd, a dma-buf) mapped at the heap's
+    // address by mmap (after legendszaonandroid's VULKAN_BACKEND.md, MIT; memfd_probe.c tests it): Mali and Xclipse
+    // have neither the placed map nor the import, and their CPU copies with write tracking were slow and ran the
+    // process out of memory mappings (#196). Off unless LARECOMP_VK_MEMFD=1 - untried on a Mali yet (the import there
+    // lost the menus' text and ran out of memory, #44 #118), and Settings > Driver variables can set it; on the POCO's
+    // Turnip, forced in place of the placed map, the world played as with it (2026-11-03).
+    const char *mfe = getenv("LARECOMP_VK_MEMFD");
+    bool memfd = g_vk.mem_fd && mfe && atoi(mfe) != 0;
+    if ((!g_vk.map_placed && !memfd) || getenv("LARECOMP_VK_NO_PLACED")) return NOT_PLACED();
     extern bool vk_turnip_heap_on(int setting);
-    if (!vk_turnip_heap_on(g_settings.gpu_heap)) {
+    if (memfd ? g_settings.gpu_heap == 0 : !vk_turnip_heap_on(g_settings.gpu_heap)) {
         // (the start screen's Driver compatibility: Automatic is on wherever Turnip places it - vulkan/device.c)
         LOG("[vk] guest heap as GPU memory: off (%s) - shader global memory through CPU copies\n",
             g_settings.gpu_heap < 0 ? "automatic: not Turnip" : "settings");
@@ -4228,7 +4243,9 @@ bool vk_heap_place(uint64_t size) {
             (unsigned long long)(size >> 20), (unsigned long long)align);
         return NOT_PLACED();
     }
-    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .size = size,
+    VkExternalMemoryBufferCreateInfo ebi = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
+                                            .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+    VkBufferCreateInfo bi = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = memfd ? &ebi : NULL, .size = size,
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT};  // (ubo_direct)
@@ -4246,13 +4263,30 @@ bool vk_heap_place(uint64_t size) {
         if (type < 0 || (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) type = (int)i;
         if (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) break;
     }
+    {   // LARECOMP_VK_MEMFD_TYPE=<n> (a test): the exported file's memory type - which one a driver gives a map the CPU
+        // runs fast in and the GPU sees, memfd_probe.c tells
+        const char *e = getenv("LARECOMP_VK_MEMFD_TYPE");
+        if (memfd && e && atoi(e) >= 0 && (uint32_t)atoi(e) < mp.memoryTypeCount && (mr.memoryTypeBits & (1u << atoi(e)))) type = atoi(e);
+    }
     VkDeviceMemory mem = VK_NULL_HANDLE;
-    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .allocationSize = mr.size,
-                               .memoryTypeIndex = (uint32_t)type};
+    VkExportMemoryAllocateInfo exi = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
+                                      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+    VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = memfd ? &exi : NULL,
+                               .allocationSize = mr.size, .memoryTypeIndex = (uint32_t)type};
     VkResult r = type < 0 ? VK_ERROR_FEATURE_NOT_PRESENT : vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
     if (r == VK_SUCCESS) r = vkBindBufferMemory(g_vk.dev, buf, mem, 0);
     void *p = NULL;
-    if (r == VK_SUCCESS) {
+    if (r == VK_SUCCESS && memfd) {  // (the file mapped over the heap's anonymous pages; the map keeps it open)
+        int fd = -1;
+        VkMemoryGetFdInfoKHR gi = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = mem,
+                                   .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+        r = vkGetMemoryFdKHR(g_vk.dev, &gi, &fd);
+        if (r == VK_SUCCESS) {
+            p = mmap((void *)(uintptr_t)HEAP_BASE, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
+            if (p == MAP_FAILED) p = NULL, r = VK_ERROR_MEMORY_MAP_FAILED;
+            close(fd);
+        }
+    } else if (r == VK_SUCCESS) {
         VkMemoryMapPlacedInfoEXT pl = {.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_PLACED_INFO_EXT, .pPlacedAddress = (void *)(uintptr_t)HEAP_BASE};
         VkMemoryMapInfoKHR mi = {.sType = VK_STRUCTURE_TYPE_MEMORY_MAP_INFO_KHR, .pNext = &pl, .flags = VK_MEMORY_MAP_PLACED_BIT_EXT,
                                  .memory = mem, .offset = 0, .size = VK_WHOLE_SIZE};
@@ -4271,8 +4305,9 @@ bool vk_heap_place(uint64_t size) {
     gmem_placed = true;
     gcopy_mode = false;
     gwin_mode = size > g_vk.props.limits.maxStorageBufferRange && !getenv("LARECOMP_VK_NO_GWIN");
-    LOG("[vk] guest heap %llu MB is GPU memory (placed at %llx, memory type %d, flags 0x%x, storage range %llu MB)%s\n",
-        (unsigned long long)(size >> 20), (unsigned long long)HEAP_BASE, type, (unsigned)mp.memoryTypes[type].propertyFlags,
+    LOG("[vk] guest heap %llu MB is GPU memory (%s at %llx, memory type %d, flags 0x%x, storage range %llu MB)%s\n",
+        (unsigned long long)(size >> 20), memfd ? "an exported file mapped" : "placed", (unsigned long long)HEAP_BASE, type,
+        (unsigned)mp.memoryTypes[type].propertyFlags,
         (unsigned long long)(g_vk.props.limits.maxStorageBufferRange >> 20), gwin_mode ? "; draws reach global memory through windows" : "");
     return true;
 }
