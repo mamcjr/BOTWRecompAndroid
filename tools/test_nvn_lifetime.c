@@ -8,13 +8,17 @@ uint64_t renderer_present_count(void) { return test_frame; }
 void backend_texture_destroyed(NvnTexture *t) { assert(t->refs == 0); destroyed++; }
 void vk_async_drain(void) { drains++; }
 void rt_fatal_trace(void) { abort(); }
+void rt_fatal_message(const char *format, ...) { (void)format; abort(); }
+uint64_t plat_now_ns(void) { return 0; }
 const FormatInfo *nvn_format_info(uint32_t f) { (void)f; static const FormatInfo fi = {0}; return &fi; }
 void tegra_layout_init(TexLayout *t) { (void)t; }
 uint64_t tegra_total_size(const TexLayout *t) { (void)t; return 0; }
 
-// A guest texture object (its first word holds the host pointer) initialized from a builder over pool `ph`.
+// A guest texture object (192 opaque bytes, objects.c; its first word holds the host pointer) initialized from a
+// builder over pool `ph`.
+typedef struct { uint64_t host, rest[23]; } GuestTexture;
 static uint8_t builder[256];
-static NvnTexture *init_texture(uint64_t *obj, uint64_t *ph, uint64_t offset, uint32_t width) {
+static NvnTexture *init_texture(GuestTexture *obj, uint64_t *ph, uint64_t offset, uint32_t width) {
     memset(builder, 0, sizeof builder);
     G(uint32_t, builder, 0xC) = 1;  // 2D
     G(uint32_t, builder, 0x10) = width;
@@ -30,18 +34,18 @@ static NvnTexture *init_texture(uint64_t *obj, uint64_t *ph, uint64_t offset, ui
     assert(c.x[0] == 1);
     return HOST(NvnTexture, obj);
 }
-static void finalize(uint64_t *obj) {
+static void finalize(GuestTexture *obj) {
     Cpu c = {0};
     c.x[0] = (uintptr_t)obj;
     hle_nvnTextureFinalize(&c);
 }
 static void sweep(void) {  // retire a scratch texture far in the future: every earlier deferred release runs
-    uint64_t obj;
+    GuestTexture obj;
     test_frame += 100;
     init_texture(&obj, NULL, 0, 4);
     finalize(&obj);
     test_frame += 100;
-    uint64_t obj2;
+    GuestTexture obj2;
     init_texture(&obj2, NULL, 0, 4);
     finalize(&obj2);
 }
@@ -66,10 +70,10 @@ int main(void) {
     assert(c.x[0] == 0 && virtual.storage == physical.storage);
 
     // Descriptor slots keep a texture alive after its object is finalized; a shallow copy's finalize does nothing.
-    uint64_t ah, bh;
+    GuestTexture ah, bh;
     NvnTexture *a = init_texture(&ah, &ph, 0x1000, 256), *b = init_texture(&bh, &ph, 0x20000, 256);
     assert(a != b && a->refs == 1 && a->owners == 1);
-    uint64_t ah_copy = ah;
+    GuestTexture ah_copy = ah;
     NvnTexEntry entries[2] = {0};
     NvnDescPool pool = {.count = 2, .entries = entries};
     uint64_t dh = (uintptr_t)&pool;
@@ -81,7 +85,7 @@ int main(void) {
     assert(a->refs == 3);
     finalize(&ah);
     finalize(&ah_copy);  // a shallow guest copy must not release ownership twice
-    assert(!ah && !ah_copy && a->refs == 3 && a->owners == 0 && a->finalized);
+    assert(!ah.host && !ah_copy.host && a->refs == 3 && a->owners == 0 && a->finalized);
     test_frame = 10;
     c.x[0] = (uintptr_t)&dh; c.x[1] = 0; c.x[2] = (uintptr_t)&bh;
     register_texture(&c);
@@ -99,7 +103,7 @@ int main(void) {
 
     // Objects with the same description share one host texture; each owner holds a reference of its own.
     destroyed = 0;
-    uint64_t o1, o2, o3;
+    GuestTexture o1, o2, o3;
     NvnTexture *t1 = init_texture(&o1, &ph, 0x4000, 128), *t2 = init_texture(&o2, &ph, 0x4000, 128);
     NvnTexture *t3 = init_texture(&o3, &ph, 0x4000, 64);  // (another size: its own texture)
     assert(t1 == t2 && t1 != t3 && t1->refs == 2 && t1->owners == 2);
