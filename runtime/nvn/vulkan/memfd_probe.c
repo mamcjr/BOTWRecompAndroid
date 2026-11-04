@@ -55,9 +55,10 @@ static bool gpu_round(VkBuffer src, VkBuffer dst) {
     return ok;
 }
 
-static void probe_type(uint32_t type, VkMemoryPropertyFlags flags) {
+static void probe_type(uint32_t type, VkMemoryPropertyFlags flags, VkExternalMemoryHandleTypeFlagBits ht) {
+    const char *kind = ht == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT ? "dma-buf" : "opaque";
     VkExternalMemoryBufferCreateInfo eb = {.sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_BUFFER_CREATE_INFO,
-                                           .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+                                           .handleTypes = ht};
     VkBufferCreateInfo bci = {.sType = VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO, .pNext = &eb, .size = PROBE_SIZE,
                               .usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                        VK_BUFFER_USAGE_STORAGE_BUFFER_BIT};
@@ -71,14 +72,14 @@ static void probe_type(uint32_t type, VkMemoryPropertyFlags flags) {
     vkGetBufferMemoryRequirements(g_vk.dev, buf, &mr);
     if (!(mr.memoryTypeBits & (1u << type))) { why = "the buffer can't use this type"; goto done; }
     VkExportMemoryAllocateInfo ex = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
-                                     .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+                                     .handleTypes = ht};
     VkMemoryAllocateInfo mai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = &ex, .allocationSize = mr.size,
                                 .memoryTypeIndex = type};
     VkResult r = vkAllocateMemory(g_vk.dev, &mai, NULL, &mem);
     if (r != VK_SUCCESS) { why = "allocation"; goto done; }
     if (vkBindBufferMemory(g_vk.dev, buf, mem, 0) != VK_SUCCESS) { why = "bind"; goto done; }
     VkMemoryGetFdInfoKHR gi = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = mem,
-                               .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+                               .handleType = ht};
     if (vkGetMemoryFdKHR(g_vk.dev, &gi, &fd) != VK_SUCCESS || fd < 0) { why = "no file for it"; goto done; }
     p = mmap(NULL, PROBE_SIZE, PROT_READ | PROT_WRITE, MAP_SHARED, fd, 0);
     if (p == MAP_FAILED) { why = "mmap of the file"; goto done; }
@@ -114,12 +115,12 @@ static void probe_type(uint32_t type, VkMemoryPropertyFlags flags) {
         cpu_sees = true;
         for (int i = 0; i < 4096 && cpu_sees; i++) cpu_sees = p[(8u << 20) + 4096 + i] == 0x5a;
     }
-    LOG("[memfd] type %u (flags 0x%x%s%s): exported and mapped; CPU writes %.1f GB/s, reads %.1f GB/s; the GPU %s the CPU's "
-        "bytes, the CPU %s the GPU's\n", type, (unsigned)flags, flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ? " cached" : "",
+    LOG("[memfd] %s, type %u (flags 0x%x%s%s): exported and mapped; CPU writes %.1f GB/s, reads %.1f GB/s; the GPU %s the CPU's "
+        "bytes, the CPU %s the GPU's\n", kind, type, (unsigned)flags, flags & VK_MEMORY_PROPERTY_HOST_CACHED_BIT ? " cached" : "",
         flags & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT ? " coherent" : "", wr, rd,
         !gpu_ok ? "(submission failed)" : gpu_sees ? "sees" : "does NOT see", !gpu_ok ? "-" : cpu_sees ? "sees" : "does NOT see");
 done:
-    if (why) LOG("[memfd] type %u (flags 0x%x): failed at %s\n", type, (unsigned)flags, why);
+    if (why) LOG("[memfd] %s, type %u (flags 0x%x): failed at %s\n", kind, type, (unsigned)flags, why);
     if (p != MAP_FAILED) munmap(p, PROBE_SIZE);
     if (fd >= 0) close(fd);
     if (out) vkDestroyBuffer(g_vk.dev, out, NULL);
@@ -134,7 +135,9 @@ void vk_memfd_probe(void) {
     vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
     for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
         VkMemoryPropertyFlags f = mp.memoryTypes[i].propertyFlags;
-        if (f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) probe_type(i, f);
+        if (!(f & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT)) continue;
+        probe_type(i, f, VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT);
+        if (g_vk.mem_dmabuf) probe_type(i, f, VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT);  // (the other file kind, #234)
     }
 }
 #endif

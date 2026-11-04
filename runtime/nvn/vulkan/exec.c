@@ -4266,19 +4266,32 @@ bool vk_heap_place(uint64_t size) {
                              .usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT |
                                       VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | VK_BUFFER_USAGE_INDEX_BUFFER_BIT |
                                       VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT};  // (ubo_direct)
-    VkBuffer buf;
-    if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) return NOT_PLACED();
-    VkMemoryRequirements mr;
-    vkGetBufferMemoryRequirements(g_vk.dev, buf, &mr);
     VkPhysicalDeviceMemoryProperties mp;
     vkGetPhysicalDeviceMemoryProperties(g_vk.phys, &mp);
-    int type = -1;  // host-visible and coherent (the CPU writes, the GPU reads and writes); cached when there is one
+    // The exported file's kind: opaque first, a dma-buf where the opaque one takes no host-visible coherent memory (the
+    // Xclipse 530's driver, #234) - or first with LARECOMP_VK_MEMFD_DMABUF=1 (a test)
+    VkExternalMemoryHandleTypeFlagBits ht = memfd && g_vk.mem_dmabuf && getenv("LARECOMP_VK_MEMFD_DMABUF")
+                                                ? VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT : VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT;
+    VkBuffer buf;
+    VkMemoryRequirements mr;
+    int type;
     const VkMemoryPropertyFlags need = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
-    for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
-        VkMemoryPropertyFlags f = mp.memoryTypes[i].propertyFlags;
-        if (!(mr.memoryTypeBits & (1u << i)) || (f & need) != need) continue;
-        if (type < 0 || (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) type = (int)i;
-        if (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) break;
+    for (;;) {
+        ebi.handleTypes = ht;
+        if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) return NOT_PLACED();
+        vkGetBufferMemoryRequirements(g_vk.dev, buf, &mr);
+        type = -1;  // host-visible and coherent (the CPU writes, the GPU reads and writes); cached when there is one
+        for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
+            VkMemoryPropertyFlags f = mp.memoryTypes[i].propertyFlags;
+            if (!(mr.memoryTypeBits & (1u << i)) || (f & need) != need) continue;
+            if (type < 0 || (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT)) type = (int)i;
+            if (f & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) break;
+        }
+        if (type >= 0 || !memfd || !g_vk.mem_dmabuf || ht == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) break;
+        LOG("[vk] game memory through a shared file: the opaque file takes memory types 0x%x, none the CPU can use - "
+            "trying a dma-buf\n", mr.memoryTypeBits);
+        vkDestroyBuffer(g_vk.dev, buf, NULL);
+        ht = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
     }
     {   // LARECOMP_VK_MEMFD_TYPE=<n> (a test): the exported file's memory type - which one a driver gives a map the CPU
         // runs fast in and the GPU sees, memfd_probe.c tells
@@ -4286,8 +4299,7 @@ bool vk_heap_place(uint64_t size) {
         if (memfd && e && atoi(e) >= 0 && (uint32_t)atoi(e) < mp.memoryTypeCount && (mr.memoryTypeBits & (1u << atoi(e)))) type = atoi(e);
     }
     VkDeviceMemory mem = VK_NULL_HANDLE;
-    VkExportMemoryAllocateInfo exi = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO,
-                                      .handleTypes = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+    VkExportMemoryAllocateInfo exi = {.sType = VK_STRUCTURE_TYPE_EXPORT_MEMORY_ALLOCATE_INFO, .handleTypes = ht};
     VkMemoryAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO, .pNext = memfd ? &exi : NULL,
                                .allocationSize = mr.size, .memoryTypeIndex = (uint32_t)type};
     VkResult r = type < 0 ? VK_ERROR_FEATURE_NOT_PRESENT : vkAllocateMemory(g_vk.dev, &ai, NULL, &mem);
@@ -4295,8 +4307,7 @@ bool vk_heap_place(uint64_t size) {
     void *p = NULL;
     if (r == VK_SUCCESS && memfd) {  // (the file mapped over the heap's anonymous pages; the map keeps it open)
         int fd = -1;
-        VkMemoryGetFdInfoKHR gi = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = mem,
-                                   .handleType = VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT};
+        VkMemoryGetFdInfoKHR gi = {.sType = VK_STRUCTURE_TYPE_MEMORY_GET_FD_INFO_KHR, .memory = mem, .handleType = ht};
         r = vkGetMemoryFdKHR(g_vk.dev, &gi, &fd);
         if (r == VK_SUCCESS) {
             p = mmap((void *)(uintptr_t)HEAP_BASE, size, PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, fd, 0);
@@ -4313,7 +4324,7 @@ bool vk_heap_place(uint64_t size) {
         // (memory types the buffer takes: with an exported file on an Xclipse 530 none of them was host-visible and
         // coherent, -8, #234)
         LOG("[vk] heap placement failed (%d, mapped at %p, type %d, the buffer's memory types 0x%x%s): shader global memory "
-            "through CPU copies\n", r, p, type, mr.memoryTypeBits, memfd ? ", an exported file" : "");
+            "through CPU copies\n", r, p, type, mr.memoryTypeBits, memfd ? ht == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT ? ", a dma-buf" : ", an exported file" : "");
         if (mem) vkFreeMemory(g_vk.dev, mem, NULL);  // (freeing a placed map unmaps it: the window gets its pages back)
         if (p == (void *)(uintptr_t)HEAP_BASE) plat_reset_guest(HEAP_BASE, HEAP_BASE + size);
         vkDestroyBuffer(g_vk.dev, buf, NULL);
@@ -4326,7 +4337,7 @@ bool vk_heap_place(uint64_t size) {
     gcopy_mode = false;
     gwin_mode = size > g_vk.props.limits.maxStorageBufferRange && !getenv("LARECOMP_VK_NO_GWIN");
     LOG("[vk] guest heap %llu MB is GPU memory (%s at %llx, memory type %d, flags 0x%x, storage range %llu MB)%s\n",
-        (unsigned long long)(size >> 20), memfd ? "an exported file mapped" : "placed", (unsigned long long)HEAP_BASE, type,
+        (unsigned long long)(size >> 20), !memfd ? "placed" : ht == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT ? "a dma-buf mapped" : "an exported file mapped", (unsigned long long)HEAP_BASE, type,
         (unsigned)mp.memoryTypes[type].propertyFlags,
         (unsigned long long)(g_vk.props.limits.maxStorageBufferRange >> 20), gwin_mode ? "; draws reach global memory through windows" : "");
     return true;
