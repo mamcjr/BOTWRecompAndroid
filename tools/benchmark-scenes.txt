@@ -5,6 +5,8 @@
 format = 1
 repeats = 3
 warmup_s = 20
+calm_s = 20
+warmup_max_s = 180
 window_s = 45
 
 [scene]

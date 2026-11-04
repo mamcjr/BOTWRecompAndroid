@@ -7,7 +7,10 @@
 // The scene file:
 //   format = 1
 //   repeats = 3
-//   warmup_s = 20
+//   warmup_s = 20       (at least)
+//   calm_s = 20         (and until this long without a shader compile or a skipped draw: past the load's burst,
+//                       whose gaps were up to 12 s; later ones come by ones and twos, a minute or more apart...)
+//   warmup_max_s = 180  (... or this long, whichever comes first)
 //   window_s = 45
 //   [scene]
 //   name = plateau
@@ -82,9 +85,9 @@ typedef struct { double p50, p95, p99; } Pct;
 typedef struct { float batt_temp, batt_pct, watts, soc_temp, headroom; int thermal, plugged; } Power;
 typedef struct {
     int scene, repeat;
-    bool ok;
+    bool ok, cold;       // cold: it ran to its end, with compiles or skipped draws in the window
     char step[24], why[120];
-    double load_s, camera_s, fps, low1, low01, hz_start, hz_end, cam_err, moved;
+    double load_s, camera_s, warmup_s, fps, low1, low01, hz_start, hz_end, cam_err, moved;
     Pct frame, gpu, cpu, game, render;
     int frames, over50;
     uint64_t skipped, compiles;
@@ -92,7 +95,7 @@ typedef struct {
 } Result;
 
 static Scene scenes[MAX_SCENES];
-static int nscenes, repeats = 1, warmup_s = 20, window_s = 45;
+static int nscenes, repeats = 1, warmup_s = 20, calm_s = 20, warmup_max_s = 180, window_s = 45;
 static char out_dir[1024], source[1024];
 static Result results[MAX_SCENES * MAX_REPEATS];
 static int nresults;
@@ -185,6 +188,8 @@ static void json_passport(FILE *f) {
     fprintf(f, "\"pass\":\"cap30\"},\n");
 }
 
+static const char *result_status(const Result *r) { return r->ok ? "ok" : r->cold ? "cache_cold" : "harness_error"; }
+
 static void write_report(const char *status) {
     char path[1200], tmp[1200];
     snprintf(tmp, sizeof tmp, "%s/report.json.tmp", out_dir);
@@ -196,20 +201,20 @@ static void write_report(const char *status) {
         fprintf(f, "\"at\":{\"scene\":\"%s\",\"repeat\":%d,", scenes[cur_scene].name, cur_repeat);
         json_str(f, "step", cur_step, "},");
     }
-    fprintf(f, "\"repeats\":%d,\"warmup_s\":%d,\"window_s\":%d,\n", repeats, warmup_s, window_s);
+    fprintf(f, "\"repeats\":%d,\"warmup_s\":%d,\"calm_s\":%d,\"warmup_max_s\":%d,\"window_s\":%d,\n", repeats, warmup_s, calm_s, warmup_max_s, window_s);
     if (g_game_version == 190) json_passport(f);
     fprintf(f, "\"results\":[\n");
     for (int i = 0; i < nresults; i++) {
         const Result *r = &results[i];
         fprintf(f, "{\"scene\":\"%s\",\"repeat\":%d,", scenes[r->scene].name, r->repeat);
-        json_str(f, "status", r->ok ? "ok" : "harness_error", ",");
-        if (!r->ok) {
+        json_str(f, "status", result_status(r), ",");
+        if (!r->ok && !r->cold) {
             json_str(f, "step", r->step, ",");
             json_str(f, "reason", r->why, r->frames ? "," : i + 1 < nresults ? "},\n" : "}\n");
             if (!r->frames) continue;
         }
-        fprintf(f, "\"load_s\":%.1f,\"camera_s\":%.1f,\"frames\":%d,\"fps\":%.2f,\"low_1pct_fps\":%.2f,\"low_01pct_fps\":%.2f,\"over_50ms\":%d,",
-                r->load_s, r->camera_s, r->frames, r->fps, r->low1, r->low01, r->over50);
+        fprintf(f, "\"load_s\":%.1f,\"camera_s\":%.1f,\"warmup_s\":%.1f,\"frames\":%d,\"fps\":%.2f,\"low_1pct_fps\":%.2f,\"low_01pct_fps\":%.2f,\"over_50ms\":%d,",
+                r->load_s, r->camera_s, r->warmup_s, r->frames, r->fps, r->low1, r->low01, r->over50);
         json_pct(f, "frame_ms", &r->frame);
         json_pct(f, "gpu_ms", &r->gpu);
         json_pct(f, "cpu_ms", &r->cpu);
@@ -222,19 +227,23 @@ static void write_report(const char *status) {
         fprintf(f, "}%s\n", i + 1 < nresults ? "," : "");
     }
     fprintf(f, "],\n\"summary\":[\n");
-    for (int s = 0; s < nscenes; s++) {  // (the repeats that ran to their end: median, and the spread as a share of it)
-        double gpu[MAX_REPEATS], frame[MAX_REPEATS], lo = 0, hi = 0;
-        int n = 0;
+    for (int s = 0; s < nscenes; s++) {  // (median, and the spread as a share of it: the clean repeats, and all that were measured)
+        double gpu[MAX_REPEATS], frame[MAX_REPEATS], all[MAX_REPEATS], lo = 0, hi = 0, lo_all = 0, hi_all = 0;
+        int n = 0, cold = 0;
         for (int i = 0; i < nresults; i++) {
-            if (results[i].scene != s || !results[i].ok) continue;
+            if (results[i].scene != s || (!results[i].ok && !results[i].cold)) continue;
             double g = results[i].gpu.p50;
+            lo_all = n + cold && lo_all < g ? lo_all : g, hi_all = n + cold && hi_all > g ? hi_all : g;
+            all[n + cold] = g;
+            if (results[i].cold) { cold++; continue; }
             lo = n && lo < g ? lo : g, hi = n && hi > g ? hi : g;
             frame[n] = results[i].frame.p50;
             gpu[n++] = g;
         }
-        double m = median(gpu, n);
-        fprintf(f, "{\"scene\":\"%s\",\"ok\":%d,\"gpu_p50_median\":%.3f,\"gpu_p50_spread_pct\":%.2f,\"frame_p50_median\":%.3f}%s\n",
-                scenes[s].name, n, m, m > 0 ? (hi - lo) / m * 100 : 0, median(frame, n), s + 1 < nscenes ? "," : "");
+        double m = median(gpu, n), m_all = median(all, n + cold);
+        fprintf(f, "{\"scene\":\"%s\",\"ok\":%d,\"cache_cold\":%d,\"gpu_p50_median\":%.3f,\"gpu_p50_spread_pct\":%.2f,\"frame_p50_median\":%.3f,"
+                   "\"gpu_p50_median_with_cold\":%.3f,\"gpu_p50_spread_pct_with_cold\":%.2f}%s\n",
+                scenes[s].name, n, cold, m, m > 0 ? (hi - lo) / m * 100 : 0, median(frame, n), m_all, m_all > 0 ? (hi_all - lo_all) / m_all * 100 : 0, s + 1 < nscenes ? "," : "");
     }
     fprintf(f, "]}\n");
     fclose(f);
@@ -244,13 +253,13 @@ static void write_report(const char *status) {
     snprintf(tmp, sizeof tmp, "%s/report.csv.tmp", out_dir);
     if (!(f = fopen(tmp, "w"))) return;
     fprintf(f, "scene,repeat,status,step,frames,fps,frame_p50,frame_p95,frame_p99,low_1pct_fps,low_01pct_fps,over_50ms,gpu_p50,gpu_p95,gpu_p99,"
-               "cpu_p50,cpu_p95,cpu_p99,skipped_draws,shader_compiles,display_hz,thermal_end\n");
+               "cpu_p50,cpu_p95,cpu_p99,skipped_draws,shader_compiles,warmup_s,display_hz,thermal_start,thermal_end\n");
     for (int i = 0; i < nresults; i++) {
         const Result *r = &results[i];
-        fprintf(f, "%s,%d,%s,%s,%d,%.2f,%.3f,%.3f,%.3f,%.2f,%.2f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%.1f,%d\n",
-                scenes[r->scene].name, r->repeat, r->ok ? "ok" : "harness_error", r->ok ? "" : r->step, r->frames, r->fps, r->frame.p50, r->frame.p95,
+        fprintf(f, "%s,%d,%s,%s,%d,%.2f,%.3f,%.3f,%.3f,%.2f,%.2f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%.1f,%.1f,%d,%d\n",
+                scenes[r->scene].name, r->repeat, result_status(r), r->ok || r->cold ? "" : r->step, r->frames, r->fps, r->frame.p50, r->frame.p95,
                 r->frame.p99, r->low1, r->low01, r->over50, r->gpu.p50, r->gpu.p95, r->gpu.p99, r->cpu.p50, r->cpu.p95, r->cpu.p99,
-                (unsigned long long)r->skipped, (unsigned long long)r->compiles, r->hz_end, r->end.thermal);
+                (unsigned long long)r->skipped, (unsigned long long)r->compiles, r->warmup_s, r->hz_end, r->start.thermal, r->end.thermal);
     }
     fclose(f);
     snprintf(path, sizeof path, "%s/report.csv", out_dir);
@@ -288,6 +297,8 @@ static bool parse_scenes(const char *path, char *err, size_t nerr) {
             if (!strcmp(key, "format")) format = atoi(val);
             else if (!strcmp(key, "repeats")) repeats = atoi(val);
             else if (!strcmp(key, "warmup_s")) warmup_s = atoi(val);
+            else if (!strcmp(key, "calm_s")) calm_s = atoi(val);
+            else if (!strcmp(key, "warmup_max_s")) warmup_max_s = atoi(val);
             else if (!strcmp(key, "window_s")) window_s = atoi(val);
             else { snprintf(err, nerr, "line %d: unknown key %s", n, key); ok = false; }
             continue;
@@ -321,8 +332,9 @@ static bool parse_scenes(const char *path, char *err, size_t nerr) {
     if (!ok) return false;
     if (format != 1) { snprintf(err, nerr, "format %d: only format = 1 is known", format); return false; }
     if (!nscenes || have != HAVE_ALL) { snprintf(err, nerr, "no scenes, or the last one has a key missing"); return false; }
-    if (repeats < 1 || repeats > MAX_REPEATS || warmup_s < 0 || warmup_s > 600 || window_s < 5 || window_s > 600) {
-        snprintf(err, nerr, "repeats 1-%d, warmup_s 0-600, window_s 5-600", MAX_REPEATS);
+    if (repeats < 1 || repeats > MAX_REPEATS || warmup_s < 0 || warmup_s > 600 || calm_s < 0 || calm_s > 600 || warmup_max_s < warmup_s ||
+        warmup_max_s > 1800 || window_s < 5 || window_s > 600) {
+        snprintf(err, nerr, "repeats 1-%d, warmup_s and calm_s 0-600, warmup_max_s up to 1800 and not under warmup_s, window_s 5-600", MAX_REPEATS);
         return false;
     }
     return true;
@@ -442,10 +454,10 @@ static uint64_t time_mgr;
 static volatile bool hold_time, hold_weather;
 static volatile bool time_written;
 static enum { S_TITLE, S_ARRIVE, S_SETTLE, S_CAMERA, S_WARMUP, S_WINDOW, S_MEASURED, S_DONE } state;
-static uint64_t boot_t, phase_t, press_t, event_t;
+static uint64_t boot_t, phase_t, press_t, event_t, warm_t, calm_t, warm_dirty;
 static int good;
 static uint64_t skipped_t0, compiles_t0;
-static double hz_start, load_s, camera_s;
+static double hz_start, load_s, camera_s, warm_s;
 static float pos0[3];
 static Power power_start;
 
@@ -587,12 +599,13 @@ static void end_scene(Result *r, bool ok, const char *step, const char *why) {
     }
     nresults++;
     r->ok = ok;
-    if (!ok) {
+    if (!ok && !r->cold) {
         snprintf(r->step, sizeof r->step, "%s", step);
         snprintf(r->why, sizeof r->why, "%s", why);
         LOG("[benchmark] %s, repeat %d: harness_error at %s: %s\n", scenes[r->scene].name, r->repeat, step, why);
     } else {
-        LOG("[benchmark] %s, repeat %d: ok, GPU p50 %.2f ms, frame p99 %.2f ms\n", scenes[r->scene].name, r->repeat, r->gpu.p50, r->frame.p99);
+        LOG("[benchmark] %s, repeat %d: %s, GPU p50 %.2f ms, frame p99 %.2f ms, %llu skipped, %llu compiles\n", scenes[r->scene].name, r->repeat, result_status(r), r->gpu.p50,
+            r->frame.p99, (unsigned long long)r->skipped, (unsigned long long)r->compiles);
     }
     state = S_DONE;
     next_or_exit();  // (the last one ends here)
@@ -600,11 +613,12 @@ static void end_scene(Result *r, bool ok, const char *step, const char *why) {
     rt_request_reboot(RT_REBOOT_GAME);
 }
 
+extern uint64_t vk_skipped_total(void), vk_compiles_total(void);
+
 static Result *measure(void) {
-    extern uint64_t vk_skipped_total(void), vk_compiles_total(void);
     extern double vk_display_hz(void);
     Result *r = &results[nresults];
-    *r = (Result){.scene = cur_scene, .repeat = cur_repeat, .load_s = load_s, .camera_s = camera_s, .frames = win_n, .start = power_start, .hz_start = hz_start};
+    *r = (Result){.scene = cur_scene, .repeat = cur_repeat, .load_s = load_s, .camera_s = camera_s, .warmup_s = warm_s, .frames = win_n, .start = power_start, .hz_start = hz_start};
     r->frame = percentiles(0);
     r->low1 = low_fps(0.01);  // (percentiles left the periods sorted)
     r->low01 = low_fps(0.001);
@@ -686,7 +700,8 @@ void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t
         }
         if (good >= 10) {
             camera_s = since;
-            phase_t = t;
+            phase_t = warm_t = calm_t = t;
+            warm_dirty = vk_skipped_total() + vk_compiles_total();
             state = S_WARMUP;
             set_step("warmup");
         } else if (since > TIMEOUT_CAMERA_S) {
@@ -704,8 +719,10 @@ void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t
             break;
         }
         event_t = 0;
-        if (since >= warmup_s) {
-            extern uint64_t vk_skipped_total(void), vk_compiles_total(void);
+        uint64_t dirty = vk_skipped_total() + vk_compiles_total();
+        if (dirty != warm_dirty) warm_dirty = dirty, calm_t = t;
+        warm_s = (t - warm_t) / 1e9;
+        if ((since >= warmup_s && (t - calm_t) / 1e9 >= calm_s) || warm_s >= warmup_max_s) {
             extern double vk_display_hz(void);
             int cap = window_s * 130 + 64;  // (more than the panel's 120 Hz could present)
             if (cap > win_cap) {
@@ -739,7 +756,10 @@ void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t
         else if (r->cam_err > CAM_DRIFT) end_scene(r, false, "check", "the camera drifted in the window");
         else if (drift > TIME_DRIFT) end_scene(r, false, "check", "the time of day didn't hold");
         else if (!w || RD8(w + W_WEATHER) != (uint8_t)s->weather) end_scene(r, false, "check", "the weather didn't hold");
-        else end_scene(r, true, "", "");
+        else {
+            r->cold = r->skipped || r->compiles;  // (the numbers stay in the report: it did run)
+            end_scene(r, !r->cold, "", "");
+        }
         break;
     }
     case S_DONE:
