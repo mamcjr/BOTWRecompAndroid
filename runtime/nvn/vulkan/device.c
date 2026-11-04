@@ -1740,6 +1740,8 @@ bool vk_turnip_heap_on(int setting) {
 }
 static bool g_lrz_at_start = true;
 bool vk_lrz_at_start(void) { return g_lrz_at_start; }  // (the start screen: a change needs a restart)
+static char g_driver_env_at_start[256];  // (the same for the driver's switches, g_settings.driver_env)
+const char *vk_driver_env_at_start(void) { return g_driver_env_at_start; }
 const char *vk_gpu_name(void) { return g_vk.props.deviceName; }
 #endif
 
@@ -1754,6 +1756,20 @@ void ui_window_init(void) {
     {   // Driver compatibility (the start screen's Settings > Prelaunch): applied before the driver loads
         extern void android_log_file(bool on);
         android_log_file(g_settings.log_file);
+        {   // The driver's own switches from the settings (#227: Samsung phones under Turnip want
+            // FD_DEV_FEATURES=enable_tp_ubwc_flag_hint=1): NAME=value pairs separated by spaces, each up to the next space;
+            // a TU_DEBUG given there wins over LRZ's below
+            char buf[sizeof g_settings.driver_env], *save = NULL;
+            snprintf(buf, sizeof buf, "%s", g_settings.driver_env);
+            snprintf(g_driver_env_at_start, sizeof g_driver_env_at_start, "%s", g_settings.driver_env);
+            for (char *p = strtok_r(buf, " \t;", &save); p; p = strtok_r(NULL, " \t;", &save)) {
+                char *eq = strchr(p, '=');
+                if (!eq || eq == p) continue;
+                *eq = 0;
+                setenv(p, eq + 1, 1);
+                LOG("[vk] driver setting from the settings: %s=%s\n", p, eq + 1);
+            }
+        }
         // Turnip reads TU_DEBUG once, when it starts: low-resolution Z off (it can drop draws on some Adreno GPUs).
         // Automatic needs the GPU before Vulkan names it: the kernel's (the GPU driver reads it from the app too), else
         // the last start's; unknown: on.
