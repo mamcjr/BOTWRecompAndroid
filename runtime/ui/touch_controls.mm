@@ -642,6 +642,14 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
     case SDL_EVENT_FINGER_DOWN: case SDL_EVENT_FINGER_MOTION: case SDL_EVENT_FINGER_UP: case SDL_EVENT_FINGER_CANCELED: break;
     default: return false;
     }
+    if (e->type == SDL_EVENT_FINGER_DOWN) {  // LARECOMP_DEBUG_TAP=1 (diagnosis on a phone, no F9): a third finger down
+        static int tap = -1;                  // dumps the next frame (as F9), also with the touch controls off or hidden
+        if (tap < 0) tap = getenv("LARECOMP_DEBUG_TAP") != NULL;
+        int n = 0;
+        if (tap) SDL_free(SDL_GetTouchFingers(e->tfinger.touchID, &n));
+        extern volatile int g_debug_frame_request;  // (hle/input.c)
+        if (n == 3) g_debug_frame_request = 1, fprintf(stderr, "[touch] debug frame requested\n");
+    }
     if (!editing && !menu_input_captured() && overlay_drag(e, e->tfinger.x * disp_w, e->tfinger.y * disp_h)) return true;
     if (!editing && (menu_input_captured() || !g_settings.touch_controls || hide_auto)) { release_all(); return false; }  // (the menu's clicks)
     used = true;
@@ -667,12 +675,6 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
         if (editing && k >= 0 && ctl != C_NONE && !is_bar(ctl))  // (dragging layout entry k, now the one - / + resize)
             fingers[nfingers].ctl = (icons_on ? C_EDIT2 : 200) + k, edit_sel = k;
         nfingers++;
-        {   // LARECOMP_DEBUG_TAP=1 (diagnosis on a phone, no F9): a third finger down dumps the next frame (as F9)
-            static int tap = -1;
-            if (tap < 0) tap = getenv("LARECOMP_DEBUG_TAP") != NULL;
-            extern volatile int g_debug_frame_request;  // (hle/input.c)
-            if (tap && nfingers == 3) g_debug_frame_request = 1, fprintf(stderr, "[touch] debug frame requested\n");
-        }
         if (!editing && s >= 0) {
             stick[s].on = true;
             stick[s].cx = stick[s].kx = x, stick[s].cy = stick[s].ky = y;
