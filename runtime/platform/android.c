@@ -331,12 +331,44 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
             fprintf(stderr, "[android] page write tracking: out of memory mappings, the window reopened whole (%d)\n", logged);
         }
         if (now >= next) {
-            next = now + 300000000000ull;
+            // (and whose: the tracked window's own, the GPU driver's device files, the rest - on a Mali the count stayed
+            // at 62000 after the window was reopened whole, #249: not all of them the tracking's)
+            static long every = -1;  // (LARECOMP_LOG_MAPS_S=<s>: another interval, a test)
+            if (every < 0) every = getenv("LARECOMP_LOG_MAPS_S") && atol(getenv("LARECOMP_LOG_MAPS_S")) > 0 ? atol(getenv("LARECOMP_LOG_MAPS_S")) : 300;
+            next = now + (uint64_t)every * 1000000000ull;
             FILE *f = fopen("/proc/self/maps", "r");
-            int n = 0, c;
-            while (f && (c = getc_unlocked(f)) != EOF) n += c == '\n';
+            int n = 0, in_window = 0, gpu = 0;
+            char line[512];
+            struct { char name[40]; int n; } top[24];  // (the others by name: [anon:scudo...], a library, a device)
+            int ntop = 0;
+            while (f && fgets(line, sizeof line, f)) {
+                n++;
+                unsigned long long lo = strtoull(line, NULL, 16);
+                if (lo >= wt_lo && lo < wt_hi) { in_window++; continue; }
+                if (strstr(line, "/dev/mali") || strstr(line, "/dev/kgsl") || strstr(line, "dmabuf") || strstr(line, "/dev/dri"))
+                    gpu++;
+                char *nm = line;  // (the 6th field: after five spaces-separated ones)
+                for (int k = 0; k < 5 && nm; k++) { nm = strchr(nm, ' '); while (nm && *nm == ' ') nm++; }
+                char key[40];
+                snprintf(key, sizeof key, "%s", nm && *nm && *nm != '\n' ? nm : "(no name)");
+                key[strcspn(key, "\n")] = 0;
+                if (key[0] == '[') key[strcspn(key, ":]") + 1 < sizeof key ? strcspn(key, "]") + 1 : sizeof key - 1] = 0;
+                int t = 0;
+                while (t < ntop && strcmp(top[t].name, key)) t++;
+                if (t == ntop && ntop < 24) snprintf(top[ntop].name, sizeof top[ntop].name, "%s", key), top[ntop++].n = 0;
+                if (t < ntop) top[t].n++;
+            }
             if (f) fclose(f);
-            fprintf(stderr, "[android] memory mappings: %d\n", n);
+            char most[160] = "";
+            for (int r = 0, len = 0; r < 3; r++) {  // (the three most)
+                int best = -1;
+                for (int t = 0; t < ntop; t++) if (top[t].n > 0 && (best < 0 || top[t].n > top[best].n)) best = t;
+                if (best < 0) break;
+                len += snprintf(most + len, sizeof most - len, "%s%s %d", r ? ", " : "", top[best].name, top[best].n);
+                top[best].n = -top[best].n;
+            }
+            fprintf(stderr, "[android] memory mappings: %d (the game's memory %d, the GPU driver's %d, other %d; most: %s)\n", n,
+                    in_window, gpu, n - in_window - gpu, most);
         }
     }
     uint64_t p0 = (addr - wt_lo) >> 12, p1 = (addr + size - wt_lo + 0xFFF) >> 12;
