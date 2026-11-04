@@ -1,0 +1,32 @@
+# The benchmark's scenes (runtime/hle/benchmark.c): adb push this somewhere in the app's files, then
+#   adb shell am start -n com.botwrecomp.android/com.botwrecompandroid.BOTWRecompAndroidActivity --es env LARECOMP_BENCHMARK=<its path on the device>
+# The report goes to <its path>.out/. A save past the Great Plateau, in the main field, normal mode.
+# pos: X Y Z, a little above the ground is fine. time: 0..360 (180 noon). weather: 0 clear. yaw, pitch: the camera, degrees.
+format = 1
+repeats = 3
+warmup_s = 20
+window_s = 45
+
+[scene]
+name = plateau
+pos = -1038 251 1815
+time = 180
+weather = 0
+yaw = 0
+pitch = 0
+
+[scene]
+name = hateno-lab
+pos = 3777.5 356 2112.5
+time = 90
+weather = 0
+yaw = -70.2
+pitch = 0
+
+[scene]
+name = hateno-village
+pos = 3381.9 243 2209.3
+time = 180
+weather = 0
+yaw = -60
+pitch = 0

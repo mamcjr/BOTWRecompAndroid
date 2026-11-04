@@ -97,6 +97,8 @@ static bool in_event(void) {
     return evt && *(uint64_t *)(uintptr_t)(evt + 0x1d2b8);
 }
 
+bool framepace_in_event(void) { return g_game_version >= 182 && in_event(); }  // (hle/benchmark.c)
+
 int framepace_target(void) {
     static int forced = -2, movie = -2, menu = -2, event = -2;
     if (forced == -2) forced = env_int("LARECOMP_FPS", -1);
@@ -166,6 +168,9 @@ static uint32_t g_vfr_iv = 2;
 uint32_t framepace_interval(void) { return g_vfr_iv; }
 
 void rt_vfr_update(uint64_t vfr) {
+    extern bool g_benchmark;
+    extern void benchmark_vfr(void);
+    if (g_benchmark) benchmark_vfr();  // (its held time and weather)
     if (!framepace_on()) return;
     static uint64_t last_t;
     static double real, given;  // seconds of real time and of game time handed out (only their gap matters)

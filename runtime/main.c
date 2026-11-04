@@ -198,6 +198,7 @@ static void boot(const char *root) {
     if (!native_on() && !gamelib_load(root, why, sizeof why)) FATAL("%s\n", why);
     loader_load(exefs);
     { extern void settings_load(void); settings_load(); }
+    { extern void benchmark_boot(void); benchmark_boot(); }
     kernel_init();
     if (!native_on()) dispatch_init();
     native_prepare();
@@ -249,6 +250,7 @@ int main(int argc, char **argv) {
         else if (argv[i][0] != '-') root = arg_root;
     }
     rt_paths_init();  // the data root becomes the working directory (runtime/paths.h)
+    { extern void benchmark_init(void); benchmark_init(); }  // (LARECOMP_BENCHMARK, hle/benchmark.c)
     for (bool title = !skip_launcher;;) {
         if (title) {  // start screen (runtime/ui/launcher.mm): game files setup, settings
             extern void launcher_run(const char *root);
