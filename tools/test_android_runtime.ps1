@@ -21,8 +21,12 @@ try {
     New-Item -ItemType Directory -Force 'android/out' | Out-Null
     & $adbPath @deviceArgs shell mkdir -p $deviceDir
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the device test directory.' }
-    foreach ($testName in @('test_kernel_affinity', 'test_nvn_lifetime')) {
-        & $compilerPath --target=aarch64-linux-android30 -O1 -g -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Wno-format -Iruntime "tools/$testName.c" -o "android/out/$testName"
+    # (tests including the Vulkan backend need the headers the app build puts in android/deps/out)
+    $vulkanTests = @('test_bc_shadow')
+    $haveVulkanHeaders = Test-Path -LiteralPath 'android/deps/out/volk/volk.h'
+    foreach ($testName in @('test_kernel_affinity', 'test_bc_shadow', 'test_nvn_lifetime')) {
+        if (-not $haveVulkanHeaders -and $vulkanTests -contains $testName) { Write-Host "SKIP: $testName (no android/deps/out: build the app once)"; continue }
+        & $compilerPath --target=aarch64-linux-android30 -O1 -g -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Wno-format -Iruntime -Iruntime/nvn -Iandroid/deps/out/include -Iandroid/deps/out/volk -DVK_NO_PROTOTYPES "tools/$testName.c" -o "android/out/$testName"
         if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $testName" }
         & $adbPath @deviceArgs push "android/out/$testName" "$deviceDir/$testName"
         if ($LASTEXITCODE -ne 0) { throw "Upload failed: $testName" }
