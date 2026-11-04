@@ -763,6 +763,9 @@ static void tab_about(void) {
     }
     hint("Auto: a controller's gyroscope once it sends live readings, the phone's otherwise. Phone: always the phone's - "
          "for a controller that says it has a gyroscope but doesn't. Controller: only the controller's.");
+    if (toggle("Phone motion like the Switch's screen", &g_settings.motion_flat)) settings_save();  // (hle/motion.c, #211 #247)
+    hint("Off: the phone moves the aim as a controller would. On: as the Switch's own screen in handheld mode - try it if "
+         "tilting the phone turns the aim, and turning it tilts.");
     ImGui::Spacing();
     controls_bindings_draw(ImGui::GetFontSize() / 34);
     ImGui::Spacing();

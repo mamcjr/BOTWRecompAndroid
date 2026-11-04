@@ -4224,6 +4224,9 @@ bool vk_heap_place(uint64_t size) {
     // LARECOMP_VK_MEMFD=1 / 0: on / off whatever the setting.
     extern bool vk_heap_file_asked(void);
     bool memfd = vk_heap_file_asked();
+    if (g_settings.heap_file && !g_vk.mem_fd)  // (the setting on where it can't be: said, not silent - #249)
+        LOG("[vk] game memory through a shared file: on in the settings, but this driver can't export its memory (no "
+            "VK_KHR_external_memory_fd) - shader global memory through CPU copies\n");
     if ((!g_vk.map_placed && !memfd) || getenv("LARECOMP_VK_NO_PLACED")) return NOT_PLACED();
     extern bool vk_turnip_heap_on(int setting);
     if (memfd ? g_settings.gpu_heap == 0 : !vk_turnip_heap_on(g_settings.gpu_heap)) {
@@ -4305,7 +4308,10 @@ bool vk_heap_place(uint64_t size) {
         r = vkMapMemory2KHR(g_vk.dev, &mi, &p);
     }
     if (r != VK_SUCCESS || p != (void *)(uintptr_t)HEAP_BASE) {
-        LOG("[vk] heap placement failed (%d, mapped at %p, type %d): shader global memory through CPU copies\n", r, p, type);
+        // (memory types the buffer takes: with an exported file on an Xclipse 530 none of them was host-visible and
+        // coherent, -8, #234)
+        LOG("[vk] heap placement failed (%d, mapped at %p, type %d, the buffer's memory types 0x%x%s): shader global memory "
+            "through CPU copies\n", r, p, type, mr.memoryTypeBits, memfd ? ", an exported file" : "");
         if (mem) vkFreeMemory(g_vk.dev, mem, NULL);  // (freeing a placed map unmaps it: the window gets its pages back)
         if (p == (void *)(uintptr_t)HEAP_BASE) plat_reset_guest(HEAP_BASE, HEAP_BASE + size);
         vkDestroyBuffer(g_vk.dev, buf, NULL);
