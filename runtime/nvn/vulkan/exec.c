@@ -3930,7 +3930,8 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             float dy = pane || text ? widescreen_hud_top(lx, ly) : 0;
             if (dy != 0) {
                 VkSpan c = vk_transient_copy(f, size, 256);
-                float *m = (float *)c.ptr, dx = centred ? widescreen_hud_shift(lx, ly) : 0;
+                extern float widescreen_hud_shift_text(float x, float y);
+                float *m = (float *)c.ptr, dx = !centred ? 0 : pane ? widescreen_hud_shift(lx, ly) : widescreen_hud_shift_text(lx, ly);
                 if (pane) m[23] += dy, m[19] += dx;
                 else {
                     for (int i = 0; i < 4; i++) m[4 + i] += dy / 360.0f * m[12 + i];
@@ -4022,7 +4023,8 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 for (int i = 0; i < 4; i++) ((float *)c.ptr)[i] /= g;
                 return ubo_span(c, size);
             } else if (f[15] > 1.0f) {
-                float d = widescreen_hud_shift(f[3] / f[15] * g * 640.0f, f[7] / f[15] * 360.0f);  // (layout x, y of the origin)
+                extern float widescreen_hud_shift_text(float x, float y);
+                float d = widescreen_hud_shift_text(f[3] / f[15] * g * 640.0f, f[7] / f[15] * 360.0f);  // (layout x, y of the origin)
                 if (d != 0) {
                     VkSpan c = vk_transient_copy(f, size, 256);
                     float *m = (float *)c.ptr, k = d / (640.0f * g);  // (that many NDC units)

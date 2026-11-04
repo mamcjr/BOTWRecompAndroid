@@ -185,7 +185,8 @@ void widescreen_band_seen(void) {
     band_frame = renderer_present_count();
 }
 
-float widescreen_hud_shift(float x, float y) {
+// (row: below this y the prompts' row - a pane's centre or a text's origin, widescreen_hud_shift / _text)
+static float hud_shift(float x, float y, float row) {
     extern uint64_t renderer_present_count(void);
     if (!widescreen_ui_centred() || widescreen_in_menu() || !in_world()) return 0;
     if (band_frame && renderer_present_count() - band_frame <= 3) return 0;
@@ -196,8 +197,10 @@ float widescreen_hud_shift(float x, float y) {
     if (talk_frame && renderer_present_count() - talk_frame <= 3) return 0;
     // The button prompts' row along the bottom (y about -320; on a horse "Reset Camera ZL ... Yah! A", from x -250 to
     // 365) is centred by the game: its texts (moved by their origin) and their dark shadows (by their centre) fell either
-    // side of the blend below and parted - "Yah!" off its shadow (2026-11-03). The minimap's group sits higher or past it.
-    if (y < -290.0f && x > -440.0f && x < 440.0f) return 0;  // (a text's origin: a little above its middle)
+    // side of the blend below and parted - "Yah!" off its shadow (2026-11-03). Its icons' panes sit at -318; the weather
+    // forecast's, in the minimap's group, at -302 to -315 (x 326-428) - under one line for both, the forecast stayed
+    // behind as the rest of the group went out to the edge (#243). So panes below -316.5, texts' origins below -290.
+    if (y < row && x > -440.0f && x < 440.0f) return 0;
     float ax = x < 0 ? -x : x, t = (ax - 180.0f) / (260.0f - 180.0f);
     if (t <= 0) return 0;
     if (t > 1) t = 1;
@@ -205,6 +208,8 @@ float widescreen_hud_shift(float x, float y) {
     float d = 640.0f * (g_wide - 1.0f) * t;
     return x < 0 ? -d : d;
 }
+float widescreen_hud_shift(float x, float y) { return hud_shift(x, y, -316.5f); }       // (a pane's centre, a scissor's)
+float widescreen_hud_shift_text(float x, float y) { return hud_shift(x, y, -290.0f); }  // (a text's origin)
 
 // A talk's box is on screen (in the world): the touch controls give way to it (ui/touch_controls.mm)
 bool widescreen_talk(void) {
