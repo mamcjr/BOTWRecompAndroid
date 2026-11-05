@@ -49,15 +49,11 @@ add_library(main SHARED ${RT_SRC} ${R}/runtime/platform/android.c ${VK_SRC} ${UI
 set_source_files_properties(${UI_SRC} PROPERTIES LANGUAGE CXX COMPILE_OPTIONS "-xc++")
 set_source_files_properties(${R}/runtime/gamelib.c PROPERTIES COMPILE_DEFINITIONS "GAMELIB_ID=\"${GAMELIB_ID}\"")
 set_source_files_properties(${R}/runtime/gamebuild.c PROPERTIES COMPILE_DEFINITIONS "GAMELIB_ID=\"${GAMELIB_ID}\"")
-# the benchmark's report names the commit (a new commit re-runs the configure)
-execute_process(COMMAND git describe --always --dirty --abbrev=12 WORKING_DIRECTORY ${R} OUTPUT_VARIABLE BENCHMARK_COMMIT
-                OUTPUT_STRIP_TRAILING_WHITESPACE ERROR_QUIET)
-if(EXISTS ${R}/.git/index)
-    set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS ${R}/.git/index)
-endif()
-if(BENCHMARK_COMMIT)
-    set_source_files_properties(${R}/runtime/hle/benchmark.c PROPERTIES COMPILE_DEFINITIONS "BENCHMARK_COMMIT=\"${BENCHMARK_COMMIT}\"")
-endif()
+# the benchmark's report names the commit this build came from (asked on every build, benchmark_commit.cmake)
+add_custom_target(benchmark_commit BYPRODUCTS ${CMAKE_BINARY_DIR}/benchmark/benchmark_commit.h
+    COMMAND ${CMAKE_COMMAND} -DR=${R} -DOUT=${CMAKE_BINARY_DIR}/benchmark/benchmark_commit.h -P ${CMAKE_CURRENT_LIST_DIR}/benchmark_commit.cmake VERBATIM)
+add_dependencies(main benchmark_commit)
+target_include_directories(main PRIVATE ${CMAKE_BINARY_DIR}/benchmark)
 
 target_include_directories(main PRIVATE ${R}/runtime ${R}/runtime/nvn ${IMGUI} ${IMGUI}/backends ${DEPS}/include
                            ${DEPS}/volk ${BOTW_GEN_DIR} ${R}/third_party/smaa/Textures ${R}/android/common)
