@@ -1134,6 +1134,9 @@ static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 
 static void *worker(void *a) {
     (void)a;
+#ifdef __ANDROID__
+    nice(10);
+#endif
     for (;;) {
         pthread_mutex_lock(&jobs_lock);
         while (!jobs_head) pthread_cond_wait(&jobs_cond, &jobs_lock);
@@ -1161,6 +1164,9 @@ static pthread_mutex_t tjobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t tjobs_cond = PTHREAD_COND_INITIALIZER;
 static void *translator(void *a) {
     (void)a;
+#ifdef __ANDROID__
+    nice(5);
+#endif
     for (;;) {
         pthread_mutex_lock(&tjobs_lock);
         while (!tjobs_head) pthread_cond_wait(&tjobs_cond, &tjobs_lock);
@@ -1197,7 +1203,7 @@ static void run_job(void (*fn)(void *), void *arg) {
         int n = cores - 4;
 #ifdef __ANDROID__
         n = cores / 2;
-        if (n > 4) n = 4;  // leave CPU capacity for the game and Vulkan translation
+        if (n > 3) n = 3;  // leave CPU capacity for the game and Vulkan translation
 #endif
         const char *workers = getenv("LARECOMP_SHADER_WORKERS");
         if (workers) n = atoi(workers);
@@ -2708,7 +2714,11 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
     last_np = np, last_code[0] = np->stages[0].code_addr, last_code[1] = np->stages[1].code_addr;
     last_vkey = *vkey, last_fkey = *fkey;
     uint64_t h = 0xcbf29ce484222325ull;
-    for (int i = 0; i < 2; i++) { uint64_t a = np->stages[i].code_addr; for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; } }
+    for (int i = 0; i < 2; i++) {
+        uint64_t a = np->stages[i].code_addr;
+        if (a >= HEAP_BASE && a + 0x100 <= HEAP_BASE + HEAP_MAX) h = hmix(h, (const void *)(uintptr_t)a, 0x100);
+        else for (int k = 0; k < 8; k++) { h ^= (a >> (k * 8)) & 0xFF; h *= 0x100000001B3ull; }
+    }
     h = hash_words(h, vkey, sizeof *vkey);  // (8 bytes a step: the table is in memory only)
     for (int i = 0; i < 8; i++) { h ^= fkey->rt_kind[i]; h *= 0x100000001B3ull; }
 #ifdef __ANDROID__
@@ -5497,8 +5507,18 @@ static int g_cs_n;  // (compute program table below)
 // address (the old Prog / Pipe objects are leaked, so pipeline keys holding their pointers can't collide), compute
 // programs, shared copies - and the heap import: its pages are replaced (re-imported on first use).
 void vk_exec_reset(void) {
-    memset(prog_tab, 0, sizeof prog_tab);
-    memset(pipe_tab, 0, sizeof pipe_tab);
+    for (int i = 0; i < PROG_TAB; i++) {
+        if (prog_tab[i].prog && atomic_load(&prog_tab[i].prog->state) != 1) {
+            prog_tab[i].key = 0;
+            prog_tab[i].prog = NULL;
+        }
+    }
+    for (int i = 0; i < PIPE_TAB; i++) {
+        if (pipe_tab[i].pipe && atomic_load(&pipe_tab[i].pipe->state) != 1) {
+            pipe_tab[i].key = 0;
+            pipe_tab[i].pipe = NULL;
+        }
+    }
     g_cs_n = 0;
     gcopy_gen++;
     if (gmem_buf) {
