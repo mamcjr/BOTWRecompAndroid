@@ -113,11 +113,13 @@ android/run_boot.sh 120                               # start the game, log to a
 ## Support the project
 
 BOTWRecompAndroid is a free, independent project. If you enjoy it and would like to support its development, you can
-sponsor me on GitHub. Your support helps me dedicate time to fixing bugs, improving performance and compatibility, and
+sponsor me on GitHub, Ko-fi or Buy Me a Coffee. Your support helps me dedicate time to fixing bugs, improving performance and compatibility, and
 working on future releases. Sponsorship is entirely optional: it does not unlock features or guarantee specific fixes.
 Bug reports, device tests, and contributions are also greatly appreciated.
 
 [![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-on%20GitHub-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/mamcjr)
+[![Ko-fi](https://img.shields.io/badge/Ko--fi-mamcjr-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/mamcjr)
+[![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-mamcjr-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/mamcjr)
 
 ## Credits
 
