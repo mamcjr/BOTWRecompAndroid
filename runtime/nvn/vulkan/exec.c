@@ -4278,7 +4278,25 @@ bool vk_heap_place(uint64_t size) {
     const VkMemoryPropertyFlags need = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     for (;;) {
         ebi.handleTypes = ht;
-        if (vkCreateBuffer(g_vk.dev, &bi, NULL, &buf) != VK_SUCCESS) return NOT_PLACED();
+        VkResult cr = vkCreateBuffer(g_vk.dev, &bi, NULL, &buf);
+        if (cr != VK_SUCCESS) {
+            // Said, not silent: on the Mali-G720 / G78 / G68 the setting was on and the heap went back to CPU copies
+            // with no line (#264 #277 #256 #268) - the buffer refused, the only quiet way out. The driver's limits
+            // with it; an opaque file refused tries a dma-buf.
+            VkPhysicalDeviceMaintenance4Properties m4 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_4_PROPERTIES};
+            VkPhysicalDeviceMaintenance3Properties m3 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_3_PROPERTIES, .pNext = &m4};
+            VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &m3};
+            vkGetPhysicalDeviceProperties2(g_vk.phys, &p2);
+            LOG("[vk] heap placement: the %llu MB buffer refused (%d%s; the driver's largest buffer %llu MB, allocation "
+                "%llu MB)\n", (unsigned long long)(size >> 20), cr,
+                !memfd ? "" : ht == VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT ? ", a dma-buf" : ", an exported file",
+                (unsigned long long)(m4.maxBufferSize >> 20), (unsigned long long)(m3.maxMemoryAllocationSize >> 20));
+            if (memfd && g_vk.mem_dmabuf && ht != VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT) {
+                ht = VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT;
+                continue;
+            }
+            return NOT_PLACED();
+        }
         vkGetBufferMemoryRequirements(g_vk.dev, buf, &mr);
         type = -1;  // host-visible and coherent (the CPU writes, the GPU reads and writes); cached when there is one
         for (uint32_t i = 0; i < mp.memoryTypeCount; i++) {
