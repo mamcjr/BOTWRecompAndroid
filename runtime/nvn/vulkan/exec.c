@@ -4872,21 +4872,25 @@ static void gres_learn(uint32_t off) {
 }
 
 // Load-only arena copies are immutable until their submission retires. Compare against that exact copy;
-// no assumption that guest memory remains unchanged between draws.
-static uint64_t ga_load_copy(uint64_t at, uint64_t size) {
+// no assumption that guest memory remains unchanged between draws. A storing shader's copies are its own (share
+// false): it may write through any range of its table - the learned ones too, which every table carries - and the
+// GPU's writes come after this memcmp, so a later dispatch handed the same copy read them (Odin 3, Linkle + Second
+// Wind: device lost at the Shrine of Resurrection's door).
+static uint64_t ga_load_copy(uint64_t at, uint64_t size, bool share) {
     static struct { uint64_t at, size, off, seq, gen; bool valid; } cache[64];
     static int reuse = -1;
     if (reuse < 0) { const char *e = getenv("LARECOMP_GCOPY_REUSE"); reuse = !e || atoi(e) != 0; }
     uint64_t seq = vk_pending_seq();
     unsigned slot = (unsigned)((at >> 8) ^ (size >> 8)) & 63;
     const uint8_t *src = (const uint8_t *)(uintptr_t)(HEAP_BASE + at);
-    if (reuse && cache[slot].valid && cache[slot].seq == seq && cache[slot].gen == gcopy_gen &&
+    if (reuse && share && cache[slot].valid && cache[slot].seq == seq && cache[slot].gen == gcopy_gen &&
         cache[slot].at == at && cache[slot].size == size && !memcmp(ga_ptr + cache[slot].off, src, size))
         return cache[slot].off;
     uint64_t off = ga_ring(size);
     if (off == ~0ull) return off;
     memcpy(ga_ptr + off, src, size);
     ga_wrote(off, size);
+    if (!share) return off;
     cache[slot].at = at; cache[slot].size = size; cache[slot].off = off;
     cache[slot].seq = seq; cache[slot].gen = gcopy_gen; cache[slot].valid = true;
     return off;
@@ -5007,7 +5011,7 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
             if (in) {
                 uint64_t end = hi < in->hi ? hi : in->hi;
                 if (end < hi && n == GMAP_MAX - 1) {  // (one table slot left: copy the whole tail rather than overflow)
-                    uint64_t off = ga_load_copy(at, hi - at);
+                    uint64_t off = ga_load_copy(at, hi - at, !store);
                     if (off == ~0ull) { stat_gres_fail[hi - at > GA_SEG ? 3 : 2]++; return false; }
                     GRES_ADD(at, hi - at, off);
                     break;
@@ -5019,7 +5023,7 @@ static bool gres_prepare(const GcRange *r, int m, bool store) {
                 continue;
             }
             if (next < hi && n == GMAP_MAX - 1) next = hi;
-            uint64_t off = ga_load_copy(at, next - at);
+            uint64_t off = ga_load_copy(at, next - at, !store);
             if (off == ~0ull) { stat_gres_fail[next - at > GA_SEG ? 3 : 2]++; return false; }
             GRES_ADD(at, next - at, off);
             at = next;
