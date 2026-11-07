@@ -778,7 +778,7 @@ static void filesystem(Service *s, IpcReq *req, IpcResp *resp) {
 
 // A copy of folder src at dst (made by this process, so its files are this app's: on Android, files adb copied belong
 // to the shell user, and the game couldn't open them for writing - result 2/4000)
-static void copy_tree(const char *src, const char *dst) {
+void copy_tree(const char *src, const char *dst) {
     DIR *d = opendir(src);
     if (!d) return;
     mkdir(dst, 0755);

@@ -65,7 +65,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         }
     };
 
-    private static native void nativeDeviceStats(float battTempC, float battPct, float watts, int thermal, float headroom);
+    private static native void nativeDeviceStats(float battTempC, float battPct, float watts, int thermal, float headroom, int plugged);
     // the start screen (runtime/ui/launcher.mm)
     private static native int nativeGameVersion(byte[] head);
     private static native void nativeImportLooking();  // (the picked folder is being searched: busy, and said so)
@@ -172,8 +172,10 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         try {
             Intent b = registerReceiver(null, new IntentFilter(Intent.ACTION_BATTERY_CHANGED));
             float temp = -1, pct = -1, watts = 0;
+            int plugged = -1;
             if (b != null) {
                 temp = b.getIntExtra(BatteryManager.EXTRA_TEMPERATURE, -10) / 10f;
+                plugged = b.getIntExtra(BatteryManager.EXTRA_PLUGGED, -1);
                 int level = b.getIntExtra(BatteryManager.EXTRA_LEVEL, -1), scale = b.getIntExtra(BatteryManager.EXTRA_SCALE, -1);
                 if (level >= 0 && scale > 0) pct = level * 100f / scale;
                 int mv = b.getIntExtra(BatteryManager.EXTRA_VOLTAGE, 0);
@@ -185,7 +187,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             PowerManager pm = getSystemService(PowerManager.class);
             int thermal = pm != null ? pm.getCurrentThermalStatus() : -1;
             float headroom = pm != null ? pm.getThermalHeadroom(10) : -1;
-            nativeDeviceStats(temp, pct, watts, thermal, Float.isNaN(headroom) ? -1 : headroom);
+            nativeDeviceStats(temp, pct, watts, thermal, Float.isNaN(headroom) ? -1 : headroom, plugged);
         } catch (Throwable t) {  // (also before libmain is loaded: UnsatisfiedLinkError)
             Log.w(TAG, "device stats: " + t);
         }

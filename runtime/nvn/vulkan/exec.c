@@ -55,6 +55,7 @@ uint64_t prof_up_cum;  // (the same, never reset)
 #define PROF_T0() uint64_t prof_t0_ = prof ? SDL_GetTicksNS() : 0
 #define PROF_ADD(v) do { if (prof) v += SDL_GetTicksNS() - prof_t0_; } while (0)
 static _Atomic int stat_compiles;
+static _Atomic uint64_t stat_skipped_building;  // (never zeroed; hle/benchmark.c) draws skipped: their pipeline is still compiling
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 static char stats_text[2048];
@@ -309,6 +310,9 @@ void vk_pace_frame(void) {
     uint64_t p = now - last, wt = w - last_wait;
     bool first = !last;
     last = now, last_wait = w;
+    extern bool g_benchmark;
+    extern void benchmark_frame(double period, double busy, double game, double render, double gpu);
+    if (g_benchmark && !first && p > 100000000ull) benchmark_frame(p / 1e6, -1, -1, -1, -1);  // (its window keeps these too)
     if (first || p > 100000000ull) return;  // (loading, a hitch: not a pace)
     double busy = (p > wt ? p - wt : 0) / 1e6;
 #ifdef __ANDROID__
@@ -368,6 +372,9 @@ void vk_pace_frame(void) {
     avg = avg ? avg + (step_busy - avg) * 0.05 : step_busy;
 #else
     avg = avg ? avg + (busy - avg) * 0.05 : busy;
+#endif
+#ifdef __ANDROID__
+    if (g_benchmark) benchmark_frame(p / 1e6, busy, game_busy, render_busy, g_pace_gpu_ms);
 #endif
     static int log = -1;  // LARECOMP_LOG_PACE=1: each frame's period, vsync wait and busy time
     if (log < 0) log = getenv("LARECOMP_LOG_PACE") != NULL;
@@ -1318,6 +1325,13 @@ void vk_prof_frame(uint64_t frame, uint64_t present_ns) {
     last_t = now; l_exec = cum_exec; l_wait = cum_wait; l_draws = cum_draws; l_subs = cum_submits;
 }
 
+// (hle/benchmark.c) draws skipped and pipelines compiled so far: renderer_stats zeroes its own every few seconds, on
+// the thread that asks for these
+static uint64_t skipped_before, compiles_before;
+uint64_t vk_skipped_total(void) { return skipped_before + stat_skipped; }
+uint64_t vk_skipped_building_total(void) { return stat_skipped_building; }
+uint64_t vk_compiles_total(void) { return compiles_before + (uint64_t)atomic_load(&stat_compiles); }
+
 const char *renderer_stats(void) {
     static int dumps;
     if (dumps++ < 3) {
@@ -1325,11 +1339,14 @@ const char *renderer_stats(void) {
         for (int i = 0; i < CMD_COUNT; i++) if (op_counts[i]) LOG(" %d:%llu", i, (unsigned long long)op_counts[i]);
         LOG("\n");
     }
+    int compiles = atomic_exchange(&stat_compiles, 0);
+    compiles_before += (uint64_t)compiles;
+    skipped_before += stat_skipped;
     snprintf(stats_text, sizeof stats_text,
              "%llu draws, %llu skipped, %llu passes, %llu dispatches (%llu chained), %llu flushes, wait %.0fms, compile %d (waited %.0fms), fbcopy %llu (read %llu, breaks %llu), upload %.1fMB, binds %llu pipe %llu sets",
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_dchained, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
-             atomic_exchange(&stat_compiles, 0), (double)stat_build_wait_ns / 1e6, (unsigned long long)stat_feedback_copies, (unsigned long long)stat_feedback_reads, (unsigned long long)stat_inplace_breaks, (double)stat_upload_bytes / 1048576.0,
+             compiles, (double)stat_build_wait_ns / 1e6, (unsigned long long)stat_feedback_copies, (unsigned long long)stat_feedback_reads, (unsigned long long)stat_inplace_breaks, (double)stat_upload_bytes / 1048576.0,
              (unsigned long long)stat_pipe_binds, (unsigned long long)stat_set_binds);
     stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
@@ -5887,6 +5904,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
                     (unsigned long long)st.sbuf[5][i].size);
     }
     CsProg *cp = compute_program(st.program);
+    if (cp && !atomic_load(&cp->p.state)) stat_skipped_building++;
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
     {   // LARECOMP_SKIP_CS=<code address hex>[,...] (debug): skip those compute shaders' dispatches, to see what they do;
         // "store": every one that stores to global memory
@@ -6130,6 +6148,7 @@ static void draw_(CmdRec *r, bool indexed) {
         keep = kkeep;
     }
     if (pr && keep) wait_built(&pr->state);
+    if (pr && !atomic_load(&pr->state)) stat_skipped_building++;
     if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; skip_note("shader"); return; }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
@@ -6615,6 +6634,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (keep) wait_built(&pp->state);
     if (atomic_load(&pp->state) != 1) {
         if (g_debug_frame) LOG("[draw]   skipped: pipeline %s\n", atomic_load(&pp->state) ? "failed" : "still building");
+        if (!atomic_load(&pp->state)) stat_skipped_building++;
         stat_skipped++;
         skip_note("pipeline");
         return;

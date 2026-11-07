@@ -84,6 +84,7 @@ typedef struct {
     float batt_temp_c, batt_pct, watts;  // from the activity (BatteryManager)
     int thermal;                   // PowerManager thermal status: 0 none ... 6 shutdown
     float headroom;                // PowerManager thermal headroom (1.0 = throttling begins)
+    int plugged;                   // BatteryManager's EXTRA_PLUGGED: 0 on battery, else the charger's kind
 } PlatDeviceStats;
 void plat_device_stats(PlatDeviceStats *out);
 // ADPF: the calling thread's work for a frame (busy, ns) and its target (the frame time it must fit)
