@@ -622,6 +622,20 @@ static void destroy_image(TexBackend *b) {
 // Live game textures: an in-place reboot (vk_textures_reset) destroys them all.
 static NvnTexture **g_live;
 static int g_nlive, g_cap_live;
+// Their images' bytes on the GPU (the memory mappings log), *targets: the render targets' share (any thread: a racy sum)
+uint64_t vk_texture_bytes(uint64_t *targets) {
+    uint64_t all = 0, rt = 0;
+    for (int i = 0; i < g_nlive; i++) {
+        TexBackend *b = g_live[i] ? g_live[i]->backend : NULL;
+        if (!b || !b->mem) continue;
+        VmaAllocationInfo info;
+        vmaGetAllocationInfo(g_vk.vma, b->mem, &info);
+        all += info.size;
+        if (vk_texture_scale_group(g_live[i]) != RS_NONE || renderer_format_is_depth(g_live[i]->format)) rt += info.size;
+    }
+    if (targets) *targets = rt;
+    return all;
+}
 int vk_texture_count(void) {
     static int log_diag = -1;
     if (log_diag < 0) log_diag = getenv("LARECOMP_LOG_TEXDIAG") ? 1 : 0;

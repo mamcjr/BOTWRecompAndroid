@@ -966,8 +966,26 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 // ================================================================== transient memory ring
 // 64 MB host-visible chunks (device-local when the GPU exposes resizable BAR); a chunk is reused once every
 // submission that allocated from it has completed, and given back after 10 s unused (down to RING_KEEP of them).
-#define CHUNK_SIZE (64ull << 20)
-#define RING_KEEP 4
+// Below 6 GB of RAM (a 4 GB tablet: ~1 GB free with the game running), 16 MB chunks and 2 kept - the 64 MB ones, 4
+// kept, were a quarter of the GPU memory the Android killed the game over, as the world loaded (Galaxy Tab A9+,
+// 2026-11-08). LARECOMP_LOW_RAM=1 / 0: as below 6 GB / not.
+bool vk_low_ram(void) {
+    static int low = -1;
+    if (low < 0) {
+        const char *e = getenv("LARECOMP_LOW_RAM");
+        long total_kb = 0;
+        FILE *f = fopen("/proc/meminfo", "r");
+        if (f) {
+            if (fscanf(f, "MemTotal: %ld kB", &total_kb) != 1) total_kb = 0;
+            fclose(f);
+        }
+        low = e ? atoi(e) != 0 : total_kb && total_kb < 6L * 1024 * 1024;
+        if (low) LOG("[vk] low on RAM (%ld MB): smaller buffers\n", total_kb >> 10);
+    }
+    return low;
+}
+#define CHUNK_SIZE (vk_low_ram() ? 16ull << 20 : 64ull << 20)
+#define RING_KEEP (vk_low_ram() ? 2 : 4)
 typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq, frame; } Chunk;  // frame: last picked
 static Chunk *chunks;
 static int nchunks, active = -1;
@@ -5282,13 +5300,13 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
             for (int i = 0; i < m && o < 440; i++)
                 o += snprintf(b + o, sizeof b - o, " %llx+%llx", (unsigned long long)r[i].lo, (unsigned long long)(r[i].hi - r[i].lo));
             LOG("[gcopy] frame %llu stages %x %s %d ranges %.1f KB:%s%s\n", (unsigned long long)renderer_present_count(),
-                stage_mask, store ? "STORE" : "load", m, total / 1024.0, b, total > CHUNK_SIZE ? " (TOO MUCH: skipped)" : "");
+                stage_mask, store ? "STORE" : "load", m, total / 1024.0, b, total > (64ull << 20) ? " (TOO MUCH: skipped)" : "");
         }
     }
     if (m && gres_prepare(r, m, store)) return;  // (the arena: what shaders store stays on the GPU)
     memset(gmap_tab, 0, sizeof gmap_tab);
     gc_size = 0;
-    if (!m || total > CHUNK_SIZE) return;  // (too much: those loads read zero, as without this)
+    if (!m || total > (64ull << 20)) return;  // (too much: those loads read zero, as without this)
     gc_span = vk_transient(total, 256);
     gc_size = total;
     uint64_t off = 0, seq = vk_pending_seq();
@@ -5320,7 +5338,27 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
 #define VC_PAGE 4096ull
 #define VC_TAB 8192                   // entries (open addressing)
 #define VC_MAX_RANGE (64ull << 20)    // larger bound ranges: read in place
-#define VC_BUDGET (768ull << 20)      // device-local bytes kept; the least recently used go first
+// Device-local bytes kept; the least recently used go first. 768 MB, or a twelfth of the RAM below that (~280 MB on a
+// 4 GB phone: a Galaxy Tab A9+, 3.4 GB, ran out of memory loading the world with 928 MB of GPU memory, 2026-11-08).
+// LARECOMP_VC_BUDGET_MB=<n>: that many.
+static uint64_t vc_budget(void) {
+    static uint64_t b;
+    if (!b) {
+        const char *e = getenv("LARECOMP_VC_BUDGET_MB");
+        long total_kb = 0;
+        FILE *f = fopen("/proc/meminfo", "r");
+        if (f) {
+            if (fscanf(f, "MemTotal: %ld kB", &total_kb) != 1) total_kb = 0;
+            fclose(f);
+        }
+        b = 768ull << 20;
+        if (total_kb && (uint64_t)total_kb * 1024 / 12 < b) b = (uint64_t)total_kb * 1024 / 12;
+        if (e && atol(e) > 0) b = (uint64_t)atol(e) << 20;
+        LOG("[vk] buffer cache: up to %llu MB on the GPU\n", (unsigned long long)(b >> 20));
+    }
+    return b;
+}
+#define VC_BUDGET vc_budget()
 typedef struct { uint64_t lo, hi, used_seq; uint32_t gen, epoch; VkBuffer buf; VmaAllocation mem; bool gpu; } VcEnt;
 static VcEnt vc_tab[VC_TAB];
 static uint32_t vc_pend[VC_TAB];  // entries the pending submission draws from (vc_flush brings them up to date)
@@ -8275,6 +8313,11 @@ void backend_execute(uint64_t handle) {
 // and the driver's own maps grew all session long (#249 #264)
 int vk_live_counts(char *out, int cap) {
     extern int vk_texture_count(void);
-    return snprintf(out, (size_t)cap, "programs %d, pipelines %d + compute %d, textures %d", atomic_load(&live_programs),
-                    atomic_load(&live_gpipes), atomic_load(&live_cpipes), vk_texture_count());
+    extern uint64_t vk_texture_bytes(uint64_t *targets);
+    uint64_t ring = 0, rt = 0, tex = vk_texture_bytes(&rt);
+    for (int i = 0; i < nchunks; i++) ring += chunks[i].size;
+    return snprintf(out, (size_t)cap, "programs %d, pipelines %d + compute %d, textures %d (%llu MB, render targets %llu MB), "
+                    "ring %llu MB in %d, buffer cache %llu MB", atomic_load(&live_programs), atomic_load(&live_gpipes),
+                    atomic_load(&live_cpipes), vk_texture_count(), (unsigned long long)(tex >> 20), (unsigned long long)(rt >> 20),
+                    (unsigned long long)(ring >> 20), nchunks, (unsigned long long)(vc_bytes >> 20));
 }
