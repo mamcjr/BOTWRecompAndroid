@@ -71,6 +71,16 @@ void hle_override(uint64_t addr, HostFn fn, const char *name) {
 
 static __thread uint64_t unimpl_pc;
 static int unimpl_counts[MAX_HLE];
+// A call through a null function pointer (pc below 0x10000), most often one the null-page read just gave as zero
+// (platform/android.c null_read: "the game's code read address 0x10") - returns 0, as the reads do. The Slate's
+// camera, taking photos: a read at 0x10 and then a call to 0, FATAL "no function at 0" (#300, Recompiled mode).
+// LARECOMP_NO_NULL_CALLS=1: the FATAL, as before.
+static void null_call(Cpu *c) {
+    static int n;
+    if (n++ < 10) LOG("[dispatch] the game's code called address 0: returned 0 (lr %llx)\n", (unsigned long long)c->x[30]);
+    c->x[0] = 0;
+}
+
 static void hle_unimplemented(Cpu *c) {
     int i = (int)((unimpl_pc - HLE_BASE) / 16);
     if (unimpl_counts[i]++ < 3)
@@ -191,6 +201,7 @@ static GuestFn dispatch_slow(Cpu *c) {
     for (int i = 0; i < override_count; i++)
         if (overrides[i].addr == pc) return overrides[i].fn;
     GuestFn f = dispatch_lookup(pc);
+    if (!f && pc < 0x10000 && !getenv("LARECOMP_NO_NULL_CALLS")) return null_call;  // (not cached: rare)
     if (!f) {
         uint64_t off;
         const char *s = loader_symbol_at(c->x[30], &off);
