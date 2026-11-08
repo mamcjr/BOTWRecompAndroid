@@ -12,6 +12,9 @@
 #include <pthread.h>
 #include <stdio.h>
 #include <string.h>
+#ifdef __ANDROID__
+#include <jni.h>
+#endif
 
 #include "../hle.h"
 #include "../settings.h"
@@ -150,13 +153,68 @@ static void feed(SDL_SensorType type, const float d[3], uint64_t ts, bool phone)
     pthread_mutex_unlock(&m_lock);
 }
 
-// The phone's sensors (device axes, portrait) on the screen as it's turned now
+#ifdef __ANDROID__
+// Display.getRotation() of the activity's display, through JNI: 0-3, or -1 if it can't be had
+static int android_rotation(void) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    if (!env) return -1;
+    if ((*env)->PushLocalFrame(env, 8) != 0) {
+        (*env)->ExceptionClear(env);
+        return -1;
+    }
+    int r = -1;
+    jobject act = (jobject)SDL_GetAndroidActivity();  // (a local reference: the frame's pop releases it)
+    jobject wm = NULL, disp = NULL;
+    jmethodID m = NULL;
+    if (act) m = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, act), "getWindowManager", "()Landroid/view/WindowManager;");
+    if (m && !(*env)->ExceptionCheck(env)) wm = (*env)->CallObjectMethod(env, act, m);
+    m = NULL;
+    if (wm && !(*env)->ExceptionCheck(env)) m = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, wm), "getDefaultDisplay", "()Landroid/view/Display;");
+    if (m && !(*env)->ExceptionCheck(env)) disp = (*env)->CallObjectMethod(env, wm, m);
+    m = NULL;
+    if (disp && !(*env)->ExceptionCheck(env)) m = (*env)->GetMethodID(env, (*env)->GetObjectClass(env, disp), "getRotation", "()I");
+    if (m && !(*env)->ExceptionCheck(env)) r = (*env)->CallIntMethod(env, disp, m);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env), r = -1;
+    (*env)->PopLocalFrame(env, NULL);
+    return r >= 0 && r <= 3 ? r : -1;
+}
+#endif
+
+// The screen's turn from the display's natural orientation, in quarter turns counterclockwise (Display.getRotation()):
+// the turn that takes the sensors' axes - which follow the natural orientation - onto the screen's. Not SDL's display
+// orientation: SDL counts a quarter turn more on a display whose natural orientation is landscape (SDL_android.c
+// onNativeRotationChanged), and takes that natural orientation once, in SDLActivity.onCreate - the activity lives
+// through folding and unfolding (configChanges). On a foldable's inner screen, landscape by nature (Galaxy Z Fold 8,
+// Pixel Fold), rotation 0 read as LANDSCAPE and turned the motion a quarter too far: turning the phone tilted the aim.
+// Asked of Android at most every 250 ms (folding changes it with no event here); SDL's orientation only without JNI.
+static int screen_turns(void) {
+    static int turns = -1;
+    static uint64_t asked_ns;
+    uint64_t now = SDL_GetTicksNS();
+    if (turns >= 0 && now - asked_ns < 250000000ull) return turns;
+    asked_ns = now;
+    int r = -1;
+#ifdef __ANDROID__
+    r = android_rotation();
+#endif
+    if (r < 0) {
+        SDL_DisplayID d = SDL_GetPrimaryDisplay();
+        SDL_DisplayOrientation o = SDL_GetCurrentDisplayOrientation(d);
+        r = o == SDL_ORIENTATION_LANDSCAPE ? 1 : o == SDL_ORIENTATION_PORTRAIT_FLIPPED ? 2 : o == SDL_ORIENTATION_LANDSCAPE_FLIPPED ? 3 : 0;
+        if (SDL_GetNaturalDisplayOrientation(d) == SDL_ORIENTATION_LANDSCAPE) r = (r + 3) % 4;
+    }
+    if (r != turns) LOG("[motion] the screen is turned %d degrees from its natural orientation\n", r * 90);
+    turns = r;
+    return turns;
+}
+
+// The phone's sensors (device axes, as the display's natural orientation) on the screen as it's turned now
 static void to_screen(const float d[3], float s[3]) {
-    switch (SDL_GetCurrentDisplayOrientation(SDL_GetPrimaryDisplay())) {
-    case SDL_ORIENTATION_LANDSCAPE: s[0] = -d[1], s[1] = d[0]; break;          // (its right side up)
-    case SDL_ORIENTATION_LANDSCAPE_FLIPPED: s[0] = d[1], s[1] = -d[0]; break;  // (its left side up)
-    case SDL_ORIENTATION_PORTRAIT_FLIPPED: s[0] = -d[0], s[1] = -d[1]; break;
-    default: s[0] = d[0], s[1] = d[1]; break;
+    switch (screen_turns()) {
+    case 1: s[0] = -d[1], s[1] = d[0]; break;   // (a quarter counterclockwise: a portrait phone in landscape, its right side up)
+    case 3: s[0] = d[1], s[1] = -d[0]; break;   // (a quarter clockwise: its left side up)
+    case 2: s[0] = -d[0], s[1] = -d[1]; break;
+    default: s[0] = d[0], s[1] = d[1]; break;   // (as by nature: a foldable's landscape inner screen held normally too)
     }
     s[2] = d[2];
 }
