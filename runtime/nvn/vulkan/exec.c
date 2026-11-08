@@ -55,6 +55,7 @@ uint64_t prof_up_cum;  // (the same, never reset)
 #define PROF_T0() uint64_t prof_t0_ = prof ? SDL_GetTicksNS() : 0
 #define PROF_ADD(v) do { if (prof) v += SDL_GetTicksNS() - prof_t0_; } while (0)
 static _Atomic int stat_compiles;
+static _Atomic int live_programs, live_gpipes, live_cpipes;  // (made so far: the memory mappings log, vk_live_counts)
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
 static char stats_text[2048];
@@ -2554,6 +2555,7 @@ static void compile_program(void *arg) {
 #endif
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     atomic_fetch_add(&stat_compiles, 1);
+    atomic_fetch_add(&live_programs, 1);
     atomic_store(&p->state, p->vs && p->fs ? 1 : 2);
 }
 
@@ -3108,6 +3110,7 @@ static void build_pipeline(void *arg) {
     }
 #endif
     atomic_fetch_add(&stat_compiles, 1);
+    if (r == VK_SUCCESS) atomic_fetch_add(&live_gpipes, 1);
     if (r != VK_SUCCESS) {  // (each failing key once: its draws are dropped)
         static int n;
         if (n++ < 20) LOG("[vk] graphics pipeline failed (%d): vs %llx fs %llx\n", (int)r,
@@ -5825,6 +5828,7 @@ static void build_compute(void *arg) {
                                       .layout = cp->p.layout};
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
     atomic_fetch_add(&stat_compiles, 1);
+    if (r == VK_SUCCESS) atomic_fetch_add(&live_cpipes, 1);
     atomic_store(&cp->p.state, r == VK_SUCCESS ? 1 : 2);
     if (r != VK_SUCCESS || getenv("LARECOMP_LOG_CS_PIPELINES"))
         LOG("[compute] pipeline %llx: result %d, local %ux%ux%u, %zu SPIR-V words, %d bindings\n",
@@ -8208,4 +8212,12 @@ void backend_execute(uint64_t handle) {
 #ifdef __ANDROID__
     game_pending = false;
 #endif
+}
+
+// What the Vulkan side holds, for the memory mappings log (platform/android.c): on a Mali the process's large mallocs
+// and the driver's own maps grew all session long (#249 #264)
+int vk_live_counts(char *out, int cap) {
+    extern int vk_texture_count(void);
+    return snprintf(out, (size_t)cap, "programs %d, pipelines %d + compute %d, textures %d", atomic_load(&live_programs),
+                    atomic_load(&live_gpipes), atomic_load(&live_cpipes), vk_texture_count());
 }

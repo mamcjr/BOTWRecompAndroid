@@ -57,6 +57,8 @@ static uint8_t *shadow_find(uint64_t page, uint32_t *at) {
     return NULL;
 }
 
+int g_cmd_shadow_pages, g_cmd_host_chunks;  // (the memory mappings log: platform/android.c)
+
 static uint64_t shadow_at(uint64_t guest) {
     uint64_t page = guest / SHADOW_PAGE + 1;  // (+1: 0 marks an empty slot)
     uint32_t i;
@@ -66,6 +68,7 @@ static uint64_t shadow_at(uint64_t guest) {
         if (!(m = shadow_find(page, &i))) {  // (still missing: added at the empty slot it ended on)
             m = malloc(SHADOW_PAGE * SHADOW_K + sizeof(CmdRec));
             if (!m) FATAL("nvn: no memory for a command shadow page\n");
+            g_cmd_shadow_pages++;
             g_shadow[i].mem = m;
             __atomic_store_n(&g_shadow[i].page, page, __ATOMIC_RELEASE);
         }
@@ -155,6 +158,7 @@ static void add_host_memory(NvnCmdBuf *cb, uint32_t need) {
     uint8_t *mem = malloc(size * SHADOW_K);
     if (!mem) FATAL("nvn: out of command memory (host, %llu bytes)\n", (unsigned long long)(size * SHADOW_K));
     total += size * SHADOW_K;
+    g_cmd_host_chunks++;
     if (ENV("LARECOMP_LOG_CMDMEM"))
         LOG("[nvn] command buffer %llx: %llu bytes of host command memory (%llu KB in all)\n",
             (unsigned long long)cb->guest, (unsigned long long)(size * SHADOW_K), (unsigned long long)(total / 1024));

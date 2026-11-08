@@ -15,6 +15,7 @@
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdarg.h>
+#include <malloc.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -369,6 +370,15 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
             }
             fprintf(stderr, "[android] memory mappings: %d (the game's memory %d, the GPU driver's %d, other %d; most: %s)\n", n,
                     in_window, gpu, n - in_window - gpu, most);
+            {   // whose the mallocs are (#249: [anon:scudo:secondary] grew ~2000 every 5 minutes on a Mali)
+                extern int g_cmd_shadow_pages, g_cmd_host_chunks, vk_live_counts(char *out, int cap);
+                struct mallinfo mi = mallinfo();
+                char vk[256] = "";
+                vk_live_counts(vk, sizeof vk);
+                fprintf(stderr, "[android] malloc %zu MB in use (%zu MB mapped by large blocks); command shadow pages %d, host "
+                        "command chunks %d; %s\n", (size_t)mi.uordblks >> 20, (size_t)mi.hblkhd >> 20, g_cmd_shadow_pages,
+                        g_cmd_host_chunks, vk);
+            }
         }
     }
     uint64_t p0 = (addr - wt_lo) >> 12, p1 = (addr + size - wt_lo + 0xFFF) >> 12;
