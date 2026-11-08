@@ -14,7 +14,7 @@ O projeto parte do motor do **[LAS Recomp](https://github.com/peiikai/LASRecomp)
 > [!WARNING]
 > **Beta.** Testado principalmente em um celular (POCO F7 Ultra, Adreno 830, driver Mesa Turnip). O desempenho e a
 > compatibilidade variam entre aparelhos; espere bugs, sobretudo em GPUs ainda não testadas fisicamente. Veja as
-> [notas da 0.3.1-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.3.1-beta) e as
+> [notas da 0.3.2-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.3.2-beta) e as
 > [notas de desenvolvimento](docs/BOTW-PORT.md).
 
 ## Plataforma suportada
@@ -42,6 +42,9 @@ Windows, Linux e macOS podem continuar sendo usados como ambientes de desenvolvi
   surgindo no chão, as janelas do estábulo e as telas de carregamento na proporção livre, taxa de 40 / 45 fps, 30 fps
   uniformes em telas de 60 Hz, botões de toque para as flechas e o álbum, e duas opções em Compatibilidade do driver:
   as variáveis do próprio driver e a memória do jogo por arquivo compartilhado para Mali e Xclipse (experimental).
+- **0.3.2:** menos crashes com a câmera do Slate, as sombras vermelhas no Adreno 840 corrigidas, o HUD da proporção
+  livre sem pulos depois da pausa, a luneta com barras e o inventário sem piscar, uma opção para deixar o minimapa
+  embaixo com os controles de toque, e a mira firme ao girar o celular.
 - **Problemas conhecidos:** a grama baixa só aparece de perto; reflexos da água podem acompanhar a câmera; o fundo
   do menu de pausa pode ficar preto no driver padrão da Qualcomm; Link pode piscar no primeiro golpe no modo nativo;
   a chuva cai mais devagar que no console.
@@ -97,7 +100,7 @@ Desde a **0.2.12-beta**, enquanto você joga no mundo, os controles de toque mos
    **Configurações > Arquivos > Driver Vulkan**. Se o app informar que o driver Vulkan é antigo ao abrir, toque e
    segure o ícone do app e escolha **Escolher driver** antes de iniciar o jogo.
 
-Atualizar da 0.2.x para a 0.3.1-beta não exige recompilar o código do jogo. Os shaders são compilados novamente uma
+Atualizar da 0.2.x para a 0.3.2-beta não exige recompilar o código do jogo. Os shaders são compilados novamente uma
 vez, então os primeiros minutos podem ter travadinhas. Para relatar um problema, abra uma
 [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) com celular, GPU, driver, versão do jogo e um log de
 **Configurações > Arquivos > Salvar um arquivo de log**.
@@ -165,7 +168,13 @@ TOTKDroid e LASRecompAndroid); eu atualizo à mão.
     ([#187](https://github.com/mamcjr/BOTWRecompAndroid/pull/187)).
   - [Propinbo](https://github.com/Propinbo): o Link volta a se desfazer em luz na viagem rápida, em vez de ficar azul
     chapado e sumir ([#210](https://github.com/mamcjr/BOTWRecompAndroid/pull/210)); quadros de 30 fps exibidos por igual
-    em telas de 60 Hz, sem o tranco de 50 / 16,7 ms ([#183](https://github.com/mamcjr/BOTWRecompAndroid/pull/183)).
+    em telas de 60 Hz, sem o tranco de 50 / 16,7 ms ([#183](https://github.com/mamcjr/BOTWRecompAndroid/pull/183)); sem
+    erros de validação de pontos e cópias vazias ([#255](https://github.com/mamcjr/BOTWRecompAndroid/pull/255)); um
+    benchmark embutido ([#278](https://github.com/mamcjr/BOTWRecompAndroid/pull/278)).
+  - [ilovz73ai-sketch](https://github.com/ilovz73ai-sketch): o movimento do celular na tela interna de um dobrável
+    ([#284](https://github.com/mamcjr/BOTWRecompAndroid/pull/284)).
+  - [3122380113](https://github.com/3122380113): o toque de três dedos do quadro de diagnóstico com os controles de toque
+    escondidos ([#252](https://github.com/mamcjr/BOTWRecompAndroid/pull/252)).
 - Feito com o [Claude Code](https://claude.com/claude-code) (Anthropic).
 
 *The Legend of Zelda* e *Breath of the Wild* são marcas da Nintendo. Este projeto não é afiliado nem endossado pela
