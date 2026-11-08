@@ -245,10 +245,21 @@ void widescreen_scene_ubo(const float *u, uint64_t size) { (void)u, (void)size; 
 // widened layout camera, its artwork past it). Loading screens too are the whole image now: their layout, drawn through
 // a 16:9 camera of their own, is narrowed to the middle part as it's drawn (vulkan/exec.c cbuf_info) - squeezed back
 // here instead, the image shrank to load and stretched back to the world.
+// The scope's view (vulkan/exec.c: its frame's top and bottom bars, at 0, +-304) was drawn this frame or in the last
+// few: shown in the middle 16:9 part with bars, as the console. Its frame is a 16:9 picture - in the wide image the
+// world showed past its sides, through the stretched darkening (#262).
+static uint64_t scope_frame;
+void widescreen_scope_seen(void) {
+    extern uint64_t renderer_present_count(void);
+    if (!ENV("LARECOMP_NO_SCOPE_BARS")) scope_frame = renderer_present_count();
+}
+
 void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double *vx, double *vy, double *vw, double *vh) {
     (void)frame, (void)vy, (void)vh;
     crop[0] = crop[1] = 0, crop[2] = crop[3] = 1;
-    if (shape <= 1.001 || !widescreen_allowed() || in_world() || !framepace_on_title()) return;
+    extern uint64_t renderer_present_count(void);
+    bool scope = scope_frame && renderer_present_count() - scope_frame <= 3;
+    if (shape <= 1.001 || !widescreen_allowed() || (!scope && (in_world() || !framepace_on_title()))) return;
     crop[2] = (float)(1.0 / shape), crop[0] = (1.0f - crop[2]) * 0.5f;
     double w = *vw / shape;
     *vx += (*vw - w) * 0.5, *vw = w;

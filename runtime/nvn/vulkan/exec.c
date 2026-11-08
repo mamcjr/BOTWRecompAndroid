@@ -3968,6 +3968,11 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             if (g_debug_frame && size >= 0x230 && f[15] == 0)
                 LOG("[pane] fs %016llx x %.1f y %.1f m %.3f %.3f proj %.3f %.3f wide %d\n", (unsigned long long)g_cur_fs_hash, f[19],
                     f[23], f[16], f[21], f[0], f[5], g_wide_backdrop);
+            if (size >= 0x230 && f[15] == 0 && g_cur_fs_hash == 0x3911f651724ed296ull && fabsf(f[19]) < 1.0f &&
+                fabsf(fabsf(f[23]) - 304.0f) < 1.0f) {
+                extern void widescreen_scope_seen(void);  // (the scope's frame bars: the view keeps 16:9 with bars)
+                widescreen_scope_seen();
+            }
             if (size >= 0x230 && f[15] == 0 && f[0] > 0 && fabsf(f[5] / f[0] - 16.0f / 9.0f * g) < 0.01f && g_wide_backdrop &&
                 fabsf(f[19]) < 1.0f && (g_cur_fs_hash == 0xd4fa32dabc35066cull || g_cur_fs_hash == 0xc94630386244616eull)) {
                 // (the blurred world: nn::ui2d's textured pane shader, centred; and the pause menu's layer over it that
