@@ -19,6 +19,7 @@
 #include "../../kernel.h"
 #include "shaders.h"
 #include "vk.h"
+#include "buffer_copy.h"
 #include "timing_trace.h"
 #include "../renderer.h"
 #include "../../settings.h"
@@ -4399,6 +4400,22 @@ static VkDescriptorBufferInfo gmem_info(void) {
 static VkBuffer gfast_buf;
 static VmaAllocation gfast_mem;
 static uint32_t gmap_tab[(GMAP_MAX + 1) * 4];  // this dispatch's table (stage_set copies it into binding 20)
+// (a region of zero bytes: not allowed, and one reached vkCmdCopyBuffer about once in six validation runs on Mali-G925,
+// from where isn't known: dropped and named here)
+#define copy_buffer(cb, src, dst, n, regions) copy_buffer_(cb, src, dst, n, regions, __LINE__)
+static void copy_buffer_(VkCommandBuffer cb, VkBuffer src, VkBuffer dst, uint32_t n, const VkBufferCopy *regions, int line) {
+    for (uint32_t i = 0; i < n; i++)
+        if (!regions[i].size) {
+            VkBufferCopy kept[n];
+            uint32_t k = vk_copies_nonempty(regions, n, kept);
+            static int told;
+            if (told++ < 8) LOG("[vk] %u of %u buffer copy regions empty (exec.c:%d)\n", n - k, n, line);
+            if (k) vkCmdCopyBuffer(cb, src, dst, k, kept);
+            return;
+        }
+    vkCmdCopyBuffer(cb, src, dst, n, regions);
+}
+
 static VkBufferCopy gfast_cp[GMAP_MAX];       // its copies heap -> gfast_buf (reversed after a storing dispatch)
 static int gfast_n;
 
@@ -4491,7 +4508,7 @@ static void gfast_prepare(VkCommandBuffer cb) {
             LOG("\n");
         }
     }
-    vkCmdCopyBuffer(cb, gmem_buf, gfast_buf, (uint32_t)m, cp);
+    copy_buffer(cb, gmem_buf, gfast_buf, (uint32_t)m, cp);
     vk_full_barrier(cb);
     gmap_tab[GMAP_MAX * 4] = (uint32_t)m;
     memcpy(gfast_cp, cp, (size_t)m * sizeof cp[0]);
@@ -4532,7 +4549,7 @@ static void gfast_finish(VkCommandBuffer cb) {
     VkBufferCopy back[GMAP_MAX];
     for (int i = 0; i < gfast_n; i++) back[i] = (VkBufferCopy){gfast_cp[i].dstOffset, gfast_cp[i].srcOffset, gfast_cp[i].size};
     vk_full_barrier(cb);
-    vkCmdCopyBuffer(cb, gfast_buf, gmem_buf, (uint32_t)gfast_n, back);
+    copy_buffer(cb, gfast_buf, gmem_buf, (uint32_t)gfast_n, back);
     vk_full_barrier(cb);
     gfast_n = 0;
 }
@@ -4730,7 +4747,7 @@ static void gres_sync(GaRes *e) {
         VkCommandBuffer up = vk_upload_cmd();
         if (up != barrier_cb) { vk_full_barrier(up); barrier_cb = up; }  // once per upload command buffer
         VkBufferCopy cp = {sp.off, e->off + s0, n};
-        vkCmdCopyBuffer(up, sp.buf, ga_buf, 1, &cp);
+        copy_buffer(up, sp.buf, ga_buf, 1, &cp);
         stat_gres_sync += n;
     }
 }
@@ -4840,7 +4857,7 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
             GaRes *e = &ga_res[over[k]];
             gres_sync(e);
             VkBufferCopy cp = {e->off, n->off + (e->lo - ulo), e->hi - e->lo};
-            vkCmdCopyBuffer(cb, ga_buf, ga_buf, 1, &cp);
+            copy_buffer(cb, ga_buf, ga_buf, 1, &cp);
             n->stored |= e->stored;
             e->live = false, e->dead_seq = vk_pending_seq();  // (its space and index back once that's done: gres_reclaim)
         }
@@ -5475,7 +5492,7 @@ void vc_flush(void) {
             if (nc == 64) { nc = 1; cp[0] = (VkBufferCopy){e->lo, 0, e->hi - e->lo}; break; }  // (scattered: the whole range)
             cp[nc++] = (VkBufferCopy){o, o - e->lo, VC_PAGE};
         }
-        if (nc && gmem_buf) vkCmdCopyBuffer(cb, gmem_buf, e->buf, (uint32_t)nc, cp);
+        if (nc && gmem_buf) copy_buffer(cb, gmem_buf, e->buf, (uint32_t)nc, cp);
         else if (nc) {  // (copy mode: no heap buffer - the written pages go through the upload ring)
             uint64_t tot = 0, o = 0;
             for (int k = 0; k < nc; k++) tot += cp[k].size;
@@ -5485,7 +5502,7 @@ void vc_flush(void) {
                 cp[k].srcOffset = sp.off + o;
                 o += cp[k].size;
             }
-            vkCmdCopyBuffer(cb, sp.buf, e->buf, (uint32_t)nc, cp);
+            copy_buffer(cb, sp.buf, e->buf, (uint32_t)nc, cp);
         }
         for (int k = 0; k < nc; k++) prof_vc_copied += cp[k].size;
         e->gen = g;

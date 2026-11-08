@@ -474,6 +474,7 @@ static void create_device(void) {
     VkPhysicalDeviceVertexAttributeDivisorFeaturesEXT divisor_have = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_ATTRIBUTE_DIVISOR_FEATURES_EXT};
     VkPhysicalDeviceFaultFeaturesEXT fault_have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FAULT_FEATURES_EXT};
+    VkPhysicalDeviceMaintenance5FeaturesKHR maintenance5_have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR};
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executable_have = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
     VkPhysicalDeviceFeatures2 optional = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
@@ -482,6 +483,7 @@ static void create_device(void) {
     QUERY_OPTIONAL(VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME, border_have);
     QUERY_OPTIONAL(VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME, divisor_have);
     QUERY_OPTIONAL(VK_EXT_DEVICE_FAULT_EXTENSION_NAME, fault_have);
+    QUERY_OPTIONAL(VK_KHR_MAINTENANCE_5_EXTENSION_NAME, maintenance5_have);
     QUERY_OPTIONAL(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME, executable_have);
 #undef QUERY_OPTIONAL
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &optional);
@@ -521,6 +523,13 @@ static void create_device(void) {
     }
 #endif
     if (g_vk.divisor) ext[n_ext++] = VK_EXT_VERTEX_ATTRIBUTE_DIVISOR_EXTENSION_NAME;
+#ifdef __ANDROID__
+    // BOTW draws points (one draw a frame) from a vertex shader that writes no PointSize: their size is undefined without
+    // maintenance5, and 1 with it. Mali-G925 draws 1 pixel either way (measured). LARECOMP_NO_MAINTENANCE5=1: not asked for.
+    bool maintenance5 = maintenance5_have.maintenance5 && (g_vk.api >= VK_API_VERSION_1_3 || cg[OPT_DR]) &&
+                        !env_on("LARECOMP_NO_MAINTENANCE5");
+    if (maintenance5) ext[n_ext++] = VK_KHR_MAINTENANCE_5_EXTENSION_NAME;
+#endif
     g_vk.host_import = has_ext(ep, ne, VK_EXT_EXTERNAL_MEMORY_HOST_EXTENSION_NAME);  // guest heap as a GPU buffer (exec.c)
 #ifdef __ANDROID__
     // Samsung's Xclipse driver accepts the import, then fails the first submission (VK_ERROR_UNKNOWN on a Galaxy S26,
@@ -832,6 +841,8 @@ static void create_device(void) {
             n_ext -= 2;  // (the two map extensions were the last added)
         }
     }
+    VkPhysicalDeviceMaintenance5FeaturesKHR m5 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR, .maintenance5 = VK_TRUE};
+    if (maintenance5) { m5.pNext = f.pNext; f.pNext = &m5; LOG("[vk-cap] maintenance5 on\n"); }
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pex = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, .pipelineExecutableInfo = VK_TRUE};
     if (g_vk.exec_stats) { pex.pNext = f.pNext; f.pNext = &pex; }
