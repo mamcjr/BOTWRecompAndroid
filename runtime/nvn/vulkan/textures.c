@@ -1669,12 +1669,46 @@ VkSampler vk_sampler_plain(NvnSamplerDesc *d) {
     return p;
 }
 
+// A format the GPU can't filter linearly (no SAMPLED_IMAGE_FILTER_LINEAR): undefined through a linear sampler. Mali's
+// drivers list R16G16B16A16_UNORM so - BOTW's grass reads one in its vertex shader, and an older driver returned
+// garbage: the grass stretched and black (#307 Immortalis-G715, #258 G68; #244, Propinbo). Those take the sampler's
+// nearest twin instead (exec.c). LARECOMP_NO_FILTER_FALLBACK=1: as before.
+bool vk_format_filters_linear(VkFormat f) {
+    static struct { VkFormat f; bool ok; } cache[64];
+    static int n;
+    for (int i = 0; i < n; i++) if (cache[i].f == f) return cache[i].ok;
+    bool ok = format_supports(f, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) || getenv("LARECOMP_NO_FILTER_FALLBACK");
+    if (!ok) LOG("[vk] format %d can't be filtered linearly on this GPU: its textures sampled nearest\n", f);
+    if (n < 64) cache[n].f = f, cache[n].ok = ok, n++;
+    return ok;
+}
+
+static VkSampler make_sampler_nearest(const NvnSamplerDesc *d, bool compare);
+VkSampler vk_sampler_nearest(NvnSamplerDesc *d, bool compare) {
+    static struct { const NvnSamplerDesc *d; bool compare; VkSampler s; } tab[256];
+    static int n, next;
+    for (int i = 0; i < n; i++) if (tab[i].d == d && tab[i].compare == compare) return tab[i].s;
+    VkSampler s = make_sampler_nearest(d, compare);
+    int i = n < 256 ? n++ : next++ % 256;  // (full: the oldest goes; its sampler stays alive)
+    tab[i].d = d, tab[i].compare = compare, tab[i].s = s;
+    return s;
+}
+
+static bool g_force_nearest;  // (make_sampler_nearest)
+static VkSampler make_sampler_nearest(const NvnSamplerDesc *d, bool compare) {
+    g_force_nearest = true;
+    VkSampler s = make_sampler(d, compare);
+    g_force_nearest = false;
+    return s;
+}
+
 static VkSampler make_sampler(const NvnSamplerDesc *d, bool compare) {
     VkSamplerCreateInfo si = {.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO};
     si.magFilter = d->mag_filter == 1 ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     uint32_t mf = d->min_filter;
     si.minFilter = (mf == 1 || mf == 3 || mf == 5) ? VK_FILTER_LINEAR : VK_FILTER_NEAREST;
     si.mipmapMode = mf == 4 || mf == 5 ? VK_SAMPLER_MIPMAP_MODE_LINEAR : VK_SAMPLER_MIPMAP_MODE_NEAREST;
+    if (g_force_nearest) si.magFilter = si.minFilter = VK_FILTER_NEAREST, si.mipmapMode = VK_SAMPLER_MIPMAP_MODE_NEAREST;
     VkSamplerAddressMode modes[3];
     bool border = false;
     for (int i = 0; i < 3; i++) {

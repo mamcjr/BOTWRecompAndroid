@@ -583,6 +583,23 @@ static bool null_read(ucontext_t *uc, uint64_t fa, uint64_t pc) {
     return true;
 }
 
+// Native mode: the game's code calling a null function pointer (often one null_read just gave as zero) - the CPU jumps
+// to an address under 64 KB and faults there. Back to the caller with 0, as Recompiled mode does (dispatch.c
+// null_call): a Mali-G720 on 1.0.0 crashed so at "Open your eyes" (#305, after a read at 0x20). Only when the return
+// address is the game's code. LARECOMP_NO_NULL_CALLS=1: off.
+static bool null_call_native(ucontext_t *uc, uint64_t pc) {
+    static int off = -1;
+    if (off < 0) off = getenv("LARECOMP_NO_NULL_CALLS") != NULL;
+    uint64_t lr = uc->uc_mcontext.regs[30];
+    if (off || pc >= 0x10000 || lr < GUEST_LO || lr >= GUEST_HI || (lr & 3)) return false;
+    uc->uc_mcontext.regs[0] = 0;
+    uc->uc_mcontext.pc = lr;
+    static int n;
+    if (n++ < 10) fprintf(stderr, "[android] the game's code called address %#llx: returned 0 (lr %llx)\n",
+                          (unsigned long long)pc, (unsigned long long)lr);
+    return true;
+}
+
 // (installed through ART's signal chain: ART still handles its own faults first)
 static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     ucontext_t *uc = ctx;
@@ -600,6 +617,7 @@ static void crash_handler(int sig, siginfo_t *si, void *ctx) {
     if (rt_fault_watch(fa, pc)) return;  // (debugging watches first: a watched page may be write-tracked too)
     {   // (the null page read: zero, above)
         extern int g_fault_wnr;
+        if (sig == SIGSEGV && pc < 0x10000 && null_call_native(uc, pc)) return;  // (a jump to a null function pointer)
         if (sig == SIGSEGV && g_fault_wnr != 1 && null_read(uc, fa, pc)) return;
     }
     if (sig == SIGSEGV && wt_fault(fa)) return;  // (write tracking - whatever the code: mprotect decides, #70)
