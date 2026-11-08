@@ -117,10 +117,11 @@ sponsor me on GitHub, Ko-fi or Buy Me a Coffee. Your support helps me dedicate t
 working on future releases. Sponsorship is entirely optional: it does not unlock features or guarantee specific fixes.
 Bug reports, device tests, and contributions are also greatly appreciated.
 
-This month's goal is to pay for Claude Code Max ($100/month), the AI coding tool I use to work on this project. The
-badge below shows how much has come in this month, across all platforms; I update it by hand.
+This month's goal is to pay for Claude Code Max ($100/month), the AI coding tool I use to work on my projects. The
+badge below shows how much has come in this month, across all platforms and shared by BOTWRecompAndroid, TOTKDroid
+and LASRecompAndroid; I update it by hand.
 
-[![Claude Code Max goal](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmamcjr%2FBOTWRecompAndroid%2Fmain%2F.github%2Fdonation-goal.json&query=%24.raised&prefix=%24&color=2EA043&logo=claude&logoColor=white&label=Claude%20Code%20Max%20goal&suffix=%20%2F%20%24100%20this%20month)](.github/donation-goal.json)
+[![Claude Code Max goal](https://img.shields.io/badge/dynamic/json?url=https%3A%2F%2Fraw.githubusercontent.com%2Fmamcjr%2FBOTWRecompAndroid%2Fmain%2F.github%2Fdonation-goal.json&query=%24.raised&prefix=%24&color=2EA043&logo=claude&logoColor=white&label=Claude%20Code%20Max%20goal&suffix=%20%2F%20%24100%20this%20month)](https://github.com/mamcjr/BOTWRecompAndroid/blob/main/.github/donation-goal.json)
 
 [![Sponsor on GitHub](https://img.shields.io/badge/Sponsor-on%20GitHub-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/mamcjr)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-mamcjr-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/mamcjr)
