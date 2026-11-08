@@ -57,6 +57,7 @@ uint64_t prof_up_cum;  // (the same, never reset)
 #define PROF_ADD(v) do { if (prof) v += SDL_GetTicksNS() - prof_t0_; } while (0)
 static _Atomic int stat_compiles;
 static _Atomic int live_programs, live_gpipes, live_cpipes;  // (made so far: the memory mappings log, vk_live_counts)
+static void pipe_evict(void);  // (graphics pipelines: below)
 static _Atomic uint64_t stat_skipped_building;  // (never zeroed; hle/benchmark.c) draws skipped: their pipeline is still compiling
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
@@ -889,6 +890,7 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     cum_submits++;
     ring_retire();
     vk_collect_dead();
+    pipe_evict();
 }
 
 void renderer_submit(void) { vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE); }
@@ -3006,9 +3008,67 @@ typedef struct {
     PipeFx fx;
 } PipeKey;
 
-typedef struct { PipeKey k; uint64_t hash; VkPipeline pipe; _Atomic int state; } Pipe;  // state: 0 building, 1 ready, 2 failed
+typedef struct {
+    PipeKey k;
+    uint64_t hash;
+    VkPipeline pipe;
+    _Atomic int state;   // 0 building, 1 ready, 2 failed
+    uint64_t used, seq;  // when it was last bound (ns), and that submission (pipe_evict)
+    bool evicted;        // its VkPipeline destroyed by pipe_evict: built again at its next use
+} Pipe;
 #define PIPE_TAB 8192
 static struct { uint64_t key; Pipe *pipe; } pipe_tab[PIPE_TAB];
+static Pipe *last_pipeline;  // (draw_'s: the previous draw's, reused when nothing changed)
+
+// Pipelines kept: on a Mali (and on low RAM) at most this many, the ones unused longest destroyed. Its driver keeps
+// ~0.4 MB of the process's memory and a GPU mapping for each, and BOTW makes thousands over a long session: 5500
+// pipelines, 2.3 GB of malloc and 61k memory mappings when a Mali-G720 crashed after ~30 minutes (#310, #316; the
+// "fps drops after a while" reports). One unused for 30 s goes; built again (from the pipeline cache) at its next
+// use, its draws skipped meanwhile as for a new one. LARECOMP_PIPE_KEEP=<n> (0: never).
+static int pipe_keep(void) {
+    static int keep = -1;
+    if (keep < 0) {
+        extern bool vk_low_ram(void);
+        const char *e = getenv("LARECOMP_PIPE_KEEP");
+        keep = e ? atoi(e) : (g_vk.props.vendorID == 0x13B5 || vk_low_ram()) ? 1500 : 0;
+        if (keep > 0) LOG("[vk] pipelines kept: at most %d (the least recently used ones destroyed)\n", keep);
+    }
+    return keep;
+}
+
+static void pipe_evict(void) {
+    static uint64_t next;
+    uint64_t now = SDL_GetTicksNS();
+    int keep = pipe_keep();
+    if (keep <= 0 || now < next) return;
+    next = now + 10000000000ull;  // (every 10 s)
+    int live = 0;
+    for (int i = 0; i < PIPE_TAB; i++) {
+        Pipe *p = pipe_tab[i].pipe;
+        if (p && !p->evicted && atomic_load(&p->state) == 1) live++;
+    }
+    if (live <= keep) return;
+    uint64_t done = vk_completed_seq();
+    int target = keep * 4 / 5, gone = 0;
+    // oldest first: two passes, the unused for 2 minutes, then for 30 s
+    static const uint64_t ages[2] = {120000000000ull, 30000000000ull};
+    for (int pass = 0; pass < 2 && live > target; pass++) {
+        uint64_t age = ages[pass];
+        for (int i = 0; i < PIPE_TAB && live > target; i++) {
+            Pipe *p = pipe_tab[i].pipe;
+            if (!p || p->evicted || p == last_pipeline || atomic_load(&p->state) != 1) continue;
+            if (p->used + age > now || p->seq > done) continue;
+            vkDestroyPipeline(g_vk.dev, p->pipe, NULL);
+            p->pipe = VK_NULL_HANDLE;
+            atomic_store(&p->state, 0);
+            p->evicted = true;
+            atomic_fetch_sub(&live_gpipes, 1);  // (built again: counted again)
+            live--, gone++;
+        }
+    }
+    static int nlog;
+    if (gone && nlog++ < 20) LOG("[vk] pipelines: %d unused ones destroyed, %d kept\n", gone, live);
+}
 
 // 8 bytes a step (PipeKey is ~700 bytes, hashed per draw); in-memory tables only - hmix values are compared with
 // stored constants (fragment-shader hashes) and must not change.
@@ -6637,7 +6697,7 @@ static void draw_(CmdRec *r, bool indexed) {
                 for (int i = 0; i < 4; i++) fx.sop[f][i] = (uint8_t)sface[f][i];
     }
     // ---- pipeline
-    static Pipe *last_pipeline;
+    // (last_pipeline: file scope - pipe_evict leaves it alone)
     static int reuse = -1, verify;
     if (reuse < 0) {
         const char *e = getenv("LARECOMP_VK_PIPE_REUSE");
@@ -6719,6 +6779,9 @@ static void draw_(CmdRec *r, bool indexed) {
             pipe_tab[pslot].key = ph;
             pipe_tab[pslot].pipe = pp;
             run_job(build_pipeline, pp);
+        } else if (pp->evicted) {  // (destroyed by pipe_evict: built again)
+            pp->evicted = false;
+            run_job(build_pipeline, pp);
         }
         // Verification rebuilds the original key to detect missing invalidations during later device tests.
         if (hit && memcmp(&k, &last_pipeline->k, sizeof k)) {
@@ -6738,6 +6801,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; stat_pipe_binds++; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
+    pp->used = SDL_GetTicksNS(), pp->seq = vk_pending_seq();  // (pipe_evict)
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
 
