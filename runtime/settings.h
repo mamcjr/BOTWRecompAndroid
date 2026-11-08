@@ -70,6 +70,7 @@ typedef struct {
     float touch_pos2[TOUCH_NCTL2][2];
     float touch_size[TOUCH_NCTL], touch_size2[TOUCH_NCTL2];  // each control's own size (times touch_scale; 0: 1)
     float touch_aim_sens;  // the icon layout's bow / throw drag: how fast it turns the aim (1: the default)
+    bool touch_minimap_top;  // the minimap group up at the top while the touch controls are up (#254: off keeps it in place)
     bool touch_talk;       // the icon layout gives way to a talk: only the stick, A and B (false: all its controls stay)
     float touch_scale, touch_opacity;
     // FPS-style touch play (ui/touch_controls.mm): the camera by dragging a finger (its speed tilts the right stick)

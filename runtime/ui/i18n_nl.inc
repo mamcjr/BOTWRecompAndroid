@@ -629,3 +629,7 @@
  "Frans (Canada)"},
 {"A mod for the DLC is on, but the DLC isn't set up (Settings > Files > DLC). Mods made with it, like Relics of the Past, close the game at the title screen without it.",
  "Een mod voor de DLC staat aan, maar de DLC is niet ingesteld (Instellingen > Bestanden > DLC). Mods die ermee gemaakt zijn, zoals Relics of the Past, sluiten het spel zonder de DLC af in het titelscherm."},
+{"Minimap at the top",
+ "Minikaart bovenaan"},
+{"While the touch controls are on the screen, the minimap and its gauges move to the top right, away from the buttons. Off: they stay in their usual place, under the buttons.",
+ "Zolang de aanraakbediening op het scherm staat, gaan de minikaart en haar meters naar rechtsboven, weg van de knoppen. Uit: ze blijven op hun gewone plek, onder de knoppen."},

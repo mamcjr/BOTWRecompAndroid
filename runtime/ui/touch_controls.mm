@@ -539,7 +539,7 @@ static void mode_check(void) {
 
 // The on-screen controls are up (no controller, the setting on): the game's minimap group goes up to the top right,
 // out of the buttons' way (hle/widescreen.c widescreen_hud_top); with a controller it stays where the game puts it
-extern "C" bool touch_hud_top(void) { return !hide_auto && g_settings.touch_controls; }
+extern "C" bool touch_hud_top(void) { return !hide_auto && g_settings.touch_controls && g_settings.touch_minimap_top; }
 
 // ---- layout editing (the Controls tab)
 extern "C" bool touch_edit_available(void) {  // the overlay is up (in game): there is something to drag

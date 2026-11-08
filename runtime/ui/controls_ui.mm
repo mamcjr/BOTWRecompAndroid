@@ -97,6 +97,9 @@ static void touch_layout_draw(void) {
         if (ImGui::Checkbox(tr("Simple controls in talks"), &g_settings.touch_talk)) settings_save();
         hint("In a conversation only the stick, A and B stay on the screen. Off: all the buttons stay.");
     }
+    if (ImGui::Checkbox(tr("Minimap at the top"), &g_settings.touch_minimap_top)) settings_save();  // (hle/widescreen.c, #254)
+    hint("While the touch controls are on the screen, the minimap and its gauges move to the top right, away from the "
+         "buttons. Off: they stay in their usual place, under the buttons.");
     ImGui::Spacing();
     if (ImGui::Checkbox(tr("Camera by dragging"), &g_settings.touch_drag_camera)) settings_save();
     hint("The camera turns while a finger moves on the right half of the screen and stops when it stops, as in phone "

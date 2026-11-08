@@ -50,6 +50,7 @@ Settings g_settings = {
     .touch_drag_sens = 1.0f,
     .touch_aim_sens = 1.0f,
     .touch_talk = true,
+    .touch_minimap_top = true,
     .gpu_heap = -1,
     .inplace_reads = -1,
     .turnip_lrz = -1,
@@ -293,6 +294,7 @@ void settings_load(void) {
         else if (!strcmp(key, "touch_scheme")) g_settings.touch_scheme = atoi(val);
         else if (!strcmp(key, "touch_aim_sens")) g_settings.touch_aim_sens = (float)atof(val);
         else if (!strcmp(key, "touch_talk")) g_settings.touch_talk = atoi(val) != 0;
+        else if (!strcmp(key, "touch_minimap_top")) g_settings.touch_minimap_top = atoi(val) != 0;
         else if (!strcmp(key, "touch_sizes") || !strcmp(key, "touch_icons_sizes")) {  // (a size per control)
             bool two = key[6] == 'i';
             float *s = two ? g_settings.touch_size2 : g_settings.touch_size;
@@ -384,6 +386,7 @@ void settings_save(void) {
     fprintf(f, "touch_drag_camera = %d\ntouch_drag_sens = %.2f\ntouch_sticks_hidden = %d\ntouch_half_areas = %d\n",
             g_settings.touch_drag_camera, g_settings.touch_drag_sens, g_settings.touch_sticks_hidden,
             g_settings.touch_half_areas);
+    fprintf(f, "touch_minimap_top = %d\n", g_settings.touch_minimap_top ? 1 : 0);
     fprintf(f, "stick_deadzone = %.2f\n", g_settings.stick_deadzone);
     fprintf(f, "touch_scale = %.2f\ntouch_opacity = %.2f\ntouch_layout = ", g_settings.touch_scale, g_settings.touch_opacity);
     for (int i = 0; i < TOUCH_NCTL; i++)

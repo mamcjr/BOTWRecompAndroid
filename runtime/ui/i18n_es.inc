@@ -645,3 +645,7 @@
  "Al editar, toca un botón para seleccionarlo; luego - y + cambian solo su tamaño."},
 {"Aim sensitivity (bow, throw)",
  "Sensibilidad de la puntería (arco, lanzar)"},
+{"Minimap at the top",
+ "Minimapa arriba"},
+{"While the touch controls are on the screen, the minimap and its gauges move to the top right, away from the buttons. Off: they stay in their usual place, under the buttons.",
+ "Con los controles táctiles en pantalla, el minimapa y sus indicadores pasan a la esquina superior derecha, lejos de los botones. Desactivado: se quedan en su lugar habitual, bajo los botones."},

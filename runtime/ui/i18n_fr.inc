@@ -629,3 +629,7 @@
  "Français (Canada)"},
 {"A mod for the DLC is on, but the DLC isn't set up (Settings > Files > DLC). Mods made with it, like Relics of the Past, close the game at the title screen without it.",
  "Un mod pour le DLC est activé, mais le DLC n'est pas configuré (Réglages > Fichiers > DLC). Les mods faits avec lui, comme Relics of the Past, ferment le jeu à l'écran titre sans lui."},
+{"Minimap at the top",
+ "Mini-carte en haut"},
+{"While the touch controls are on the screen, the minimap and its gauges move to the top right, away from the buttons. Off: they stay in their usual place, under the buttons.",
+ "Quand les commandes tactiles sont à l'écran, la mini-carte et ses jauges passent en haut à droite, loin des boutons. Désactivé : elles restent à leur place habituelle, sous les boutons."},

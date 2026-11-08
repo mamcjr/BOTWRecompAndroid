@@ -629,3 +629,7 @@
  "Французский (Канада)"},
 {"A mod for the DLC is on, but the DLC isn't set up (Settings > Files > DLC). Mods made with it, like Relics of the Past, close the game at the title screen without it.",
  "Включён мод для DLC, но DLC не установлено (Настройки > Файлы > DLC). Моды, сделанные под него, как Relics of the Past, без него закрывают игру на титульном экране."},
+{"Minimap at the top",
+ "Миникарта сверху"},
+{"While the touch controls are on the screen, the minimap and its gauges move to the top right, away from the buttons. Off: they stay in their usual place, under the buttons.",
+ "Пока сенсорное управление на экране, миникарта и её индикаторы переходят в правый верхний угол, подальше от кнопок. Выкл.: они остаются на обычном месте, под кнопками."},

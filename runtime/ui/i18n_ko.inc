@@ -629,3 +629,7 @@
  "프랑스어 (캐나다)"},
 {"A mod for the DLC is on, but the DLC isn't set up (Settings > Files > DLC). Mods made with it, like Relics of the Past, close the game at the title screen without it.",
  "DLC용 모드가 켜져 있지만 DLC가 설정되지 않았습니다 (설정 > 파일 > DLC). Relics of the Past처럼 DLC로 만든 모드는 DLC가 없으면 타이틀 화면에서 게임이 종료됩니다."},
+{"Minimap at the top",
+ "미니맵을 위로"},
+{"While the touch controls are on the screen, the minimap and its gauges move to the top right, away from the buttons. Off: they stay in their usual place, under the buttons.",
+ "터치 컨트롤이 화면에 있는 동안 미니맵과 게이지가 버튼을 피해 오른쪽 위로 옮겨집니다. 끄면: 원래 자리, 버튼 아래에 그대로 있습니다."},

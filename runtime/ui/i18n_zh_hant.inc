@@ -629,3 +629,7 @@
  "法語（加拿大）"},
 {"A mod for the DLC is on, but the DLC isn't set up (Settings > Files > DLC). Mods made with it, like Relics of the Past, close the game at the title screen without it.",
  "已啟用一個 DLC 模組，但尚未設定 DLC（設定 > 檔案 > DLC）。像 Relics of the Past 這樣以 DLC 製作的模組，沒有 DLC 時會在標題畫面關閉遊戲。"},
+{"Minimap at the top",
+ "小地圖在上方"},
+{"While the touch controls are on the screen, the minimap and its gauges move to the top right, away from the buttons. Off: they stay in their usual place, under the buttons.",
+ "觸控操作顯示在畫面上時，小地圖及其儀表移到右上角，避開按鈕。關閉：它們留在原來的位置，在按鈕下方。"},
