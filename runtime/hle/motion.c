@@ -261,8 +261,23 @@ void motion_event(const SDL_Event *e) {
     if (e->type == SDL_EVENT_SENSOR_UPDATE) {
         if (source == 2 || (source == 0 && SDL_GetTicksNS() < pad_until_ns)) return;
         float s[3];
+        SDL_SensorType type = SDL_GetSensorTypeForID(e->sensor.which);
         to_screen(e->sensor.data, s);
-        feed(SDL_GetSensorTypeForID(e->sensor.which), s, e->sensor.sensor_timestamp ? e->sensor.sensor_timestamp : SDL_GetTicksNS(), true);
+        {   // Turning the phone round (landscape to the other landscape): the screen's axes flip part way, when Android
+            // turns the game, and what the sensors read on the way (the hand's tilt, the way down sweeping round) went into
+            // the attitude in one frame before and the other after - the aim further up with each turn. Held against the
+            // screen, the phone is as it was before the half turn: while it turns fast about the screen's normal (over ~115
+            // deg/s) and for 0.4 s after the screen turned, its readings are left out - the attitude kept as it was.
+            static uint64_t quiet_until;
+            static int last_turns = -1;
+            uint64_t now = SDL_GetTicksNS();
+            int t = screen_turns();
+            if (last_turns >= 0 && t != last_turns) quiet_until = now + 400000000ull;
+            last_turns = t;
+            if (type == SDL_SENSOR_GYRO && fabsf(s[2]) > 2.0f) quiet_until = now + 250000000ull;
+            if (now < quiet_until) return;
+        }
+        feed(type, s, e->sensor.sensor_timestamp ? e->sensor.sensor_timestamp : SDL_GetTicksNS(), true);
     } else if (e->type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE) {
         if (source == 1) return;
         if (source == 2) {
