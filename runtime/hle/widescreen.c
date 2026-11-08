@@ -126,6 +126,15 @@ bool widescreen_in_menu(void) {
     static uint64_t last;
     uint64_t now = renderer_present_count();
     if (framepace_in_menu()) last = now + 1;
+    if (ENV("LARECOMP_LOG_MENU")) {  // (a test: per frame, the game's menu flag and whether the world was drawn)
+        static uint64_t logged;
+        extern uint64_t vk_scene_frame(void);
+        if (now != logged) {
+            logged = now;
+            LOG("[widescreen] frame %llu: menu %d, world drawn at %llu\n", (unsigned long long)now, framepace_in_menu(),
+                (unsigned long long)vk_scene_frame());
+        }
+    }
     if (!last || now >= last + 30) return false;
     // The world drawn again since: the menu has closed, not turned a page (its pages don't draw the 3D scene). Waiting
     // the whole 30 frames, the HUD sat in the 16:9 middle for a second after each pause, then jumped out to the edges

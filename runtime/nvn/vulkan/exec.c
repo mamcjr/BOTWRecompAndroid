@@ -3738,19 +3738,34 @@ static bool up_patch_frag(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *
 // rectangle drawn: cb3[33] (size, then origin), in the textured panes' vertex shaders and the window panes' alike (a
 // window's frame pieces each; cb3[11] is the whole window's size - by it, every piece of the menu's 4590-wide windows
 // counted, the hearts and the rupee too, and moved out g times farther: they jumped when the menu's page turned).
-// Off the middle too when it still covers the wide screen there (half its width past the offset by 960 units: a
-// menu's dark bands, 4590 wide, slide with its pages - clipped as narrower panes, they left lighter strips each side).
+// Off the middle too when it still covers the wide screen there (half its width past the offset by the wide screen's
+// half, 640 g units: a menu's dark bands, 4590 wide, slide with its pages - clipped as narrower panes, they left lighter
+// strips each side). A fixed 960 (g up to 1.5) clipped them too early on a 20:9 screen: its sides flashed lighter as
+// the inventory's pages turned (#195).
+static float wide_half(void) {
+    extern float widescreen_factor(void);
+    return 640.0f * widescreen_factor() + 1.0f;
+}
 static bool full_width_pane(const float *f) {
     float ax = fabsf(f[19]);
-    return f[132] >= 1279.5f && fabsf(f[134] + f[132] * 0.5f) < 0.5f && (ax < 1.0f || f[132] * 0.5f - ax >= 960.0f);
+    return f[132] >= 1279.5f && fabsf(f[134] + f[132] * 0.5f) < 0.5f && (ax < 1.0f || f[132] * 0.5f - ax >= wide_half());
 }
 
 // ... or a piece of a window that is (cb3[11]: the window's size): not clipped to the 16:9 part in the menus - the
 // menu's dimming is such a window, drawn in pieces (clipped, the cutout at its sides came back). Not moved by it.
+// A narrow piece wholly past the layout's side is no part of the screen's cover, though: the inventory's black box
+// (x 716, y -170, every other frame), a piece of one of its 4590-wide windows, flickered at the screen's right edge (#195).
 static bool full_width_window(const float *f) {
     float ax = fabsf(f[19]);
+    if (!full_width_pane(f) && ax - f[132] * 0.5f > 640.0f && f[132] < 400.0f && !ENV("LARECOMP_WINDOW_PIECES_WIDE"))
+        return false;
+    // Its own rectangle across the whole wide screen: the inventory's dark layer (x 0, 4542 wide from -2295) - by the
+    // window's size alone, which that pane's constants held only in some frames (4590, then 0), it was clipped to the
+    // 16:9 part every few frames and the screen's sides flashed lighter (#195)
+    if (f[132] >= 1279.5f && f[132] < 100000.0f && f[19] + f[134] <= -wide_half() && f[19] + f[134] + f[132] >= wide_half())
+        return true;
     return full_width_pane(f) || (f[44] >= 1279.5f && f[44] < 100000.0f && f[45] > 0 && f[46] == 0 && f[47] == 0 &&
-                                  (ax < 1.0f || f[44] * 0.5f - ax >= 960.0f));
+                                  (ax < 1.0f || f[44] * 0.5f - ax >= wide_half()));
 }
 
 // LARECOMP_LOG_PANEFIX=1 (diagnosis): each layout draw cbuf_info changes for the wide screen, and why
