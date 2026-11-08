@@ -126,7 +126,13 @@ bool widescreen_in_menu(void) {
     static uint64_t last;
     uint64_t now = renderer_present_count();
     if (framepace_in_menu()) last = now + 1;
-    return last && now < last + 30;
+    if (!last || now >= last + 30) return false;
+    // The world drawn again since: the menu has closed, not turned a page (its pages don't draw the 3D scene). Waiting
+    // the whole 30 frames, the HUD sat in the 16:9 middle for a second after each pause, then jumped out to the edges
+    // (#261, #259). LARECOMP_MENU_WAIT_FULL=1: the old wait.
+    extern uint64_t vk_scene_frame(void);
+    if (!ENV("LARECOMP_MENU_WAIT_FULL") && vk_scene_frame() >= last) return false;
+    return true;
 }
 
 // Playing in the world: not the title or a loading screen, no menu of the game's up (pause, map) - the touch controls'
@@ -160,9 +166,18 @@ void widescreen_talk_seen(void) {
 float widescreen_hud_top(float x, float y) {
     extern bool touch_hud_top(void);
     extern uint64_t renderer_present_count(void);
-    if (x < 290.0f || y > -140.0f || y < -315.0f || !touch_hud_top() || !in_world() || framepace_in_menu()) return 0;
-    if (!minimap_frame || renderer_present_count() - minimap_frame > 3) return 0;
-    return 490.0f;
+    if (x < 290.0f || y > -140.0f || y < -315.0f || !touch_hud_top()) return 0;
+    int why = !in_world() ? 1 : framepace_in_menu() ? 2 : !minimap_frame || renderer_present_count() - minimap_frame > 3 ? 3 : 0;
+    if (ENV("LARECOMP_LOG_HUDTOP")) {  // (a test: each change of the group's place, and why)
+        static int last = -1;
+        if (why != last) {
+            static const char *const name[] = {"up", "down: not in the world", "down: a menu", "down: no minimap disc"};
+            LOG("[widescreen] frame %llu: minimap group %s (pane %.0f, %.0f; disc last at frame %llu)\n",
+                (unsigned long long)renderer_present_count(), name[why], x, y, (unsigned long long)minimap_frame);
+            last = why;
+        }
+    }
+    return why ? 0 : 490.0f;
 }
 
 // Where the minimap is on a w x h screen, moved up as above (its centre at layout 515, -245; about 100 units across):
