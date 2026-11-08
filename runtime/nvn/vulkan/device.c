@@ -1105,6 +1105,12 @@ int vk_between_fps(void) {
     return fps;
 }
 
+// (hle/benchmark.c) the screen's refresh rate now
+double vk_display_hz(void) {
+    const SDL_DisplayMode *m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
+    return m ? m->refresh_rate : 0;
+}
+
 // ... and while it's set the window says so (40 or 45 fps content): a system that can switch to a rate where it's even
 // may (a 120 Hz screen that offers 90 for 45); otherwise the system's own choice again. Asked again for a new window
 // (from the background).

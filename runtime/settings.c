@@ -15,7 +15,7 @@
 #define SETTINGS_FILE settings_file()
 
 // LARECOMP_SETTINGS=<path>: another settings file (test runs never touch the player's larecomp.ini)
-static const char *settings_file(void) {
+const char *settings_file(void) {
     const char *e = getenv("LARECOMP_SETTINGS");
     if (e && *e) return e;
     static int moved;  // (the project's former name: the player's settings carry over, once)

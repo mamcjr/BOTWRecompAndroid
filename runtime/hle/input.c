@@ -379,6 +379,15 @@ void input_frame(uint64_t frame) {
     extern void watch_arm(void);
     watch_arm();
     host_test_frame(frame);
+    extern bool g_benchmark;
+    extern void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry);
+    if (g_benchmark) {  // (its button on the title screen and its stick: hle/benchmark.c)
+        uint64_t b;
+        int32_t lx, ly, rx, ry;
+        benchmark_input(&b, &lx, &ly, &rx, &ry);
+        script_buttons = b, script_lx = lx, script_ly = ly, script_rx = rx, script_ry = ry;
+        return;
+    }
     const char *spec = getenv("LARECOMP_INPUT");
     if (!spec) return;
     static const char *const names[] = {"A", "B", "X", "Y", "LSTICK", "RSTICK", "L", "R", "ZL", "ZR", "PLUS",

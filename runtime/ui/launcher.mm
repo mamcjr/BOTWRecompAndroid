@@ -609,6 +609,10 @@ static std::string app_version() {  // BOTWRecompAndroidActivity.appVersion, ask
     env->DeleteLocalRef(act);
     return v;
 }
+extern "C" const char *launcher_app_version(void) {  // (hle/benchmark.c)
+    static std::string v = app_version();
+    return v.c_str();
+}
 
 static void log_folder_read() {  // (BOTWRecompAndroidActivity.logFolderName, once: then from each pick)
     JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();

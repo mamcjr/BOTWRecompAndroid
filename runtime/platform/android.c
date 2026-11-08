@@ -690,11 +690,11 @@ void plat_terminate(void) { _exit(0); }
 // What the activity reports once a second (BOTWRecompAndroidActivity.reportDeviceStats: public Android APIs; apps can't read
 // the battery or most thermal sensors in /sys).
 static pthread_mutex_t g_ds_lock = PTHREAD_MUTEX_INITIALIZER;
-static PlatDeviceStats g_ds = {.batt_temp_c = -1, .batt_pct = -1, .thermal = -1, .headroom = -1};
+static PlatDeviceStats g_ds = {.batt_temp_c = -1, .batt_pct = -1, .thermal = -1, .headroom = -1, .plugged = -1};
 
 JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeDeviceStats(JNIEnv *env, jclass cls, jfloat batt_temp_c,
                                                                             jfloat batt_pct, jfloat watts, jint thermal,
-                                                                            jfloat headroom) {
+                                                                            jfloat headroom, jint plugged) {
     (void)env, (void)cls;
     pthread_mutex_lock(&g_ds_lock);
     g_ds.batt_temp_c = batt_temp_c;
@@ -702,6 +702,7 @@ JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nati
     g_ds.watts = watts;
     g_ds.thermal = thermal;
     g_ds.headroom = headroom;
+    g_ds.plugged = plugged;
     pthread_mutex_unlock(&g_ds_lock);
     // LARECOMP_LOG_POWER=1 (a test, on battery only: on the charger the current is the charger's): the power draw each
     // second with the CPU clusters' clocks, this process's CPU share and the A/B side (LARECOMP_AB)
