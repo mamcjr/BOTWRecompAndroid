@@ -854,6 +854,39 @@ static void uclamp_min_thread(void) {
         LOG("[android] uclamp.min %d for the game's threads: %s\n", want, r ? strerror(errno) : "ok");
 }
 
+// The render thread (vulkan/async.c, ours: no part of the game's job system that LARECOMP_PIN broke) on the fastest
+// cores. Left to the scheduler on a Galaxy Tab A9+ (Snapdragon 695: 2 x A78, 6 x A55) it sat on a little core,
+// 90 ms a frame translating the world, while the game's thread had a big one (2026-11-08). Default: on low RAM
+// (vulkan/exec.c vk_low_ram - the weak phones); LARECOMP_RENDER_BIG=1 / 0.
+void plat_render_thread_pin(void) {
+    const char *e = getenv("LARECOMP_RENDER_BIG");
+    extern bool vk_low_ram(void);
+    if (e ? !atoi(e) : !vk_low_ram()) return;
+    long best = 0, mhz[64] = {0};
+    int n = 0;
+    for (int c = 0; c < 64; c++) {
+        char path[96];
+        snprintf(path, sizeof path, "/sys/devices/system/cpu/cpu%d/cpufreq/cpuinfo_max_freq", c);
+        FILE *f = fopen(path, "re");
+        if (!f) continue;
+        if (fscanf(f, "%ld", &mhz[c]) != 1) mhz[c] = 0;
+        fclose(f);
+        if (mhz[c] > best) best = mhz[c];
+        n = c + 1;
+    }
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    int k = 0;
+    for (int c = 0; c < n; c++)
+        if (mhz[c] == best) {
+            CPU_SET(c, &set);
+            k++;
+        }
+    if (!best || k == 0 || k == n) return;
+    int r = sched_setaffinity(0, sizeof set, &set);
+    LOG("[android] render thread on the %d fastest cores (%ld MHz): %s\n", k, best / 1000, r ? strerror(errno) : "ok");
+}
+
 void plat_thread_unpin(void) {
     if (g_pinned) sched_setaffinity(0, sizeof g_all_cores, &g_all_cores);
     uclamp_min_thread();

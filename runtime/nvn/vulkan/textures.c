@@ -510,6 +510,22 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     if (type == VK_IMAGE_TYPE_2D && layers >= 6 && tw == th && samples == 1) flags |= VK_IMAGE_CREATE_CUBE_COMPATIBLE_BIT;
     if (type == VK_IMAGE_TYPE_3D && (usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT))
         flags |= VK_IMAGE_CREATE_2D_ARRAY_COMPATIBLE_BIT;  // (its slices rendered to through 2D views: vk_view)
+    {   // Low RAM (exec.c vk_low_ram, or LARECOMP_HALF_TEXTURES=1 / 0): a mipmapped texture the game only samples starts
+        // at its second level - a quarter of the memory. A 4 GB tablet ran out of memory loading the world with 330 MB
+        // of textures on the GPU (Galaxy Tab A9+, 2026-11-08). Not render targets, linear or small ones.
+        static int half = -1;
+        if (half < 0) {
+            extern bool vk_low_ram(void);
+            const char *e = getenv("LARECOMP_HALF_TEXTURES");
+            half = e ? atoi(e) != 0 : vk_low_ram();
+            if (half) LOG("[vk] textures from their second level (half size): low RAM\n");
+        }
+        b->skip = 0;
+        if (half && !depthfmt && b->rs_group == RS_NONE && !(t->flags & (8 | 0x50)) && type == VK_IMAGE_TYPE_2D &&
+            samples == 1 && levels >= 2 && t->layout.levels >= 2 && tw >= 128 && th >= 128) {
+            tw >>= 1, th >>= 1, levels--, b->skip = 1;
+        }
+    }
     VkImageCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .pNext = fixed && twin ? &fl : NULL,
                             .flags = flags, .imageType = type, .format = vf,
                             .extent = {tw, th, depth}, .mipLevels = levels, .arrayLayers = layers,
@@ -987,10 +1003,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // tiles gave the terrain's heights in stripes: walls stretched into vertical "curtains", spikes in the shrine.
     bool linear = (t->flags & 0x50) != 0;
 #define LIN_STRIDE(row_bytes) ((t->flags & 0x10) ? t->stride : (uint64_t)(row_bytes))
-    uint32_t levels = t->layout.levels < b->levels ? t->layout.levels : b->levels;
+    uint32_t levels = t->layout.levels < b->levels + b->skip ? t->layout.levels : b->levels + b->skip;  // (guest levels; b->skip: the image starts at that one)
     for (uint32_t layer = 0; layer < layers; layer++) {
-        for (uint32_t lv = 0; lv < levels; lv++) {
+        for (uint32_t lv = b->skip; lv < levels; lv++) {
             LevelLayout l = tegra_level(&t->layout, lv);
+            uint32_t il = lv - b->skip;  // (the image's level)
             if (b->astc_bw) {  // blocks -> linear block rows -> RGBA8 texels
                 const uint8_t *src = (const uint8_t *)(uintptr_t)t->addr + layer * layer_size + l.offset;
                 uint8_t *blocks = texture_scratch((uint64_t)l.wb * l.hb * 16);
@@ -1002,8 +1019,8 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
                 uint64_t decode_ns = decode_start ? SDL_GetTicksNS() - decode_start : 0;
                 VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = l.w, .bufferImageHeight = l.h,
-                                        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, layer, 1},
-                                        .imageExtent = {l.w < level_w(b, lv) ? l.w : level_w(b, lv), l.h < level_h(b, lv) ? l.h : level_h(b, lv), 1}};
+                                        .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, il, layer, 1},
+                                        .imageExtent = {l.w < level_w(b, il) ? l.w : level_w(b, il), l.h < level_h(b, il) ? l.h : level_h(b, il), 1}};
                 vk_dl_note_upload((void *)b->image, rg.imageExtent.width, rg.imageExtent.height, rg.imageSubresource.mipLevel);
                 vkCmdCopyBufferToImage(cb, s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
                 texture_trace_record(TEX_TRACE_ASTC, (uint64_t)l.wb * l.hb * 16, (uint64_t)l.w * l.h * 4, decode_ns);
@@ -1018,7 +1035,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, bsize, l.block_height_log2, l.block_depth_log2);
                 if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, blocks, l.w, l.h, l.wb * bsize);
                 uint64_t decode_ns = 0;
-                uint64_t out_size = bc_upload_blocks(cb, b, blocks, l.wb, l.hb, bsize, lv, layer, 0, texture_trace_on() ? &decode_ns : NULL);
+                uint64_t out_size = bc_upload_blocks(cb, b, blocks, l.wb, l.hb, bsize, il, layer, 0, texture_trace_on() ? &decode_ns : NULL);
                 texture_trace_record(TEX_TRACE_BC, (uint64_t)l.wb * l.hb * bsize, out_size, decode_ns);
                 continue;
             }
@@ -1069,16 +1086,16 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             // target sized) can still be filled from the CPU - the save slots' screenshots on the title screen. Its
             // full-size data overran the scaled image (only the width was clamped): GPU writes past the allocation,
             // a device loss below 1x after a seed switch.
-            if (w > level_w(b, lv)) w = level_w(b, lv);
-            if (hh > level_h(b, lv)) hh = level_h(b, lv);
+            if (w > level_w(b, il)) w = level_w(b, il);
+            if (hh > level_h(b, il)) hh = level_h(b, il);
             VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = l.wb * fi->bw, .bufferImageHeight = l.hb * fi->bh,
-                                    .imageSubresource = {b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect, lv,
+                                    .imageSubresource = {b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : b->aspect, il,
                                                          b->depth > 1 ? 0 : layer, 1},
                                     .imageExtent = {w, b->base_type == VK_IMAGE_VIEW_TYPE_1D || b->base_type == VK_IMAGE_VIEW_TYPE_1D_ARRAY ? 1 : hh,
                                                     b->depth > 1 ? d : 1}};
             if (b->aspect == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) continue;  // packed D/S: no CPU layout
             if (b->scalable && b->aspect == VK_IMAGE_ASPECT_COLOR_BIT && b->depth == 1 &&
-                (l.w != level_w(b, lv) || l.h != level_h(b, lv))) {  // (guest-size texels into a scaled allocation)
+                (l.w != level_w(b, il) || l.h != level_h(b, il))) {  // (guest-size texels into a scaled allocation)
                 upload_scaled(cb, b, s, rg, l.w, l.h);
                 continue;
             }
@@ -1248,7 +1265,13 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
         }
     }
     uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
-    uint32_t nlv = v && (v->setmask & 1) && v->num_levels ? v->num_levels : b->levels - (lv0 < b->levels ? lv0 : 0);
+    uint32_t nlv = v && (v->setmask & 1) && v->num_levels ? v->num_levels : b->levels + b->skip - lv0;
+    if (b->skip) {  // (the guest's levels, the image's from b->skip on: create_image)
+        uint32_t cut = lv0 < b->skip ? b->skip - lv0 : 0;
+        lv0 = lv0 > b->skip ? lv0 - b->skip : 0;
+        nlv = nlv > cut ? nlv - cut : 1;
+    }
+    if (!b->skip && !(v && (v->setmask & 1) && v->num_levels)) nlv = b->levels - (lv0 < b->levels ? lv0 : 0);
     uint32_t ly0 = v && (v->setmask & 2) ? v->min_layer : 0;
     uint32_t nly = v && (v->setmask & 2) && v->num_layers ? v->num_layers : b->layers - (ly0 < b->layers ? ly0 : 0);
     if (lv0 >= b->levels) lv0 = b->levels - 1;

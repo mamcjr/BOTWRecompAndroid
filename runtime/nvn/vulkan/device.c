@@ -866,6 +866,11 @@ static void create_device(void) {
     ai.vulkanApiVersion = g_vk.api;
     VmaVulkanFunctions vf = {.vkGetInstanceProcAddr = vkGetInstanceProcAddr, .vkGetDeviceProcAddr = vkGetDeviceProcAddr};
     ai.pVulkanFunctions = &vf;  // (VMA_DYNAMIC_VULKAN_FUNCTIONS: from the driver volk loaded)
+    {   // Low RAM (exec.c vk_low_ram): 32 MB blocks, not VMA's 256 MB - a block taken whole for a few textures (the GPU
+        // memory went from 96 to 480 MB at once on a 4 GB tablet's title screen)
+        extern bool vk_low_ram(void);
+        if (vk_low_ram()) ai.preferredLargeHeapBlockSize = 32ull << 20;
+    }
 #endif
     VK_CHECK(vmaCreateAllocator(&ai, &g_vk.vma));
 
