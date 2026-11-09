@@ -1,6 +1,6 @@
 # Built-in benchmark diagnostics
 
-`LARECOMP_BENCHMARK=<scene file>` enables the harness; without it the counters, clocks and trace allocations are disabled. Scenes use scratch saves and scratch settings. `tools/benchmark-scenes.txt` documents the scene format.
+`LARECOMP_BENCHMARK=<scene file>` enables the harness; without it the counters, clocks and trace allocations are disabled. Scenes use scratch saves and scratch settings. `tools/benchmark-scenes.txt` documents the scene format; `tools/benchmark-scenes-extended.txt` is a 12-scene set of loaded places, described in `tools/benchmark-scenes-extended.md`.
 
 Report format 2 adds a bounded cooling gate at the title before every scene/repeat: `thermal_max = 0..6` (Android thermal status, default -1 disables it), `thermal_wait_s = 1..3600` (default 300). An unavailable status or timeout gives `harness_error` at `cooling`, with elapsed wait and observed statuses. It does not silently proceed with a hot device. The title is still rendered while waiting.
 
