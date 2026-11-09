@@ -2,6 +2,10 @@
 
 [English](README.md) | **Português**
 
+> [!NOTE]
+> **Aviso (até 13 de novembro de 2026):** As respostas às issues serão mais lentas nesta semana, e não há previsão
+> de nova versão antes de 13 de novembro. [Leia o comunicado completo](https://github.com/mamcjr/BOTWRecompAndroid/discussions/329).
+
 [![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/754-the-legend-of-zelda-breath-of-the-wild/)
 
 Um porte de *The Legend of Zelda: Breath of the Wild* (Nintendo Switch, versões **1.0.0, 1.6.0, 1.8.2 e 1.9.0**) para
