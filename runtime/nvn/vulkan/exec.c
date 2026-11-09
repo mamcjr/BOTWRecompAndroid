@@ -968,9 +968,9 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 // ================================================================== transient memory ring
 // 64 MB host-visible chunks (device-local when the GPU exposes resizable BAR); a chunk is reused once every
 // submission that allocated from it has completed, and given back after 10 s unused (down to RING_KEEP of them).
-// Below 6 GB of RAM (a 4 GB tablet: ~1 GB free with the game running), 16 MB chunks and 2 kept - the 64 MB ones, 4
+// On devices sold with up to 4 GB of RAM (reported MemTotal below 4 GiB), 16 MB chunks and 2 kept - the 64 MB ones, 4
 // kept, were a quarter of the GPU memory the Android killed the game over, as the world loaded (Galaxy Tab A9+,
-// 2026-11-08). LARECOMP_LOW_RAM=1 / 0: as below 6 GB / not.
+// 2026-11-08). Leave 6 GB devices on the normal path. LARECOMP_LOW_RAM=1 / 0 overrides detection.
 bool vk_low_ram(void) {
     static int low = -1;
     if (low < 0) {
@@ -981,7 +981,7 @@ bool vk_low_ram(void) {
             if (fscanf(f, "MemTotal: %ld kB", &total_kb) != 1) total_kb = 0;
             fclose(f);
         }
-        low = e ? atoi(e) != 0 : total_kb && total_kb < 6L * 1024 * 1024;
+        low = e ? atoi(e) != 0 : total_kb && total_kb < 4L * 1024 * 1024;
         if (low) LOG("[vk] low on RAM (%ld MB): smaller buffers\n", total_kb >> 10);
     }
     return low;
@@ -5398,8 +5398,8 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
 #define VC_PAGE 4096ull
 #define VC_TAB 8192                   // entries (open addressing)
 #define VC_MAX_RANGE (64ull << 20)    // larger bound ranges: read in place
-// Device-local bytes kept; the least recently used go first. 768 MB, or a twelfth of the RAM below that (~280 MB on a
-// 4 GB phone: a Galaxy Tab A9+, 3.4 GB, ran out of memory loading the world with 928 MB of GPU memory, 2026-11-08).
+// Device-local bytes kept; the least recently used go first. 768 MB normally, or a twelfth of the RAM on the
+// 4 GB low-RAM path (~280 MB on a Galaxy Tab A9+ reporting 3.4 GB, 2026-11-08).
 // LARECOMP_VC_BUDGET_MB=<n>: that many.
 static uint64_t vc_budget(void) {
     static uint64_t b;
@@ -5412,7 +5412,8 @@ static uint64_t vc_budget(void) {
             fclose(f);
         }
         b = 768ull << 20;
-        if (total_kb && (uint64_t)total_kb * 1024 / 12 < b) b = (uint64_t)total_kb * 1024 / 12;
+        if (vk_low_ram() && total_kb && (uint64_t)total_kb * 1024 / 12 < b)
+            b = (uint64_t)total_kb * 1024 / 12;
         if (e && atol(e) > 0) b = (uint64_t)atol(e) << 20;
         LOG("[vk] buffer cache: up to %llu MB on the GPU\n", (unsigned long long)(b >> 20));
     }
