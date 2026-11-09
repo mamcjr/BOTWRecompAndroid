@@ -4,6 +4,8 @@
 
 Report format 2 adds a bounded cooling gate at the title before every scene/repeat: `thermal_max = 0..6` (Android thermal status, default -1 disables it), `thermal_wait_s = 1..3600` (default 300). An unavailable status or timeout gives `harness_error` at `cooling`, with elapsed wait and observed statuses. It does not silently proceed with a hot device. The title is still rendered while waiting.
 
+Link's height is checked against the scene's `pos` Y (tolerance 2 units) after the settle and at the measured window's start and end; outside it the repeat is `harness_error` at `position` (fallen, swimming, standing on a roof). `report.json` and `report.csv` record `y_settle`, `y_window_start` and `y_window_end`.
+
 Between scenes, a 60-second watchdog bounds the wait for guest threads to stop during reboot. A timeout writes `harness_error` at `reboot` and exits the run; it cannot safely reset guest memory while an old thread is still alive.
 
 `frames.csv` includes title, arrival, camera, warmup and measured-window frames; `window=1` selects the latter. Cold-start activity is therefore retained without weakening the warmup. Every row has the 30 fps budget comparison and raw counter deltas. `report.json` aggregates measured-window rows only. `game_period_ms` (also the legacy `frame_ms`) is the game's present-to-present wall period, not a scanout interval. CPU work uses the existing pacer signal: game wall time minus kernel blocking, maxed with render work; it is not pure scheduled CPU time. GPU busy samples use the existing cumulative timestamp queries and are asynchronous estimates; a >100 ms hitch and its next frame have unknown GPU samples. Headroom is budget minus max(CPU,GPU); unknown input yields an empty CSV cell / no percentile sample, never zero.
