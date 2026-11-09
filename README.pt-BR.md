@@ -3,8 +3,8 @@
 [English](README.md) | **Português**
 
 > [!NOTE]
-> **Aviso (até 13 de novembro de 2026):** As respostas às issues serão mais lentas nesta semana, e não há previsão
-> de nova versão antes de 13 de novembro. [Leia o comunicado completo](https://github.com/mamcjr/BOTWRecompAndroid/discussions/329).
+> **Aviso (até 13 de novembro de 2026):** As respostas às issues serão mais lentas nesta semana. A versão 0.3.4 é
+> uma pequena correção do ajuste de RAM; atualizações maiores seguem em espera. [Leia o comunicado](https://github.com/mamcjr/BOTWRecompAndroid/discussions/329).
 
 [![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/754-the-legend-of-zelda-breath-of-the-wild/)
 
@@ -18,7 +18,7 @@ O projeto parte do motor do **[LAS Recomp](https://github.com/peiikai/LASRecomp)
 > [!WARNING]
 > **Beta.** Testado principalmente em um celular (POCO F7 Ultra, Adreno 830, driver Mesa Turnip). O desempenho e a
 > compatibilidade variam entre aparelhos; espere bugs, sobretudo em GPUs ainda não testadas fisicamente. Veja as
-> [notas da 0.3.3-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.3.3-beta) e as
+> [notas da 0.3.4-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.3.4-beta) e as
 > [notas de desenvolvimento](docs/BOTW-PORT.md).
 
 ## Plataforma suportada
@@ -51,6 +51,8 @@ Windows, Linux e macOS podem continuar sendo usados como ambientes de desenvolvi
   embaixo com os controles de toque, e a mira firme ao girar o celular.
 - **0.3.3:** menos crashes em sessões longas na Mali, a grama preta na Mali corrigida, e menos memória usada em
   celulares com menos de 6 GB de RAM.
+- **0.3.4:** o perfil de economia de RAM agora é ativado automaticamente só em aparelhos com até 4 GB. Os de 6 GB
+  voltam às configurações normais de texturas, buffers e cache; a opção manual continua disponível.
 - **Problemas conhecidos:** a grama baixa só aparece de perto; reflexos da água podem acompanhar a câmera; o fundo
   do menu de pausa pode ficar preto no driver padrão da Qualcomm; Link pode piscar no primeiro golpe no modo nativo;
   a chuva cai mais devagar que no console.
@@ -106,7 +108,7 @@ Desde a **0.2.12-beta**, enquanto você joga no mundo, os controles de toque mos
    **Configurações > Arquivos > Driver Vulkan**. Se o app informar que o driver Vulkan é antigo ao abrir, toque e
    segure o ícone do app e escolha **Escolher driver** antes de iniciar o jogo.
 
-Atualizar da 0.2.x para a 0.3.3-beta não exige recompilar o código do jogo. Os shaders são compilados novamente uma
+Atualizar da 0.2.x para a 0.3.4-beta não exige recompilar o código do jogo. Os shaders são compilados novamente uma
 vez, então os primeiros minutos podem ter travadinhas. Para relatar um problema, abra uma
 [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) com celular, GPU, driver, versão do jogo e um log de
 **Configurações > Arquivos > Salvar um arquivo de log**.
