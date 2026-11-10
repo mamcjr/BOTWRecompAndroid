@@ -127,7 +127,7 @@ android/run_boot.sh 120                               # abre o jogo, log em andr
 ## Apoie o projeto
 
 O BOTWRecompAndroid é um projeto gratuito e independente. Se você gosta dele e quer apoiar seu desenvolvimento, pode
-me apoiar pelo GitHub, pelo Ko-fi, ou pelo Buy Me a Coffee. Esse apoio me ajuda a dedicar tempo à correção de bugs, à melhoria do desempenho e da
+me apoiar pelo GitHub, pelo Ko-fi, pelo Buy Me a Coffee ou via **Pix**. Esse apoio me ajuda a dedicar tempo à correção de bugs, à melhoria do desempenho e da
 compatibilidade e às próximas versões. O patrocínio é totalmente opcional: não libera recursos exclusivos nem garante
 correções específicas. Relatos de bugs, testes em outros aparelhos e contribuições também ajudam muito.
 
@@ -140,6 +140,9 @@ TOTKDroid e LASRecompAndroid); eu atualizo à mão.
 [![Patrocine no GitHub](https://img.shields.io/badge/Patrocine-no%20GitHub-EA4AAA?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/mamcjr)
 [![Ko-fi](https://img.shields.io/badge/Ko--fi-mamcjr-FF5E5B?logo=kofi&logoColor=white)](https://ko-fi.com/mamcjr)
 [![Buy Me a Coffee](https://img.shields.io/badge/Buy%20Me%20a%20Coffee-mamcjr-FFDD00?logo=buymeacoffee&logoColor=black)](https://buymeacoffee.com/mamcjr)
+[![Pix](https://img.shields.io/badge/Pix-Chave%20Aleat%C3%B3ria-32BCAD?logo=pix&logoColor=white)](#apoie-o-projeto)
+
+> **Chave Pix (chave aleatória):** `6c326b56-6caf-4c3a-bcf7-1fa8ad2abd16`
 
 ## Créditos
 
