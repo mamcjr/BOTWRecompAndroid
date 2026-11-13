@@ -291,6 +291,10 @@ static _Atomic bool pace_slow;
 static uint64_t stat_pace_over;
 static _Atomic int pace_on = -1;
 
+// A frame's work in ms (the longest of the game's thread, the render thread and the GPU; smoothed), -1 unknown
+static double g_work_ms;
+double vk_frame_work_ms(void) { return g_work_ms > 0 ? g_work_ms : -1; }
+
 // The last presented frame's GPU busy time in ms, -1 unknown (Video > Internal resolution > Dynamic: output_scale.c)
 double vk_frame_gpu_ms(void) {
 #ifdef __ANDROID__
@@ -399,6 +403,11 @@ void vk_pace_frame(void) {
 #endif
 #ifdef __ANDROID__
     if (g_benchmark) benchmark_frame(p / 1e6, busy, game_busy, render_busy, g_pace_gpu_ms);
+    {   // (the frame's work - the game's thread, the render thread, the GPU, the longest - smoothed: framepace.c lets
+        // a slow interval go once the work fits a faster one)
+        double work = busy > g_pace_gpu_ms ? busy : g_pace_gpu_ms;
+        g_work_ms = g_work_ms > 0 ? g_work_ms + (work - g_work_ms) * 0.1 : work;
+    }
 #endif
     static int log = -1;  // LARECOMP_LOG_PACE=1: each frame's period, vsync wait and busy time
     if (log < 0) log = getenv("LARECOMP_LOG_PACE") != NULL;

@@ -236,6 +236,20 @@ void rt_vfr_update(uint64_t vfr) {
     else if (iv == 2 && slow < 0.7) iv = 1;
     else if (iv == 2 && slow > 1.3) iv = 3;
     else if (iv == 3 && slow < 1.15) iv = 2;
+    {   // Back from a slower interval once the work fits the faster one for 2 s. At interval 3 the game presents every
+        // third refresh, so its ratio stays ~1.5 however light the frames get (at 2 in the 60 fps mode, 1): the rules
+        // above never let it go, and a hitch (a save, a menu, a load) left the game at 20 fps (or 30) for good (#339
+        // #374). Not in the 20 fps mode. LARECOMP_NO_INTERVAL_ESCAPE=1: as before.
+        extern double vk_frame_work_ms(void);
+        static int fits;
+        static int off = -1;
+        if (off < 0) off = env_int("LARECOMP_NO_INTERVAL_ESCAPE", 0);
+        double w = off ? -1 : vk_frame_work_ms();
+        bool can = (iv == 3 && g_settings.fps_mode != 3 && w > 0 && w < 26.0) ||
+                   (iv == 2 && g_settings.fps_mode == 2 && w > 0 && w < 13.0);
+        fits = can ? fits + 1 : 0;
+        if (fits > 60) iv--, slow = iv == 1 ? 0.5f : 1.0f, fits = 0;
+    }
     VF(float, vfr, VFR_RATIO) = ratio;
     VF(float, vfr, VFR_NEW_RATIO) = ratio;
     VF(uint32_t, vfr, VFR_INTERVAL) = iv;
