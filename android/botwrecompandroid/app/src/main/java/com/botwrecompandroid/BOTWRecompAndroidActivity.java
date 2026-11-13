@@ -70,6 +70,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     private static native void nativeDeviceStats(float battTempC, float battPct, float watts, int thermal, float headroom, int plugged);
     // the start screen (runtime/ui/launcher.mm)
     private static native int nativeGameVersion(byte[] head);
+    private static native void nativeImportSearched(int folders);  // (the search's folders so far, every 10: #373)
     private static native void nativeImportLooking();  // (the picked folder is being searched: busy, and said so)
     private static native String nativeImportBegin(String name, int version);
     private static native void nativeImportProgress(long done, long total);
@@ -859,9 +860,12 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     // PC from the same files), used instead of building it on the phone when it's for this version and this app
     private Doc preLib, preId, preGame;
 
+    private int searched;  // (folders listed by find, since importGame began)
+
     private void find(Uri tree, Doc dir, int depth) {
         if (depth > 4 || (exefs != null && (romfs != null || romfsImage != null))) return;
         List<Doc> kids = children(tree, dir.id);
+        if (++searched % 10 == 0) nativeImportSearched(searched);
         if (preLib == null && named(kids, "botwgame.so") != null && named(kids, "botwgame.so.id") != null &&
             named(kids, "botwgame.so.game") != null) {
             preLib = named(kids, "botwgame.so");
@@ -999,6 +1003,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             exefs = romfs = romfsImage = romfsImageDir = null;
             preLib = preId = preGame = null;
             listedTwice = 0;
+            searched = 0;
             packages = false;
             Doc root = new Doc();
             root.id = DocumentsContract.getTreeDocumentId(tree);

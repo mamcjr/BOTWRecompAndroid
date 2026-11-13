@@ -224,9 +224,20 @@ static std::string check_copied_files(const std::string &root) {
 extern "C" bool native_wanted(void);  // (Native game code: nothing to build - runtime/native.c)
 
 // "" = ready to play, else what is wrong
+extern "C" void gamelib_absent_reason(const char *game_dir, char *out, size_t cap);  // (gamelib.c; not in gamelib.h:
+                                                                                        //  it is in GAMELIB_ID)
 static std::string check_game_files(const std::string &root) {
     std::string why = check_copied_files(root);
-    if (why.empty() && !native_wanted() && !gamelib_present(root.c_str())) return "The game code needs building";
+    if (why.empty() && !native_wanted() && !gamelib_present(root.c_str())) {
+        static std::string logged;  // (the reason, once per change: #299)
+        char reason[1400];
+        gamelib_absent_reason(root.c_str(), reason, sizeof reason);
+        if (logged != reason) {
+            logged = reason;
+            fprintf(stderr, "[launcher] the game code needs building: %s\n", reason);
+        }
+        return "The game code needs building";
+    }
     return why;
 }
 
@@ -684,7 +695,15 @@ extern "C" JNIEXPORT jint JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidAc
 
 // The picked folder is searched (the activity's import thread, through the file provider: it can take a while) - before,
 // nothing on the screen moved until the copy began (issue #17). nativeImportBegin or nativeImportDone follows.
+// (the folders searched so far: shown in place of the 0% - a big folder picked, Download or the storage's root, kept it
+// at 0% long enough to look stuck, #373)
+static std::atomic<int> g_searched;
+extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportSearched(JNIEnv *, jclass, jint n) {
+    g_searched = n;
+}
+
 extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportLooking(JNIEnv *, jclass) {
+    g_searched = 0;
     pthread_mutex_lock(&g_lock);
     g_busy = true;
     pthread_mutex_unlock(&g_lock);
@@ -2432,6 +2451,11 @@ extern "C" void launcher_run(const char *root) {
                     fg->AddRectFilled(ba, bb, IM_COL32(255, 255, 255, 25), 12 * sc);
                     if (f > 0) fg->AddRectFilled(ba, ImVec2(ba.x + (bb.x - ba.x) * f, bb.y), IM_COL32(236, 194, 84, 255), 12 * sc);
                     char line[200];
+#ifdef __ANDROID__
+                    if (!test_busy && job == "Looking for the game files..." && g_searched > 0)  // (#373)
+                        snprintf(line, sizeof line, "%s   (%d)", tr(job.c_str()), (int)g_searched);
+                    else
+#endif
                     snprintf(line, sizeof line, "%s   %d%%", tr(test_busy ? "Setting up the game files..." : job.c_str()),
                              (int)(f * 100));
                     ImVec2 ls = g_font_small->CalcTextSizeA(sfs, FLT_MAX, 0, line);

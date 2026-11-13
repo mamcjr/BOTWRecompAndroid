@@ -118,6 +118,26 @@ bool gamelib_present(const char *game_dir) {
     return false;
 }
 
+// Why gamelib_present says no, for the log (#299: the start screen asked for the game code to be built again, and
+// nothing said why): none built, or one built by another app (its .id, this app's GAMELIB_ID), or its .id missing
+void gamelib_absent_reason(const char *game_dir, char *out, size_t cap) {
+    char c[3][1100];
+    int n = candidates(game_dir, c);
+    snprintf(out, cap, "no game code built (%s)", n ? c[n - 1] : "?");
+    for (int i = 0; i < n; i++) {
+        if (!exists(c[i])) continue;
+        char path[1200], id[128] = {0};
+        snprintf(path, sizeof path, "%s.id", c[i]);
+        FILE *f = fopen(path, "rb");
+        if (!f) { snprintf(out, cap, "%s has no .id (removed after a failed load?)", c[i]); return; }
+        size_t k = fread(id, 1, sizeof id - 1, f);
+        fclose(f);
+        while (k && (id[k - 1] == '\n' || id[k - 1] == '\r')) id[--k] = 0;
+        snprintf(out, cap, "%s was built by another app version (its id %s, this app's %s)", c[i], id, GAMELIB_ID);
+        return;
+    }
+}
+
 static const GameLibTables *open_lib(const char *path) {
 #ifdef _WIN32
     HMODULE h = LoadLibraryA(path);

@@ -384,9 +384,13 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
                 struct mallinfo mi = mallinfo();
                 char vk[768] = "";
                 vk_live_counts(vk, sizeof vk);
-                fprintf(stderr, "[android] malloc %zu MB in use (%zu MB mapped by large blocks); command shadow pages %d, host "
-                        "command chunks %d; %s\n", (size_t)mi.uordblks >> 20, (size_t)mi.hblkhd >> 20, g_cmd_shadow_pages,
-                        g_cmd_host_chunks, vk);
+                // (hblkhd: scudo's count can go below zero - frees of blocks mapped before it counted - and printed
+                // unsigned it read 17592186043780 MB, #258: a negative one is left out)
+                long long hb = (long long)mi.hblkhd;
+                char hbs[48] = "";
+                if (hb >= 0) snprintf(hbs, sizeof hbs, " (%lld MB mapped by large blocks)", hb >> 20);
+                fprintf(stderr, "[android] malloc %zu MB in use%s; command shadow pages %d, host command chunks %d; %s\n",
+                        (size_t)mi.uordblks >> 20, hbs, g_cmd_shadow_pages, g_cmd_host_chunks, vk);
             }
         }
     }

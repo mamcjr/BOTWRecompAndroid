@@ -37,7 +37,38 @@ static uint64_t img_size(int fd) {
 }
 
 // ------------------------------------------------------------------ RomFS file index (offset -> path)
-typedef struct { uint64_t start, size; char *path; int fd; const uint8_t *mem; } Overlay;
+// raw: a mod's uncompressed file served as the Yaz0 the game asks for (its size before wrapping; 0: as it is) - yaz0_at
+typedef struct { uint64_t start, size; char *path; int fd; const uint8_t *mem; uint64_t raw; } Overlay;
+
+// A mod with the uncompressed form of a Yaz0 file the game reads (X.bfres for X.sbfres, #353: the tools extract them so,
+// and the game never asked for that name): served as Yaz0 without compression - the 16-byte header, then groups of a
+// flag byte 0xFF (eight literals) and 8 bytes. Its size for n bytes, and the bytes at an offset of it.
+static uint64_t yaz0_size(uint64_t n) { return 16 + n + (n + 7) / 8; }
+static ssize_t yaz0_read(int fd, uint64_t raw, uint8_t *dst, uint64_t n, uint64_t in) {
+    uint64_t total = yaz0_size(raw), done = 0;
+    if (in >= total) return 0;
+    if (n > total - in) n = total - in;
+    while (done < n) {
+        uint64_t o = in + done;
+        if (o < 16) {
+            uint8_t h[16] = {'Y', 'a', 'z', '0', (uint8_t)(raw >> 24), (uint8_t)(raw >> 16), (uint8_t)(raw >> 8), (uint8_t)raw};
+            uint64_t k = 16 - o < n - done ? 16 - o : n - done;
+            memcpy(dst + done, h + o, (size_t)k);
+            done += k;
+            continue;
+        }
+        uint64_t g = (o - 16) / 9, w = (o - 16) % 9;
+        if (w == 0) { dst[done++] = 0xFF; continue; }
+        uint64_t src = g * 8 + (w - 1), k = 9 - w;  // (the rest of this group's literals)
+        if (k > n - done) k = n - done;
+        if (src + k > raw) k = raw > src ? raw - src : 0;
+        if (!k) { dst[done++] = 0; continue; }
+        ssize_t r = pread(fd, dst + done, (size_t)k, (off_t)src);
+        if (r <= 0) { memset(dst + done, 0, (size_t)(n - done)); return (ssize_t)n; }
+        done += (uint64_t)r;
+    }
+    return (ssize_t)n;
+}
 // in-image patches (copies of RomFS tables with changes): header, dir meta, file hash, file meta
 typedef struct { uint64_t off, size; uint8_t *data; } Patch;
 // Lets the runtime see which game files are being streamed (e.g. which level is loading).
@@ -375,8 +406,20 @@ static void rom_index(int fd) {
     mods_select_dlc(R->dlc);  // (the DLC's image: the mods of its title)
     for (int i = 0; i < rom_nfiles; i++) {
         char host[1200];
-        if (!(!R->dlc && mods_override(rom_files[i].path, host, sizeof host)) && !mods_romfs_override(rom_files[i].path, host, sizeof host))
-            continue;
+        uint64_t raw = 0;
+        if (!(!R->dlc && mods_override(rom_files[i].path, host, sizeof host)) && !mods_romfs_override(rom_files[i].path, host, sizeof host)) {
+            // X.s<ext> (Yaz0) asked for, the mod has X.<ext>: wrapped (yaz0_read)
+            const char *dot = strrchr(rom_files[i].path, '.');
+            if (!dot || dot[1] != 's' || !dot[2] || strchr(dot, '/')) continue;
+            char plain[1024];
+            snprintf(plain, sizeof plain, "%.*s.%s", (int)(dot - rom_files[i].path), rom_files[i].path, dot + 2);
+            if (!(!R->dlc && mods_override(plain, host, sizeof host)) && !mods_romfs_override(plain, host, sizeof host)) continue;
+            struct stat ps;
+            if (stat(host, &ps) || !ps.st_size || ps.st_size > 0xFFFFFFFFLL) continue;
+            raw = (uint64_t)ps.st_size;
+            static int nlog;
+            if (nlog++ < 20) LOG("[fs] mods: %s served from its uncompressed %s\n", rom_files[i].path, plain);
+        }
         struct stat sb;
         if (stat(host, &sb)) continue;
         if (!ov_meta) {
@@ -386,7 +429,7 @@ static void rom_index(int fd) {
             ov_meta_size = fsz;
             ov_end = (img_size(fd) + 0xF) & ~0xFull;
         }
-        uint64_t rel = ov_end - rom_data_off, size = (uint64_t)sb.st_size;
+        uint64_t rel = ov_end - rom_data_off, size = raw ? yaz0_size(raw) : (uint64_t)sb.st_size;
         memcpy(ov_meta + rom_files[i].meta + 8, &rel, 8);
         memcpy(ov_meta + rom_files[i].meta + 0x10, &size, 8);
         if (ov_n == ov_cap) { ov_cap = ov_cap ? ov_cap * 2 : 256; ov = realloc(ov, sizeof *ov * ov_cap); }
@@ -395,6 +438,7 @@ static void rom_index(int fd) {
         ov[ov_n].path = strdup(host);
         ov[ov_n].fd = -1;
         ov[ov_n].mem = NULL;
+        ov[ov_n].raw = raw;
         ov_n++;
         ov_end = (ov_end + size + 0xF) & ~0xFull;
     }
@@ -426,7 +470,8 @@ static ssize_t romfs_read(int fd, uint8_t *dst, uint64_t size, uint64_t off) {
                 memcpy(dst + done, ov[i].mem + in, (size_t)r);
             } else {
                 if (ov[i].fd < 0) ov[i].fd = open(ov[i].path, O_RDONLY);
-                r = in < ov[i].size ? pread(ov[i].fd, dst + done, n < ov[i].size - in ? n : ov[i].size - in, (off_t)in) : 0;
+                if (ov[i].raw) r = in < ov[i].size ? yaz0_read(ov[i].fd, ov[i].raw, dst + done, n, in) : 0;
+                else r = in < ov[i].size ? pread(ov[i].fd, dst + done, n < ov[i].size - in ? n : ov[i].size - in, (off_t)in) : 0;
             }
             if (r < 0) r = 0;
             if ((uint64_t)r < n) memset(dst + done + r, 0, n - r);

@@ -176,6 +176,10 @@ float widescreen_hud_top(float x, float y) {
     extern bool touch_hud_top(void);
     extern uint64_t renderer_present_count(void);
     if (x < 290.0f || y > -140.0f || y < -315.0f || !touch_hud_top()) return 0;
+    // Not before 1.8.2: the menus (pause, map) are told apart only on 1.8.2 and 1.9.0 (framepace.c PAUSE_STATE,
+    // UI_SCREENS; tools/port_addrs.py finds no 1.6.0 counterpart), and on 1.6.0 the group stayed up over the map and
+    // the menus, then didn't come back (#273)
+    if (g_game_version < 182) return 0;
     int why = !in_world() ? 1 : framepace_in_menu() ? 2 : !minimap_frame || renderer_present_count() - minimap_frame > 3 ? 3 : 0;
     if (ENV("LARECOMP_LOG_HUDTOP")) {  // (a test: each change of the group's place, and why)
         static int last = -1;
