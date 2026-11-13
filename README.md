@@ -18,7 +18,7 @@ It is built on the engine of **[LAS Recomp](https://github.com/peiikai/LASRecomp
 > [!WARNING]
 > **Beta.** Tested primarily on one phone (POCO F7 Ultra, Adreno 830, Mesa Turnip driver). Performance and compatibility
 > vary by device; expect bugs, especially on GPUs that have not been tested on physical hardware. See the
-> [0.3.4-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.3.4-beta) and the
+> [0.3.5-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.3.5-beta) and the
 > [development notes](docs/BOTW-PORT.md) (in Portuguese).
 
 ## Supported platform
@@ -56,6 +56,9 @@ Windows, Linux or macOS may still be used as development hosts with the Android 
   with under 6 GB of RAM.
 - **0.3.4:** the low-RAM profile now activates automatically only on devices with up to 4 GB of RAM. Devices with 6 GB
   return to the normal texture, buffer and cache settings; the manual override remains available.
+- **0.3.5:** optional frame generation (LSFG, with your own `Lossless.dll`), a new overlay (compact / detailed, with
+  charts), the frame rate no longer stuck lower after a menu or a save, and the pipeline limit on Xclipse and every
+  other non-Adreno GPU.
 - **Known issues:** short grass appears only up close; water reflections can move with the camera; the pause menu
   background can be black on Qualcomm's stock driver; Link may flicker on the first hit in Native Mode; rain falls
   slower than on the console.
@@ -110,7 +113,7 @@ icons read from your game files. The game's menus keep the classic buttons.
    Files > Vulkan driver**. If the app reports that the Vulkan driver is too old at startup, long-press the app icon
    and choose **Choose driver** before launching the game.
 
-Updating from 0.2.x to 0.3.4-beta does not require rebuilding game code. Shaders compile again once, so the first
+Updating from 0.2.x to 0.3.5-beta does not require rebuilding game code. Shaders compile again once, so the first
 minutes may stutter. To report a problem, open an [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) with
 your phone, GPU, driver, game version and a log from **Settings > Files > Save a log file**.
 
