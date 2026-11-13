@@ -4078,9 +4078,14 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 extern void widescreen_minimap_seen(void);  // (the minimap's disc, at 510, -240: it's on screen)
                 widescreen_minimap_seen();
             }
-            if (pane && g_cur_fs_hash == 0x9b989759db6e6606ull && fabsf(lx) < 1.0f && ly < -200.0f && ly > -270.0f) {
-                extern void widescreen_talk_seen(void);  // (a talk's box, at 0, -235)
+            if (pane && g_cur_fs_hash == 0x9b989759db6e6606ull && fabsf(lx) < 1.0f &&
+                ((ly < -200.0f && ly > -270.0f) || fabsf(ly) < 80.0f)) {
+                // (a talk's box, at 0, -235; or the same box in the middle - a sign's text, a message: its rounded ends
+                // moved out to the screen's edges, #304)
+                extern void widescreen_talk_seen(void);
                 widescreen_talk_seen();
+                static bool told;
+                if (!told && fabsf(ly) < 80.0f) told = true, LOG("[widescreen] a message box in the middle (y %.0f)\n", ly);
             }
             float dy = pane || text ? widescreen_hud_top(lx, ly) : 0;
             if (dy != 0) {

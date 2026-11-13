@@ -262,9 +262,11 @@ void widescreen_scene_ubo(const float *u, uint64_t size) { (void)u, (void)size; 
 // few: shown in the middle 16:9 part with bars, as the console. Its frame is a 16:9 picture - in the wide image the
 // world showed past its sides, through the stretched darkening (#262).
 static uint64_t scope_frame;
+// Not in a menu of the game's (the pause, the map): the map's frame has bars in the same places, and the map came in
+// the middle 16:9 part with its header and sides cut (#349).
 void widescreen_scope_seen(void) {
     extern uint64_t renderer_present_count(void);
-    if (!ENV("LARECOMP_NO_SCOPE_BARS")) scope_frame = renderer_present_count();
+    if (!ENV("LARECOMP_NO_SCOPE_BARS") && !framepace_in_menu()) scope_frame = renderer_present_count();
 }
 
 void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double *vx, double *vy, double *vw, double *vh) {
