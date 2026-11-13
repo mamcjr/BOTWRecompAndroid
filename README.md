@@ -2,10 +2,6 @@
 
 **English** | [Português](README.pt-BR.md)
 
-> [!NOTE]
-> **Project update (through November 13, 2026):** Replies to issues will be slower this week. Version 0.3.4 is a small
-> hotfix to the RAM setting; larger updates remain on hold. [Read the announcement](https://github.com/mamcjr/BOTWRecompAndroid/discussions/329).
-
 [![Listed on PlayPorted](https://playported.com/badge.svg)](https://playported.com/ports/754-the-legend-of-zelda-breath-of-the-wild/)
 
 A port of *The Legend of Zelda: Breath of the Wild* (Nintendo Switch, versions **1.0.0, 1.6.0, 1.8.2 and 1.9.0**) for
