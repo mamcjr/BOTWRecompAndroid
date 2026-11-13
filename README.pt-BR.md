@@ -42,6 +42,10 @@ Windows, Linux e macOS podem continuar sendo usados como ambientes de desenvolvi
 - **Vídeo e controles:** opção de 60 fps nas versões do jogo compatíveis e cutscenes a 60 fps experimentais,
   proporção livre da tela, resoluções interna e de saída, upscaling FSR 1 ou Snapdragon GSR 1, FXAA/SMAA, controles de
   toque e físicos e giroscópio. O app oferece escolha de driver Vulkan e opções de compatibilidade.
+- **Geração de quadros (LSFG), opcional:** a geração de quadros do Lossless Scaling com o seu próprio `Lossless.dll`
+  (Lossless Scaling para Windows, não incluído; coloque-o em `Download/`, `LSFG/` ou `Documents/Emulation/bios/`), de 2x a
+  4x, em Vídeo. O código da geração de quadros é GPL-3.0-or-later, então **um APK com ele é GPL-3.0-or-later como um
+  todo**: veja o [NOTICE.md](NOTICE.md).
 - **0.3.0:** crashes e travamentos depois de 30+ minutos nas GPUs Mali, a dissolução da viagem rápida, folhas
   surgindo no chão, as janelas do estábulo e as telas de carregamento na proporção livre, taxa de 40 / 45 fps, 30 fps
   uniformes em telas de 60 Hz, botões de toque para as flechas e o álbum, e duas opções em Compatibilidade do driver:

@@ -41,6 +41,10 @@ Windows, Linux or macOS may still be used as development hosts with the Android 
 - **Video and controls:** optional 60 fps on supported game versions and experimental 60 fps in-engine cutscenes,
   unlocked aspect ratio, internal/output resolution, FSR 1 or Snapdragon GSR 1 upscaling, FXAA/SMAA, touch controls,
   physical controllers and gyro. The app offers a Vulkan driver selector and compatibility settings.
+- **Frame generation (LSFG), optional:** Lossless Scaling's frame generation with your own `Lossless.dll` (Lossless
+  Scaling for Windows, not included; put it in `Download/`, `LSFG/` or `Documents/Emulation/bios/`), 2x-4x, in Video. The
+  frame generation code is GPL-3.0-or-later, so **an APK built with it is GPL-3.0-or-later as a whole**: see
+  [NOTICE.md](NOTICE.md).
 - **0.3.0:** crashes and freezes after 30+ minutes on Mali GPUs, the fast travel's dissolve, stray leaves on the
   ground, the stable's windows and the loading screens in unlocked aspect, a 40 / 45 fps frame rate, even 30 fps on
   60 Hz screens, touch buttons for the arrows and the album, and two Driver compatibility options: the driver's own

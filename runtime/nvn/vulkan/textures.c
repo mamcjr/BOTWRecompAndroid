@@ -1216,6 +1216,7 @@ static ViewEnt view_tab[VIEW_TAB];
 // Views may still be referenced by submitted or pending work: destroyed once that has completed.
 void vk_views_forget(TexBackend *b) { views_forget(b); }
 uint32_t vk_view_gen;  // bumped whenever a cached view may be destroyed (exec.c's per-frame texture memo)
+void vk_texture_views_drop(TexBackend *b);  // (lsfg/lsfg_present.c: its outputs, before they go)
 static void views_forget(TexBackend *b) {
     vk_view_gen++;
     for (int i = 0; i < VIEW_TAB; i++)
@@ -1804,3 +1805,5 @@ VkSampler vk_default_sampler(bool linear) {
     }
     return s[linear];
 }
+
+void vk_texture_views_drop(TexBackend *b) { views_forget(b); }

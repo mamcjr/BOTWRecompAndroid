@@ -598,6 +598,8 @@ static void create_device(void) {
     const char *pv = getenv("LARECOMP_PACE_VSYNC");
     display_timing = has_ext(ep, ne, VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME) && (!pv || atoi(pv));
     if (display_timing) ext[n_ext++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
+    // (frame generation, lsfg/: its shaders read unbound slots - null descriptors)
+    bool robustness2 = has_ext(ep, ne, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME) && !env_on("LARECOMP_NO_ROBUSTNESS2");
 #endif
     free(ep);
 
@@ -817,6 +819,14 @@ static void create_device(void) {
     b->vertexPipelineStoresAndAtomics = h->vertexPipelineStoresAndAtomics;
     b->robustBufferAccess = h->robustBufferAccess;  // guest shaders index cbufs freely: keep OOB reads harmless
     b->shaderClipDistance = h->shaderClipDistance;
+    // (frame generation, lsfg/: its shaders take 16-bit floats and storage images of any format, unformatted writes)
+    b->shaderStorageImageExtendedFormats = h->shaderStorageImageExtendedFormats;
+    b->shaderStorageImageWriteWithoutFormat = h->shaderStorageImageWriteWithoutFormat;
+#ifdef __ANDROID__
+    if (g_vk.api >= VK_API_VERSION_1_2) f12.shaderFloat16 = h12.shaderFloat16;
+    g_vk.lsfg_features = g_vk.api >= VK_API_VERSION_1_2 && h12.shaderFloat16 && h->shaderStorageImageExtendedFormats &&
+                         h->shaderStorageImageWriteWithoutFormat;
+#endif
 #ifdef __ANDROID__
     if (!h->shaderInt64) LOG("[vk] no shaderInt64: translating shader address/carry math to 32-bit words\n");
 #else
@@ -839,6 +849,19 @@ static void create_device(void) {
         } else {
             g_vk.map_placed = false;
             n_ext -= 2;  // (the two map extensions were the last added)
+        }
+    }
+    VkPhysicalDeviceRobustness2FeaturesEXT rb2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+    if (robustness2) {  // (null descriptors only - frame generation's; the robust accesses stay off)
+        VkPhysicalDeviceRobustness2FeaturesEXT q2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_ROBUSTNESS_2_FEATURES_EXT};
+        VkPhysicalDeviceFeatures2 q = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &q2};
+        vkGetPhysicalDeviceFeatures2(g_vk.phys, &q);
+        if (q2.nullDescriptor) {
+            rb2.nullDescriptor = VK_TRUE;
+            rb2.pNext = f.pNext;
+            f.pNext = &rb2;
+            ext[n_ext++] = VK_EXT_ROBUSTNESS_2_EXTENSION_NAME;
+            g_vk.null_descriptors = true;
         }
     }
     VkPhysicalDeviceMaintenance5FeaturesKHR m5 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR, .maintenance5 = VK_TRUE};
@@ -1376,6 +1399,13 @@ bool backend_vsync_offset(uint64_t t, uint64_t grid, int64_t *off, uint64_t *per
 }
 #endif
 
+#ifdef __ANDROID__
+// When the next present should reach the screen (CLOCK_MONOTONIC ns; 0: as soon as it can): frame generation's frames
+// (lsfg/lsfg_present.c) and the game's frame after them, each held for its share of the game's frame. With display
+// timing, the present's desired time; without, a wait before it. vk_frame_end takes it and sets it back to 0.
+static uint64_t g_present_at;
+#endif
+
 // End rendering into the window image and present it. shot_path: also save the window image as PNG.
 void vk_frame_end(const char *shot_path) {
     if (!cur_frame.ok) return;
@@ -1401,6 +1431,11 @@ void vk_frame_end(const char *shot_path) {
     VkPresentTimesInfoGOOGLE times = {.sType = VK_STRUCTURE_TYPE_PRESENT_TIMES_INFO_GOOGLE, .swapchainCount = 1,
                                       .pTimes = &when};
     if (display_timing) pi.pNext = &times;
+    if (g_present_at) {
+        if (display_timing) when.desiredPresentTime = g_present_at;
+        else if (g_present_at > plat_now_ns()) plat_sleep_until_ns(g_present_at);
+        g_present_at = 0;
+    }
     uint64_t queued = plat_now_ns();
 #endif
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
@@ -1521,6 +1556,28 @@ void backend_present(NvnTexture *t) {
     vk_bc_shadows_resolve(NULL, NULL, NULL, 0);  // (BC textures drawn into: decoded, as before anything outside a pass)
 #endif
     static const float black[4] = {0, 0, 0, 1};
+#ifdef __ANDROID__
+    // Frame generation (lsfg/lsfg_present.c, Video > Frame generation): the frames between the previous game frame and
+    // this one, each presented as a frame of its own through the same upscaler and overlay - placed as the last game
+    // frame was - and held for its share of the game's frame; the game's frame last, so the picture is a frame behind
+    static struct { bool ok; float vx, vy, vw, vh, pv[8]; } fg_place;
+    {
+        extern int vk_fg_frame(TexBackend *game, TexBackend **gen, uint64_t *hold_ns, uint64_t vsync_ns);
+        TexBackend *gen[3];
+        uint64_t hold = 0;
+        int ng = fg_place.ok ? vk_fg_frame(b, gen, &hold, __atomic_load_n(&vs_period, __ATOMIC_RELAXED)) : 0;
+        uint64_t base = plat_now_ns();
+        for (int g = 0; g < ng; g++) {
+            if (!vk_frame_begin(black)) { ng = g; break; }
+            VkCommandBuffer cb = vk_cmd();
+            vk_present_draw(cb, gen[g], fg_place.vx, fg_place.vy, fg_place.vw, fg_place.vh, fg_place.pv);
+            menu_render((void *)cb, g_vk.sc_extent.width, g_vk.sc_extent.height);
+            g_present_at = g ? base + (uint64_t)g * hold : 0;
+            vk_frame_end(NULL);
+        }
+        if (ng) g_present_at = base + (uint64_t)ng * hold;
+    }
+#endif
     uint64_t t0 = SDL_GetTicksNS();
     bool have = vk_frame_begin(black);
     uint64_t nd = SDL_GetTicksNS() - t0;
@@ -1573,6 +1630,10 @@ void backend_present(NvnTexture *t) {
         VkCommandBuffer cb = vk_cmd();
         float pv[8] = {renderer_origin_lower_left() ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
         memcpy(g_shot_crop, crop, sizeof crop);
+#ifdef __ANDROID__
+        fg_place.ok = true, fg_place.vx = (float)vx, fg_place.vy = (float)vy, fg_place.vw = (float)vw, fg_place.vh = (float)vh;
+        memcpy(fg_place.pv, pv, sizeof pv);
+#endif
         extern void vk_gp_note(VkCommandBuffer cb, const char *what);  // (LARECOMP_GPUPROF_AT: the present's own rows)
         vk_gp_note(cb, "present: the image into the window");
         vk_present_draw(cb, b, (float)vx, (float)vy, (float)vw, (float)vh, pv);

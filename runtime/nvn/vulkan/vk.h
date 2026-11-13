@@ -47,6 +47,7 @@ typedef struct {
     VkSemaphore timeline;      // value = last completed submission number
     VkCommandPool pool;        // render thread only
     bool custom_border, divisor, host_import, shader_int64;
+    bool lsfg_features, null_descriptors;  // (frame generation, lsfg/: what its shaders need, device.c)
     bool dyn_render;              // VK_KHR_dynamic_rendering in use; without it, classic render passes (rpcompat.c)
     bool sync2;                   // synchronization2 in use; without it, Vulkan 1.0 barriers (device.c sync1_*)
     bool eds;                     // extended dynamic state in use; without it, those states (and extended dynamic state
