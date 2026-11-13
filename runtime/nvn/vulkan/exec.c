@@ -1,5 +1,8 @@
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL_cpuinfo.h>
+#ifdef __ANDROID__
+#include <malloc.h>
+#endif
 #include <SDL3/SDL_timer.h>
 #include <ctype.h>
 #include <float.h>
@@ -59,6 +62,23 @@ uint64_t prof_up_cum;  // (the same, never reset)
 static _Atomic int stat_compiles;
 static _Atomic int live_programs, live_gpipes, live_cpipes;  // (made so far: the memory mappings log, vk_live_counts)
 static void pipe_evict(void);  // (graphics pipelines: below)
+
+// What the process's malloc grew by during each kind of Vulkan object creation (the memory mappings log): on a Mali
+// malloc kept growing ~37 MB a minute with the pipelines capped and the textures flat, its large blocks one memory
+// mapping each - the app closed at Android's limit after ~35 minutes (#360 #368 #350 #316). Other threads allocate at
+// the same time, so a share is noise; over a session it names the one that grows. vk_mnow / vk_mgrow_add: shaders.c,
+// textures.c too.
+enum { MG_MODULE, MG_GPIPE, MG_CPIPE, MG_IMAGE, MG_N };
+static _Atomic long long g_mgrow[MG_N];
+long long vk_mnow(void) {
+#ifdef __ANDROID__
+    struct mallinfo m = mallinfo();
+    return (long long)m.uordblks;
+#else
+    return 0;
+#endif
+}
+void vk_mgrow_add(int what, long long since) { atomic_fetch_add(&g_mgrow[what], vk_mnow() - since); }
 static _Atomic uint64_t stat_skipped_building;  // (never zeroed; hle/benchmark.c) draws skipped: their pipeline is still compiling
 static uint64_t op_counts[CMD_COUNT];
 bool g_debug_frame;
@@ -3036,7 +3056,9 @@ static int pipe_keep(void) {
     if (keep < 0) {
         extern bool vk_low_ram(void);
         const char *e = getenv("LARECOMP_PIPE_KEEP");
-        keep = e ? atoi(e) : (g_vk.props.vendorID == 0x13B5 || vk_low_ram()) ? 1500 : 0;
+        // (every GPU but Adreno's: an Xclipse 530 reached 8165 pipelines and 1.6 GB of malloc in an hour, an Xclipse 540
+        // 4375 in 10 minutes, killed for low memory - #327 #345; Turnip's cost little each)
+        keep = e ? atoi(e) : (g_vk.props.vendorID != 0x5143 || vk_low_ram()) ? 1500 : 0;
         if (keep > 0) LOG("[vk] pipelines kept: at most %d (the least recently used ones destroyed)\n", keep);
     }
     return keep;
@@ -3064,7 +3086,9 @@ static void pipe_evict(void) {
             Pipe *p = pipe_cache.entries[i].object;
             if (!p || p->evicted || p == last_pipeline || atomic_load(&p->state) != 1) continue;
             if (p->used + age > now || p->seq > done) continue;
+            long long mg0 = vk_mnow();
             vkDestroyPipeline(g_vk.dev, p->pipe, NULL);
+            vk_mgrow_add(MG_GPIPE, mg0);  // (given back)
             p->pipe = VK_NULL_HANDLE;
             atomic_store(&p->state, 0);
             p->evicted = true;
@@ -3178,7 +3202,9 @@ static void build_pipeline(void *arg) {
         if (logp) LOG("[pipe] compiling vs %llx fs %llx\n", (unsigned long long)k->prog->code[0], (unsigned long long)k->prog->code[1]);
     }
 #endif
+    long long mg0 = vk_mnow();
     VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pp->pipe);
+    vk_mgrow_add(MG_GPIPE, mg0);
     if (r != VK_SUCCESS) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
@@ -6008,7 +6034,9 @@ static void build_compute(void *arg) {
                                                 .stage = VK_SHADER_STAGE_COMPUTE_BIT, .module = m, .pName = "main",
                                                 .pSpecializationInfo = &spec},
                                       .layout = cp->p.layout};
+    long long mg0 = vk_mnow();
     VkResult r = vkCreateComputePipelines(g_vk.dev, g_vk.pcache, 1, &ci, NULL, &cp->pipe);
+    vk_mgrow_add(MG_CPIPE, mg0);
     atomic_fetch_add(&stat_compiles, 1);
     if (r == VK_SUCCESS) atomic_fetch_add(&live_cpipes, 1);
     atomic_store(&cp->p.state, r == VK_SUCCESS ? 1 : 2);
@@ -8424,8 +8452,10 @@ int vk_live_counts(char *out, int cap) {
     uint64_t ring = 0, rt = 0, tex = vk_texture_bytes(&rt);
     for (int i = 0; i < nchunks; i++) ring += chunks[i].size;
     return snprintf(out, (size_t)cap, "programs %d, pipelines %d + compute %d, textures %d (%llu MB, render targets %llu MB), "
-                    "ring %llu MB in %d, buffer cache %llu MB, known keys %zu programs / %zu pipelines", atomic_load(&live_programs), atomic_load(&live_gpipes),
+                    "ring %llu MB in %d, buffer cache %llu MB, known keys %zu programs / %zu pipelines; malloc grown by shader modules %lld MB, pipelines %lld MB + compute %lld MB, images %lld MB", atomic_load(&live_programs), atomic_load(&live_gpipes),
                     atomic_load(&live_cpipes), vk_texture_count(), (unsigned long long)(tex >> 20), (unsigned long long)(rt >> 20),
                     (unsigned long long)(ring >> 20), nchunks, (unsigned long long)(vc_bytes >> 20),
-                    atomic_load(&program_keys), atomic_load(&pipeline_keys));
+                    atomic_load(&program_keys), atomic_load(&pipeline_keys), atomic_load(&g_mgrow[MG_MODULE]) >> 20,
+                    atomic_load(&g_mgrow[MG_GPIPE]) >> 20, atomic_load(&g_mgrow[MG_CPIPE]) >> 20,
+                    atomic_load(&g_mgrow[MG_IMAGE]) >> 20);
 }

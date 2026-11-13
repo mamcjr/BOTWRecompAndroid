@@ -382,7 +382,7 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
             {   // whose the mallocs are (#249: [anon:scudo:secondary] grew ~2000 every 5 minutes on a Mali)
                 extern int g_cmd_shadow_pages, g_cmd_host_chunks, vk_live_counts(char *out, int cap);
                 struct mallinfo mi = mallinfo();
-                char vk[512] = "";
+                char vk[768] = "";
                 vk_live_counts(vk, sizeof vk);
                 fprintf(stderr, "[android] malloc %zu MB in use (%zu MB mapped by large blocks); command shadow pages %d, host "
                         "command chunks %d; %s\n", (size_t)mi.uordblks >> 20, (size_t)mi.hblkhd >> 20, g_cmd_shadow_pages,

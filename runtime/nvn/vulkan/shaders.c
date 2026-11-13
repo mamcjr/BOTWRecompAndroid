@@ -193,7 +193,11 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
 VkShaderModule vk_module(const uint32_t *spv, size_t nwords) {
     VkShaderModuleCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO, .codeSize = nwords * 4, .pCode = spv};
     VkShaderModule m;
+    extern long long vk_mnow(void);
+    extern void vk_mgrow_add(int what, long long since);
+    long long mg0 = vk_mnow();
     VkResult result = vkCreateShaderModule(g_vk.dev, &ci, NULL, &m);
+    vk_mgrow_add(0, mg0);  // (exec.c MG_MODULE)
     if (result != VK_SUCCESS) LOG("[shader] vkCreateShaderModule failed: %d (%zu words)\n", result, nwords);
     return result == VK_SUCCESS ? m : VK_NULL_HANDLE;
 }
