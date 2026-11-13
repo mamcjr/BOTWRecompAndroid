@@ -199,6 +199,10 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
             if (__system_property_get(boot_props[i], value) > 0)
                 fprintf(stderr, "[android] %s: %s\n", boot_props[i], value);
         }
+        // The crash report from here on, not only once the game's threads run: a custom driver (RADV on an Xclipse,
+        // #234 #345 #383) crashed in the first frames, before the game loaded, and the log just stopped.
+        // (The handler is process-wide; the game's threads install it again for their own signal stacks.)
+        plat_crash_handler_install();
         return true;
     }
     void *p = mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE,
