@@ -18,7 +18,7 @@ O projeto parte do motor do **[LAS Recomp](https://github.com/peiikai/LASRecomp)
 > [!WARNING]
 > **Beta.** Testado principalmente em um celular (POCO F7 Ultra, Adreno 830, driver Mesa Turnip). O desempenho e a
 > compatibilidade variam entre aparelhos; espere bugs, sobretudo em GPUs ainda não testadas fisicamente. Veja as
-> [notas da 0.3.5-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.3.5-beta) e as
+> [notas da 0.4.0-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.0-beta) e as
 > [notas de desenvolvimento](docs/BOTW-PORT.md).
 
 ## Plataforma suportada
@@ -57,7 +57,7 @@ Windows, Linux e macOS podem continuar sendo usados como ambientes de desenvolvi
   celulares com menos de 6 GB de RAM.
 - **0.3.4:** o perfil de economia de RAM agora é ativado automaticamente só em aparelhos com até 4 GB. Os de 6 GB
   voltam às configurações normais de texturas, buffers e cache; a opção manual continua disponível.
-- **0.3.5:** geração de quadros opcional (LSFG, com o seu próprio `Lossless.dll`), um overlay novo (compacto /
+- **0.4.0:** geração de quadros opcional (LSFG, com o seu próprio `Lossless.dll`), um overlay novo (compacto /
   detalhado, com gráficos), o FPS não fica mais preso abaixo do normal depois de um menu ou de salvar, e o limite de
   pipelines no Xclipse e em toda GPU que não é Adreno.
 - **Problemas conhecidos:** a grama baixa só aparece de perto; reflexos da água podem acompanhar a câmera; o fundo
@@ -115,7 +115,7 @@ Desde a **0.2.12-beta**, enquanto você joga no mundo, os controles de toque mos
    **Configurações > Arquivos > Driver Vulkan**. Se o app informar que o driver Vulkan é antigo ao abrir, toque e
    segure o ícone do app e escolha **Escolher driver** antes de iniciar o jogo.
 
-Atualizar da 0.2.x para a 0.3.5-beta não exige recompilar o código do jogo. Os shaders são compilados novamente uma
+Atualizar da 0.2.x para a 0.4.0-beta não exige recompilar o código do jogo. Os shaders são compilados novamente uma
 vez, então os primeiros minutos podem ter travadinhas. Para relatar um problema, abra uma
 [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) com celular, GPU, driver, versão do jogo e um log de
 **Configurações > Arquivos > Salvar um arquivo de log**.
