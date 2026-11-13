@@ -369,7 +369,8 @@ static bool bow_drawn;  // (icon layout) a finger holds the bow (recompute)
 static bool shown2(int k) {
     if (IC[k].r == 0) return false;
     if (talk_on()) return k == I_A || k == I_SPRINT || k == I_MENU;  // (a talk: A, B, the app's menu - and the stick)
-    if (k >= I_PUSH && k <= I_MRIGHT) return editing || rune_now == 2;
+    if (k >= I_PUSH && k <= I_MRIGHT) return editing || rune_now == 2 ||
+                                             (rune_now == 5 && (k == I_PUSH || k == I_PULL));  // (the camera's zoom, #202)
     if (k == I_CANCEL) return editing || bow_held;
     if (k == I_ARROWS) return editing || bow_drawn;
     if (k == I_ALBUM) return editing || rune_now == 5;
