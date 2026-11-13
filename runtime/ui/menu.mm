@@ -53,6 +53,8 @@ struct QEvent {
 static pthread_mutex_t q_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::vector<QEvent> q_events;
 static float g_pixel_density = 1;
+float g_screen_dp = 0;  // the screen's density (Android: px a dp) and height in pixels, for ui/perf_overlay.mm
+int g_screen_h_px = 0;
 
 static void push(const QEvent &e) {
     pthread_mutex_lock(&q_lock);
@@ -277,6 +279,12 @@ bool menu_handle_event(const SDL_Event *e) {
 void menu_apply_window_requests(void *win) {
     SDL_Window *w = (SDL_Window *)win;
     g_pixel_density = SDL_GetWindowPixelDensity(w);
+    {  // (the performance overlay sizes itself in Android's dp, as Swap2-Native's: ui/perf_overlay.mm)
+        int pw = 0, ph = 0;
+        SDL_GetWindowSizeInPixels(w, &pw, &ph);
+        g_screen_h_px = ph;
+        g_screen_dp = SDL_GetDisplayContentScale(SDL_GetDisplayForWindow(w));
+    }
     static bool text_input;
     bool want_text = capturing();
 #ifdef __ANDROID__
@@ -308,6 +316,7 @@ void menu_apply_window_requests(void *win) {
 static bool g_inited;
 static ImGuiContext *g_ctx;  // ours: the start screen (back to it after a reboot) has its own context
 static ImFont *g_font, *g_font_big;
+ImFont *g_overlay_font;  // the performance overlay's (Android's Roboto, as Swap2-Native's): ui/perf_overlay.mm
 static ImFont *g_menu_font, *g_menu_font_big;  // the menu window (Baloo 2); everything else keeps g_font
 static int g_tab, g_tab_request = -2;  // (-2: no request; -1 is the Prelaunch tab)
 static int g_focus_tab = -99;  // put the nav cursor on this tab next frame (-100: the selected one; -99: none)
@@ -411,6 +420,14 @@ static void init(void) {
         g_menu_font_big = io.Fonts->AddFontFromFileTTF(baloo, 72, &cfg);
         i18n_merge_fonts(io.Fonts, 72);
     }
+#ifdef __ANDROID__
+    for (const char *p : {"/system/fonts/RobotoStatic-Regular.ttf", "/system/fonts/Roboto-Regular.ttf"}) {
+        if (FILE *f = fopen(p, "rb")) fclose(f);
+        else continue;
+        g_overlay_font = io.Fonts->AddFontFromFileTTF(p, 48, &cfg);
+        break;
+    }
+#endif
     if (!g_font) g_font = io.Fonts->AddFontDefault();
     if (!g_font_big) g_font_big = g_font;
     if (!g_menu_font || !g_menu_font_big) g_menu_font = g_font, g_menu_font_big = g_font_big;
@@ -540,23 +557,23 @@ static void tab_display(void) {
         opt_indent(1);
         static const char *styles[] = {"Detailed", "Compact"};
         opt_choice("Overlay style", &g_settings.overlay_style, styles, 2, 0,
-                   "Detailed: frame rate and frame times, CPU, GPU, memory, temperatures and power. Compact: one short item "
-                   "a line. Double-tap the overlay to switch; drag it to move it.");
-        if (g_settings.overlay_scale < 40 || g_settings.overlay_scale > 150) g_settings.overlay_scale = 100;
+                   "Detailed: the GPU, frame rate and frame time with 48 s charts, CPU clock caps, temperatures, battery, "
+                   "free memory and thermal state. Compact: one line - frame rate, frame time, RAM and temperatures. "
+                   "Double-tap the overlay to switch; drag it to move it.");
+        if (g_settings.overlay_scale < 40 || g_settings.overlay_scale > 150) g_settings.overlay_scale = 75;
         if (g_settings.overlay_opacity < 20 || g_settings.overlay_opacity > 100) g_settings.overlay_opacity = 100;
-        opt_int("Overlay size", &g_settings.overlay_scale, 40, 150, 5, 100, "%d%%", "How big the overlay's text is.");
+        opt_int("Overlay size", &g_settings.overlay_scale, 40, 150, 5, 75, "%d%%", "How big the overlay's text is.");
         opt_int("Overlay opacity", &g_settings.overlay_opacity, 20, 100, 5, 100, "%d%%",
                 "How see-through the overlay is: lower lets more of the game show through.");
         static const struct { int bit; const char *label, *desc; } items[] = {
             {OVERLAY_FPS, "Frame rate and frame time", "The game's frames a second and the time of one; with frame "
-                                                       "generation, the game's and the shown rates, and LSFG."},
-            {OVERLAY_THROTTLE, "Throttle dot", "Green, yellow or red: how much the phone is holding back for heat (Android's "
-                                               "thermal state and headroom, the CPU's clock cap)."},
-            {OVERLAY_GPU, "GPU time", "The GPU's time for one frame, and how long the CPU waits on it."},
+                                                       "generation, the game's > the shown rate."},
+            {OVERLAY_THROTTLE, "Thermal state", "Android's thermal state, T: 0 (none) to 6 (shutdown): how much the phone is "
+                                                "holding back for heat."},
+            {OVERLAY_GPU, "GPU time", "The GPU's time for one frame."},
             {OVERLAY_CPU, "CPU clock caps", "Each CPU cluster's current top clock against its highest."},
-            {OVERLAY_BATTERY, "Battery and temperatures", "The battery's temperature and level (+ while charging), the SoC's "
-                                                          "temperature and the power drawn."},
-            {OVERLAY_MEMORY, "Memory", "The game's memory and the phone's in use, with \"low\" when it runs short."},
+            {OVERLAY_BATTERY, "Battery and temperatures", "The SoC's and the battery's temperature, and the battery's level."},
+            {OVERLAY_MEMORY, "Memory", "The game's memory (and its chart) and the phone's free memory."},
         };
         for (const auto &it : items) {
             bool on = (g_settings.overlay_items & it.bit) != 0;
