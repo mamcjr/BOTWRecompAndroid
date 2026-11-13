@@ -212,11 +212,17 @@ typedef struct { uint64_t start, end, cb, gmem, gused, lr, seq; } ListRec;
 enum { HIST = 1 << 16 };
 static ListRec g_hist[HIST];
 static _Atomic uint64_t g_hist_n;
+static pthread_mutex_t g_hist_lock = PTHREAD_MUTEX_INITIALIZER;
 static void hist_report(uint64_t h) {
+    pthread_mutex_lock(&g_hist_lock);
     uint64_t n = g_hist_n, found = ~0ull;
     for (uint64_t k = n; k-- > (n > HIST ? n - HIST : 0);)
         if (g_hist[k % HIST].start == h) { found = k; break; }
-    if (found == ~0ull) { LOG("[nvn]   %llx: not among the last lists recorded\n", (unsigned long long)h); return; }
+    if (found == ~0ull) {
+        LOG("[nvn]   %llx: not among the last lists recorded\n", (unsigned long long)h);
+        pthread_mutex_unlock(&g_hist_lock);
+        return;
+    }
     const ListRec *l = &g_hist[found % HIST];
     LOG("[nvn]   %llx: list #%llu by %llx (lr %llx), game memory %llx+%llx, %llu lists ago; recorded over by:\n",
         (unsigned long long)h, (unsigned long long)found, (unsigned long long)l->cb, (unsigned long long)l->lr,
@@ -231,17 +237,20 @@ static void hist_report(uint64_t h) {
             shown++;
         }
     }
+    pthread_mutex_unlock(&g_hist_lock);
 }
 
 NVN(nvnCommandBufferEndRecording) {
     NvnCmdBuf *cb = cb_of(A(0));
     rec(c, cb, CMD_END, 0);
     cb->recording = false;
-    if (ENV("LARECOMP_CHECK_HANDLES")) {
+    if (ENV("LARECOMP_CHECK_HANDLES") || ENV("LARECOMP_TRACE_COPY")) {
+        pthread_mutex_lock(&g_hist_lock);
         uint64_t k = g_hist_n++;
         ListRec *l = &g_hist[k % HIST];
         l->start = cb->start, l->end = write_at(cb), l->cb = cb->guest, l->gmem = cb->gmem, l->gused = cb->used;
         l->lr = c->x[30], l->seq = k;
+        pthread_mutex_unlock(&g_hist_lock);
     }
     if (ENV("LARECOMP_CHECK_HANDLES")) {
         static int n;
@@ -719,40 +728,87 @@ void nvn_check_list(uint64_t h, int depth) {
 
 // CopyCommands copies the lists' commands into this one: the game may reuse their memory right away (BOTW does).
 // (CallCommands above only refers to them.) The lists' leading barrier (nvnCommandBufferBeginRecording) is left out.
-static void copy_list(Cpu *c, NvnCmdBuf *cb, uint64_t p) {
-    bool first = true;
-    for (int guard = 0; guard < 10000000 && p; guard++) {
-        const CmdRec *r = (const CmdRec *)(uintptr_t)p;
-        if (r->op == CMD_END) return;
-        if (r->op == CMD_JUMP) { p = r->x[0]; continue; }
-        uint32_t size = r->size;
-        if (!size) return;
-        if (!(first && r->op == CMD_BARRIER)) {
-            CmdRec *d = rec(c, cb, r->op, size - (uint32_t)sizeof(CmdRec));
-            memcpy(d, r, size);
+static void copy_lists(Cpu *c, NvnCmdBuf *cb, int n, const uint64_t *handles) {
+    // rec() may invoke guest allocation callbacks. Snapshot ALL input lists before
+    // the first callback can recycle their control memory, including later handles.
+    uint64_t local[128];
+    uint8_t *snapshot = (uint8_t *)local;
+    size_t used = 0, capacity = sizeof local;
+    for (int list = 0; list < n; list++) {
+        uint64_t p = handles[list];
+        struct { uint64_t at; uint32_t op, size; } previous[8] = {0};
+        unsigned seen = 0;
+        bool first = true;
+        int guard = 0;
+        for (; guard < 10000000 && p; guard++) {
+            const CmdRec *r = (const CmdRec *)(uintptr_t)p;
+            if (r->op == CMD_END) break;
+            if (r->op == CMD_JUMP) {
+                previous[seen & 7].at = p; previous[seen & 7].op = r->op;
+                previous[seen++ & 7].size = r->size;
+                p = r->x[0]; continue;
+            }
+            uint32_t size = r->size;
+            if (r->op >= CMD_COUNT || size < sizeof(CmdRec) || size > 0x100000 || (size & 7)) {
+                LOG("[nvn] invalid copy source handle=%llx list=%d/%d record=%d destination=%p\n",
+                    (unsigned long long)handles[list], list, n, guard, (void *)cb);
+                for (unsigned k = seen > 8 ? seen - 8 : 0; k < seen; k++)
+                    LOG("[nvn] copied source before: at=%llx op=%u size=%u\n",
+                        (unsigned long long)previous[k & 7].at, previous[k & 7].op, previous[k & 7].size);
+                if (ENV("LARECOMP_CHECK_HANDLES") || ENV("LARECOMP_TRACE_COPY")) hist_report(handles[list]);
+                FATAL("nvn: invalid copied command at %llx: op %u size %u (lr %llx)\n",
+                      (unsigned long long)p, r->op, size, (unsigned long long)c->x[30]);
+            }
+            previous[seen & 7].at = p; previous[seen & 7].op = r->op;
+            previous[seen++ & 7].size = size;
+            if (!(first && r->op == CMD_BARRIER)) {
+                if (used > SIZE_MAX - size) FATAL("nvn: copied command size overflow\n");
+                size_t needed = used + size;
+                if (needed > capacity) {
+                    size_t next = capacity <= SIZE_MAX / 2 ? capacity * 2 : needed;
+                    if (next < needed) next = needed;
+                    uint8_t *mem = snapshot == (uint8_t *)local ? malloc(next) : realloc(snapshot, next);
+                    if (!mem) FATAL("nvn: no memory for copied commands (%zu bytes)\n", next);
+                    if (snapshot == (uint8_t *)local) memcpy(mem, local, used);
+                    snapshot = mem; capacity = next;
+                }
+                memcpy(snapshot + used, r, size);
+                used = needed;
+            }
+            first = false;
+            p += size;
         }
-        first = false;
-        p += size;
+        if (guard == 10000000) FATAL("nvn: copied command list contains a cycle\n");
     }
+    for (size_t offset = 0; offset < used;) {
+        const CmdRec *r = (const CmdRec *)(snapshot + offset);
+        uint32_t size = r->size;
+        CmdRec *d = rec(c, cb, r->op, size - (uint32_t)sizeof(CmdRec));
+        memcpy(d, r, size);
+        offset += size;
+    }
+    if (snapshot != (uint8_t *)local) free(snapshot);
 }
 // CallCommands too: the lists it calls live in control memory, which NVN reads as this is recorded; BOTW records
 // over them before this list is submitted. (LARECOMP_CALL_REFS=1: refer to them, as before)
 NVN(nvnCommandBufferCallCommands) {
     int n = (int)A(1);
+    if (n <= 0) return;
     nvn_check_handles(c, "CallCommands", n, AP(2));
     if (ENV("LARECOMP_CALL_REFS")) { record_copy(c, CMD_CALL, 2, (uint32_t)n * 8); return; }
     uint64_t self = A(0), handles[64];
     if (n > 64) n = 64;
     memcpy(handles, AP(2), n * sizeof *handles);
-    for (int i = 0; i < n; i++) copy_list(c, cb_of(self), handles[i]);
+    copy_lists(c, cb_of(self), n, handles);
 }
 NVN(nvnCommandBufferCopyCommands) {
     int n = (int)A(1);
+    if (n <= 0) return;
     nvn_check_handles(c, "CopyCommands", n, AP(2));
     uint64_t self = A(0), handles[64];
     if (n > 64) n = 64;
     memcpy(handles, AP(2), n * sizeof *handles);  // (rec may call the guest back: its registers change)
-    for (int i = 0; i < n; i++) copy_list(c, cb_of(self), handles[i]);
+    copy_lists(c, cb_of(self), n, handles);
 }
 NVN(nvnCommandBufferInsertDebugMarker) { (void)c; }
 NVN(nvnCommandBufferInsertDebugMarkerDynamic) { (void)c; }

@@ -22,6 +22,7 @@
 #include <sys/mman.h>
 #include <sys/resource.h>
 #include <sys/stat.h>
+#include <sys/system_properties.h>
 #include <sys/syscall.h>
 #include <sys/ucontext.h>
 #include <time.h>
@@ -190,6 +191,14 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
         fprintf(stderr, "[android] guest window %#llx-%#llx\n", (unsigned long long)base, (unsigned long long)(base + hi - lo));
         const char *last = getenv("LARECOMP_LAST_EXIT");  // (the activity: ApplicationExitInfo)
         if (last && *last) fprintf(stderr, "[android] the last run ended: %s\n", last);
+        const char *boot = getenv("LARECOMP_BOOT_STATE");
+        if (boot && *boot) fprintf(stderr, "[android] %s\n", boot);
+        const char *boot_props[] = {"ro.boot.bootreason", "sys.boot.reason"};
+        for (unsigned i = 0; i < sizeof boot_props / sizeof *boot_props; i++) {
+            char value[PROP_VALUE_MAX] = "";
+            if (__system_property_get(boot_props[i], value) > 0)
+                fprintf(stderr, "[android] %s: %s\n", boot_props[i], value);
+        }
         return true;
     }
     void *p = mmap((void *)(uintptr_t)lo, hi - lo, PROT_READ | PROT_WRITE,
@@ -373,7 +382,7 @@ int plat_written_pages(uint64_t addr, uint64_t size, uint64_t *pages, int max, u
             {   // whose the mallocs are (#249: [anon:scudo:secondary] grew ~2000 every 5 minutes on a Mali)
                 extern int g_cmd_shadow_pages, g_cmd_host_chunks, vk_live_counts(char *out, int cap);
                 struct mallinfo mi = mallinfo();
-                char vk[256] = "";
+                char vk[512] = "";
                 vk_live_counts(vk, sizeof vk);
                 fprintf(stderr, "[android] malloc %zu MB in use (%zu MB mapped by large blocks); command shadow pages %d, host "
                         "command chunks %d; %s\n", (size_t)mi.uordblks >> 20, (size_t)mi.hblkhd >> 20, g_cmd_shadow_pages,
@@ -709,6 +718,14 @@ void plat_terminate(void) { _exit(0); }
 // the battery or most thermal sensors in /sys).
 static pthread_mutex_t g_ds_lock = PTHREAD_MUTEX_INITIALIZER;
 static PlatDeviceStats g_ds = {.batt_temp_c = -1, .batt_pct = -1, .thermal = -1, .headroom = -1, .plugged = -1};
+
+JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeMemoryPressure(
+        JNIEnv *env, jclass cls, jint level, jlong available, jlong total, jlong threshold, jboolean low, jint pss) {
+    (void)env; (void)cls;
+    LOG("[android] memory pressure level %d: available %llu MB / %llu MB, low threshold %llu MB, low %d, process PSS %d MB\n",
+        level, (unsigned long long)available >> 20, (unsigned long long)total >> 20,
+        (unsigned long long)threshold >> 20, low != 0, pss / 1024);
+}
 
 JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeDeviceStats(JNIEnv *env, jclass cls, jfloat batt_temp_c,
                                                                             jfloat batt_pct, jfloat watts, jint thermal,

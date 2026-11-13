@@ -882,11 +882,17 @@ static void create_device(void) {
                                   .flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT, .queueFamilyIndex = g_vk.qfam};
     VK_CHECK(vkCreateCommandPool(g_vk.dev, &pi, NULL, &g_vk.pool));
 
-    // pipeline cache: cache/vk_pipelines.bin (written by vk_pipeline_cache_save; LARECOMP_VK_NO_PIPELINE_CACHE=1: neither
-    // read nor written - every pipeline compiled cold, for measuring)
+    // A null cache disables both persistence and in-memory retention by the driver. Merely
+    // skipping the file still left an ever-growing cache during long Mali sessions.
+    if (getenv("LARECOMP_VK_NO_PIPELINE_CACHE")) {
+        g_vk.pcache = VK_NULL_HANDLE;
+        LOG("[vk-cache] disabled: no in-memory or disk pipeline cache\n");
+        return;
+    }
+    // pipeline cache: cache/vk_pipelines.bin (written by vk_pipeline_cache_save)
     size_t sz = 0;
     void *data = NULL;
-    FILE *fp = getenv("LARECOMP_VK_NO_PIPELINE_CACHE") ? NULL : fopen("cache/vk_pipelines.bin", "rb");
+    FILE *fp = fopen("cache/vk_pipelines.bin", "rb");
     if (fp) {
 #ifdef __ANDROID__  // (a size cap and the public header checked: a file from another driver or a cut-off write)
         long length = -1;
@@ -921,10 +927,20 @@ static void create_device(void) {
 }
 
 void vk_pipeline_cache_save(void) {
-    if (getenv("LARECOMP_VK_NO_PIPELINE_CACHE")) return;
+    if (!g_vk.pcache) return;
     size_t sz = 0;
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) != VK_SUCCESS || !sz) return;
+    // The loader rejects larger files too. Avoid a large temporary allocation under memory pressure.
+    if (sz > VK_BACKEND_PIPELINE_CACHE_MAX) {
+        static bool told;
+        if (!told) { told = true; LOG("[vk-cache] save skipped: %zu bytes exceeds the cache file limit\n", sz); }
+        return;
+    }
     void *data = malloc(sz);
+    if (!data) {
+        LOG("[vk-cache] save skipped: cannot allocate %zu bytes\n", sz);
+        return;
+    }
     if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, data) == VK_SUCCESS) {
         mkdir("cache", 0755);
         FILE *f = fopen("cache/vk_pipelines.bin.tmp", "wb");
@@ -2182,7 +2198,7 @@ int ui_run(void) {
             static uint64_t last;
             static size_t saved;
             uint64_t now = SDL_GetTicks();
-            if (g_vk.dev && now - last > 30000 && !getenv("LARECOMP_VK_NO_PIPELINE_CACHE")) {
+            if (g_vk.dev && g_vk.pcache && now - last > 30000) {
                 last = now;
                 size_t sz = 0;
                 if (vkGetPipelineCacheData(g_vk.dev, g_vk.pcache, &sz, NULL) == VK_SUCCESS && sz > saved + 65536) {

@@ -194,6 +194,259 @@ static int fix_tag_null(Cpu *c) {
     c->x[0] = 0;
     return 2;
 }
+// #333: observe the task's registered queue node before setup consumes it and before
+// cancellation removes it. Opt-in only; replay the original instructions unchanged.
+typedef struct { uint64_t before, after, thread, when; unsigned phase; int core; } Task160Event;
+typedef struct { uint64_t task; unsigned sequence; Task160Event events[4]; } Task160History;
+static Task160History task160_history[2048];
+static pthread_mutex_t task160_lock = PTHREAD_MUTEX_INITIALIZER;
+static unsigned task160_slot(uint64_t task) { return (unsigned)((task >> 4) ^ (task >> 16)) & 2047; }
+static int trace_task160_write(uint64_t task, uint64_t after, unsigned phase) {
+    if (task < GUEST_LO || task > GUEST_HI - 0x198) return 0;
+    uint64_t before = *(const uint64_t *)(uintptr_t)(task + 0x128);
+    KThread *t = kernel_current_thread();
+    Task160Event e = {before, after, t ? t->id : 0, plat_now_ns(), phase,
+                     t ? __atomic_load_n(&t->core, __ATOMIC_ACQUIRE) : -1};
+    pthread_mutex_lock(&task160_lock);
+    Task160History *h = &task160_history[task160_slot(task)];
+    if (h->task != task) { h->task = task; h->sequence = 0; }
+    h->events[h->sequence++ & 3] = e;
+    pthread_mutex_unlock(&task160_lock);
+    return 0;
+}
+static void trace_task160_history(uint64_t task) {
+    Task160History h;
+    pthread_mutex_lock(&task160_lock);
+    h = task160_history[task160_slot(task)];
+    pthread_mutex_unlock(&task160_lock);
+    if (h.task != task) { LOG("[task160] node history unavailable (no record or slot reused)\n"); return; }
+    for (unsigned i = h.sequence > 4 ? h.sequence - 4 : 0; i < h.sequence; i++) {
+        Task160Event e = h.events[i & 3];
+        LOG("[task160] node history task=%llx phase=%u before=%llx after=%llx thread=%llu core=%d time=%llu\n",
+            (unsigned long long)task, e.phase, (unsigned long long)e.before, (unsigned long long)e.after,
+            (unsigned long long)e.thread, e.core, (unsigned long long)e.when);
+    }
+}
+static int trace_task160_reset(Cpu *c) { return trace_task160_write(c->x[19], 0, 1); }
+static int trace_task160_assign(Cpu *c) { return trace_task160_write(c->x[28] - 0x128, c->x[26], 2); }
+static void trace_task160_rejection(Cpu *c, const char *phase) {
+    uint64_t task = c->x[19];
+    uint32_t request[8] = {0}; uint64_t node = 0, node_fields[12] = {0};
+    if (task >= GUEST_LO && task <= GUEST_HI - 0x198) {
+        memcpy(request, (const void *)(uintptr_t)(task + 0x130), sizeof request);
+        memcpy(&node, (const void *)(uintptr_t)(task + 0x128), sizeof node);
+    }
+    if (node >= GUEST_LO && node <= GUEST_HI - sizeof node_fields)
+        memcpy(node_fields, (const void *)(uintptr_t)node, sizeof node_fields);
+    KThread *t = kernel_current_thread();
+    LOG("[task160] rejection %s task=%llx node=%llx manager=%llx list=%llx thread=%llu core=%d\n",
+        phase, (unsigned long long)task, (unsigned long long)node, (unsigned long long)c->x[21],
+        (unsigned long long)c->x[25], (unsigned long long)(t ? t->id : 0),
+        t ? __atomic_load_n(&t->core, __ATOMIC_ACQUIRE) : -1);
+    LOG("[task160] request +130=%x/%x/%x/%x/%x/%x/%x/%x; x8-x15=%llx/%llx/%llx/%llx/%llx/%llx/%llx/%llx\n",
+        request[0], request[1], request[2], request[3], request[4], request[5], request[6], request[7],
+        (unsigned long long)c->x[8], (unsigned long long)c->x[9], (unsigned long long)c->x[10],
+        (unsigned long long)c->x[11], (unsigned long long)c->x[12], (unsigned long long)c->x[13],
+        (unsigned long long)c->x[14], (unsigned long long)c->x[15]);
+    for (unsigned i = 0; i < 12; i += 4)
+        LOG("[task160] node +%x=%llx/%llx/%llx/%llx\n", i * 8,
+            (unsigned long long)node_fields[i], (unsigned long long)node_fields[i+1],
+            (unsigned long long)node_fields[i+2], (unsigned long long)node_fields[i+3]);
+}
+static int trace_task160_reject(Cpu *c) { trace_task160_rejection(c, "before removal"); return 0; }
+static int trace_task160_evict(Cpu *c) {
+    trace_task160_rejection(c, "before zeroing");
+    return trace_task160_write(c->x[28] - 0x128, 0, 3);
+}
+static int trace_task160_remove(Cpu *c) { return trace_task160_write(c->x[20], 0, 4); }
+static int trace_task160_destroy(Cpu *c) { return trace_task160_write(c->x[19], 0, 5); }
+static void trace_task160(uint64_t manager, uint64_t task, uint64_t lr, const char *phase) {
+    static unsigned count;
+    if (task < GUEST_LO || task > GUEST_HI - 0x198) return;
+    uint64_t node = *(const uint64_t *)(uintptr_t)(task + 0x128);
+    if (__atomic_fetch_add(&count, 1, __ATOMIC_RELAXED) < 40 || !node)
+        LOG("[task160] %s manager=%llx task=%llx node=%llx owner=%llx flags=%x lr=%llx\n", phase,
+            (unsigned long long)manager, (unsigned long long)task, (unsigned long long)node,
+            (unsigned long long)*(const uint64_t *)(uintptr_t)(task + 0x150),
+            *(const uint8_t *)(uintptr_t)(task + 0x192), (unsigned long long)lr);
+    if (!node) trace_task160_history(task);
+}
+static int trace_task160_setup(Cpu *c) { trace_task160(c->x[21], c->x[19], c->x[30], "setup"); return 0; }
+static int trace_task160_cancel(Cpu *c) { trace_task160(c->x[0], c->x[1], c->x[30], "cancel"); return 0; }
+typedef struct { uint64_t descriptor, buffer, caller; int bound; } Output160History;
+static Output160History output160_history[1024];
+static pthread_mutex_t output160_lock = PTHREAD_MUTEX_INITIALIZER;
+static void output160_event(uint64_t descriptor, uint64_t buffer, uint64_t caller, int bound) {
+    unsigned slot = (unsigned)((descriptor >> 4) ^ (descriptor >> 16)) & 1023;
+    pthread_mutex_lock(&output160_lock);
+    output160_history[slot] = (Output160History){descriptor, buffer, caller, bound};
+    pthread_mutex_unlock(&output160_lock);
+}
+static int trace_output160_construct(Cpu *c) { output160_event(c->x[19], 0, c->x[30], 0); return 0; }
+static int trace_output160_bind(Cpu *c) { output160_event(c->x[0], c->x[1], c->x[30], 1); return 0; }
+typedef struct { Cpu *cpu; uint64_t sp, descriptor, input, target; } Cursor160History;
+static Cursor160History cursor160_history[1024];
+// Bounded observation only: preserve the game's pool selection/release behavior.
+typedef struct { uint64_t pool, buffer, index, cpu; unsigned phase; } Pool160Event;
+static Pool160Event pool160_events[64];
+static unsigned pool160_sequence;
+static void trace_pool160_event(Cpu *c, uint64_t pool, uint64_t buffer, uint64_t index, unsigned phase) {
+    Pool160Event recent[64];
+    unsigned total = 0;
+    int count = 0; uint64_t buffers = 0, flags = 0;
+    if (pool < GUEST_LO || pool > GUEST_HI - 0x92) return;
+    const uint8_t *p = (const uint8_t *)(uintptr_t)pool;
+    memcpy(&count, p + 0x58, 4);
+    // A pool of zero means this object needs no scratch buffer; zero is normal.
+    bool failed = !buffer && phase == 1 && count > 0;
+    pthread_mutex_lock(&output160_lock);
+    pool160_events[pool160_sequence++ & 63] = (Pool160Event){pool, buffer, index, (uint64_t)(uintptr_t)c, phase};
+    if (failed) {
+        total = pool160_sequence < 64 ? pool160_sequence : 64;
+        for (unsigned i = 0; i < total; i++) recent[i] = pool160_events[(pool160_sequence - total + i) & 63];
+    }
+    pthread_mutex_unlock(&output160_lock);
+    if (!total) return;
+    if (pool >= GUEST_LO && pool <= GUEST_HI - 0x92) {
+        memcpy(&buffers, p + 0x50, 8); memcpy(&flags, p + 0x60, 8);
+        LOG("[pool160] null selection pool=%llx count=%d buffers=%llx flags=%llx cpu=%llx\n",
+            (unsigned long long)pool, count, (unsigned long long)buffers,
+            (unsigned long long)flags, (unsigned long long)(uintptr_t)c);
+        if (count > 0 && count <= 64 && buffers >= GUEST_LO && buffers <= GUEST_HI - (uint64_t)count * 8 &&
+            flags >= GUEST_LO && flags <= GUEST_HI - (uint64_t)count)
+            for (int i = 0; i < count; i++) {
+                uint64_t b; memcpy(&b, (const void *)(uintptr_t)(buffers + (uint64_t)i * 8), 8);
+                LOG("[pool160] slot=%d buffer=%llx busy=%u\n", i, (unsigned long long)b,
+                    *(const uint8_t *)(uintptr_t)(flags + i));
+            }
+    }
+    for (unsigned i = 0; i < total; i++) if (recent[i].pool == pool)
+        LOG("[pool160] history phase=%u pool=%llx buffer=%llx index=%llu cpu=%llx\n", recent[i].phase,
+            (unsigned long long)pool, (unsigned long long)recent[i].buffer,
+            (unsigned long long)recent[i].index, (unsigned long long)recent[i].cpu);
+}
+static int trace_pool160_select(Cpu *c) { trace_pool160_event(c, c->x[19], c->x[8], c->x[22], 1); return 0; }
+static int trace_pool160_release(Cpu *c) { trace_pool160_event(c, c->x[20], c->x[21], c->x[9], 2); return 0; }
+static int trace_pool160_configure(Cpu *c) { trace_pool160_event(c, c->x[0], c->x[1], c->x[2], 3); return 0; }
+// Experimental #333 guard: keep one workspace owner's configure/use/release
+// transaction together. Only installed with LARECOMP_FIX_WORKSPACE160=1.
+// Bounded stripes may serialize unrelated owners on a hash collision.
+#define WORKSPACE160_GUARDS 256
+void kernel_blocking_begin(void);
+void kernel_blocking_end(void);
+static pthread_mutex_t workspace160_guards[WORKSPACE160_GUARDS];
+static pthread_once_t workspace160_once = PTHREAD_ONCE_INIT;
+static void workspace160_init(void) {
+    pthread_mutexattr_t attr;
+    if (pthread_mutexattr_init(&attr) || pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE))
+        FATAL("workspace160: cannot initialize guard attributes\n");
+    for (unsigned i = 0; i < WORKSPACE160_GUARDS; i++)
+        if (pthread_mutex_init(&workspace160_guards[i], &attr)) FATAL("workspace160: cannot initialize guard\n");
+    pthread_mutexattr_destroy(&attr);
+}
+static pthread_mutex_t *workspace160_guard(uint64_t owner) {
+    return &workspace160_guards[((owner >> 4) ^ (owner >> 16)) & (WORKSPACE160_GUARDS - 1)];
+}
+static int fix_workspace160_enter(Cpu *c) {
+    pthread_once(&workspace160_once, workspace160_init);
+    pthread_mutex_t *guard = workspace160_guard(c->x[0]);
+    int err = pthread_mutex_trylock(guard);
+    if (err == EBUSY) {
+        // A thread waiting here must not retain guest core 0: the current
+        // workspace owner may need that core to finish and release the guard.
+        kernel_blocking_begin();
+        err = pthread_mutex_lock(guard);
+        kernel_blocking_end();
+        static unsigned waits;
+        unsigned n = __atomic_fetch_add(&waits, 1, __ATOMIC_RELAXED);
+        if (n < 16 || !(n & 255))
+            LOG("[workspace160] serialized overlap owner=%llx waits=%u\n", (unsigned long long)c->x[0], n + 1);
+    }
+    if (err) FATAL("workspace160: cannot acquire guard (%d)\n", err);
+    return 0;
+}
+static int fix_workspace160_leave(Cpu *c) {
+    // x19 still holds the owner here, before the epilogue restores registers.
+    int err = pthread_mutex_unlock(workspace160_guard(c->x[19]));
+    if (err) FATAL("workspace160: cannot release guard (%d)\n", err);
+    return 0;
+}
+// Observe the indirect-call family reached after the workspace candidate. Do
+// not replace the target or suppress an invalid call; preserve the evidence.
+static int trace_virtual160(Cpu *c, uint64_t object, const char *phase) {
+    static unsigned samples;
+    uint64_t target = c->x[8];
+    bool suspect = !((target >= MAIN_BASE && target < SDK_BASE + 0x1000000) ||
+                     (target >= HLE_BASE && target < HLE_BASE + 0x14000));
+    if (!suspect && __atomic_fetch_add(&samples, 1, __ATOMIC_RELAXED) >= 16) return 0;
+    KThread *t = kernel_current_thread();
+    uint64_t fields[4] = {0};
+    if (object >= GUEST_LO && object <= GUEST_HI - sizeof fields)
+        memcpy(fields, (const void *)(uintptr_t)object, sizeof fields);
+    LOG("[virtual160] %s suspect=%d object=%llx target=%llx fields=%llx/%llx/%llx/%llx owner=%llx lr=%llx thread=%llu core=%d\n",
+        phase, suspect, (unsigned long long)object, (unsigned long long)target,
+        (unsigned long long)fields[0], (unsigned long long)fields[1],
+        (unsigned long long)fields[2], (unsigned long long)fields[3],
+        (unsigned long long)c->x[19], (unsigned long long)c->x[30],
+        (unsigned long long)(t ? t->id : 0), t ? __atomic_load_n(&t->core, __ATOMIC_ACQUIRE) : -1);
+    return 0;
+}
+static int trace_virtual160_create(Cpu *c) { return trace_virtual160(c, c->x[21], "create"); }
+static int trace_virtual160_start(Cpu *c) { return trace_virtual160(c, c->x[0], "start"); }
+static int trace_virtual160_drop(Cpu *c) { return trace_virtual160(c, c->x[20], "drop"); }
+static int trace_virtual160_update(Cpu *c) { return trace_virtual160(c, c->x[20], "update"); }
+static int trace_cursor160_entry(Cpu *c) {
+    if (!c->x[2]) LOG("[cursor160] null workspace object=%llx owner=%llx caller=%llx\n",
+        (unsigned long long)c->x[0], (unsigned long long)c->x[1], (unsigned long long)c->x[30]);
+    return 0;
+}
+static int trace_cursor160_before(Cpu *c) {
+    unsigned slot = (unsigned)((uintptr_t)c >> 6) & 1023;
+    pthread_mutex_lock(&output160_lock);
+    cursor160_history[slot] = (Cursor160History){c, c->sp, c->x[0], c->x[20], c->x[8]};
+    pthread_mutex_unlock(&output160_lock);
+    return 0;
+}
+static int trace_cursor160_after(Cpu *c) {
+    if (c->x[0]) return 0;
+    unsigned slot = (unsigned)((uintptr_t)c >> 6) & 1023;
+    pthread_mutex_lock(&output160_lock);
+    Cursor160History h = cursor160_history[slot];
+    pthread_mutex_unlock(&output160_lock);
+    if (h.cpu == c && h.sp == c->sp)
+        LOG("[cursor160] zero result descriptor=%llx input=%llx target=%llx\n",
+            (unsigned long long)h.descriptor, (unsigned long long)h.input, (unsigned long long)h.target);
+    else LOG("[cursor160] zero result: call history unavailable\n");
+    return 0;
+}
+static void trace_output160(uint64_t descriptor, uint64_t source, uint64_t lr, const char *phase) {
+    static unsigned count;
+    if (descriptor < GUEST_LO || descriptor > GUEST_HI - 0x24) {
+        LOG("[output160] %s invalid descriptor=%llx lr=%llx\n", phase,
+            (unsigned long long)descriptor, (unsigned long long)lr);
+        return;
+    }
+    const uint64_t *d = (const uint64_t *)(uintptr_t)descriptor;
+    uint64_t output = d[2];
+    if (!output) {
+        unsigned slot = (unsigned)((descriptor >> 4) ^ (descriptor >> 16)) & 1023;
+        pthread_mutex_lock(&output160_lock);
+        Output160History h = output160_history[slot];
+        pthread_mutex_unlock(&output160_lock);
+        LOG("[output160] null history descriptor=%llx last=%s buffer=%llx caller=%llx\n",
+            (unsigned long long)descriptor, h.descriptor != descriptor ? "unknown (not recorded or slot reused)"
+            : h.bound ? "buffer assigned" : "constructed, no later assignment recorded",
+            (unsigned long long)(h.descriptor == descriptor ? h.buffer : 0),
+            (unsigned long long)(h.descriptor == descriptor ? h.caller : 0));
+    }
+    if (__atomic_fetch_add(&count, 1, __ATOMIC_RELAXED) < 16 || !output)
+        LOG("[output160] %s descriptor=%llx source=%llx output=%llx fields=%llx/%llx/%llx/%x lr=%llx\n",
+            phase, (unsigned long long)descriptor, (unsigned long long)source, (unsigned long long)output,
+            (unsigned long long)d[0], (unsigned long long)d[1], (unsigned long long)d[3],
+            *(const uint32_t *)(uintptr_t)(descriptor + 0x20), (unsigned long long)lr);
+}
+static int trace_output160_entry(Cpu *c) { trace_output160(c->x[2], c->x[0], c->x[30], "entry"); return 0; }
+static int trace_output160_load(Cpu *c) { trace_output160(c->x[20], c->x[24], c->x[30], "load (x30 is scratch)"); return 0; }
 typedef struct { int version; uint64_t addr, alt; uint32_t word; int (*fn)(Cpu *); const char *what; } Fix;
 static const Fix fixes[] = {  // (canonical addresses, 0x7000000000 + the offset in main)
     {100, 0x70010c1aa0, 0x70010c1ad8, 0xf9400008, fix_clustered_100, "ClusteredRenderer teardown"},
@@ -201,6 +454,31 @@ static const Fix fixes[] = {  // (canonical addresses, 0x7000000000 + the offset
     {100, 0x7000d5dce0, 0, 0xf9404500, fix_tag_null, "tag check, no target yet"},
     {160, 0x7001861440, 0x7001861470, 0xf9400008, fix_clustered_160, "ClusteredRenderer teardown"},
     {160, 0x700161495c, 0, 0xf9412668, fix_ticks_160, "frame duration"},
+    {160, 0x7001296cfc, 0, 0xf9400388, trace_task160_setup, "task queue setup trace"},
+    {160, 0x7001297080, 0, 0xf81d0ff5, trace_task160_cancel, "task queue cancellation trace"},
+    {160, 0x70012962f4, 0, 0xf900967f, trace_task160_reset, "task node reset trace"},
+    {160, 0x700129663c, 0, 0xf900039a, trace_task160_assign, "task node assignment trace"},
+    {160, 0x7001296cc0, 0, 0xf900039f, trace_task160_evict, "task node eviction trace"},
+    {160, 0x7001296cb0, 0, 0x320003e2, trace_task160_reject, "task rejection context trace"},
+    {160, 0x700129714c, 0, 0xf900969f, trace_task160_remove, "task node removal trace"},
+    {160, 0x700128ff20, 0, 0xf900967f, trace_task160_destroy, "task node teardown trace"},
+    {160, 0x700128ff7c, 0, 0xf900967f, trace_task160_destroy, "task node teardown reset trace"},
+    {160, 0x7001db55ec, 0, 0xd10643ff, trace_output160_entry, "output buffer entry trace"},
+    {160, 0x7001db5a4c, 0, 0xf9400a8a, trace_output160_load, "output buffer load trace"},
+    {160, 0x7001e0df64, 0, 0xb900226a, trace_output160_construct, "output buffer construction trace"},
+    {160, 0x7001e0e03c, 0, 0x3941612b, trace_output160_bind, "output buffer binding trace"},
+    {160, 0x7001da0d90, 0, 0xa9bb67fa, trace_cursor160_entry, "workspace entry trace"},
+    {160, 0x7001da0f00, 0, 0xaa1403e1, trace_cursor160_before, "workspace cursor input trace"},
+    {160, 0x7001da0f08, 0, 0xb9403308, trace_cursor160_after, "workspace cursor result trace"},
+    {160, 0x7001da402c, 0, 0xf90013e8, trace_pool160_select, "workspace pool selection trace"},
+    {160, 0x7001da3ef0, 0, 0xf9403288, trace_pool160_release, "workspace pool release trace"},
+    {160, 0x7001da3d14, 0, 0xf81c0ff7, trace_pool160_configure, "workspace pool configuration trace"},
+    {160, 0x7001da3f1c, 0, 0xd10283ff, fix_workspace160_enter, "workspace transaction guard entry"},
+    {160, 0x7001da41e0, 0, 0xfd401be8, fix_workspace160_leave, "workspace transaction guard exit"},
+    {160, 0x7001339db4, 0, 0xaa1503e0, trace_virtual160_create, "object create call trace"},
+    {160, 0x700133becc, 0, 0xaa0003f4, trace_virtual160_start, "object start call trace"},
+    {160, 0x700133beec, 0, 0xaa1403e0, trace_virtual160_drop, "object drop call trace"},
+    {160, 0x700133e564, 0, 0xaa1403e0, trace_virtual160_update, "object update call trace"},
     {182, 0x7000d811fc, 0, 0xa9bd7bfd, fix_frame_wait, "frame wait"},
     {182, 0x70014092f4, 0, 0xb9407a68, fix_vfr, "VFR ratio"},
     {182, 0x7000da13f4, 0, 0xbd409800, fix_persp_matrix, "projection matrix"},
@@ -271,6 +549,23 @@ static void prepare_module(Module *m) {
     unsigned nfixed = 0;
     for (uint32_t f = 0; is_main && f < nfix; f++) {
         if (fixes[f].version != g_game_version) continue;
+        if ((fixes[f].fn == trace_task160_setup || fixes[f].fn == trace_task160_cancel) &&
+            !getenv("LARECOMP_TRACE_TASK160")) continue;
+        if ((fixes[f].fn == trace_task160_reset || fixes[f].fn == trace_task160_assign ||
+             fixes[f].fn == trace_task160_evict || fixes[f].fn == trace_task160_remove ||
+             fixes[f].fn == trace_task160_destroy || fixes[f].fn == trace_task160_reject) && !ENV("LARECOMP_TRACE_TASK160")) continue;
+        if ((fixes[f].fn == trace_output160_entry || fixes[f].fn == trace_output160_load ||
+             fixes[f].fn == trace_output160_construct || fixes[f].fn == trace_output160_bind) &&
+            !getenv("LARECOMP_TRACE_WRITE160")) continue;
+        if ((fixes[f].fn == trace_cursor160_entry || fixes[f].fn == trace_cursor160_before ||
+             fixes[f].fn == trace_cursor160_after) && !getenv("LARECOMP_TRACE_WRITE160")) continue;
+        if ((fixes[f].fn == trace_pool160_select || fixes[f].fn == trace_pool160_release ||
+             fixes[f].fn == trace_pool160_configure) && !getenv("LARECOMP_TRACE_WRITE160")) continue;
+        if ((fixes[f].fn == fix_workspace160_enter || fixes[f].fn == fix_workspace160_leave) &&
+            !ENV("LARECOMP_FIX_WORKSPACE160")) continue;
+        if ((fixes[f].fn == trace_virtual160_create || fixes[f].fn == trace_virtual160_start ||
+             fixes[f].fn == trace_virtual160_drop || fixes[f].fn == trace_virtual160_update) &&
+            !ENV("LARECOMP_TRACE_VIRTUAL160")) continue;
         uint64_t site = MAIN_BASE + (fixes[f].addr - 0x7000000000ull);
         uint64_t alt = fixes[f].alt ? MAIN_BASE + (fixes[f].alt - 0x7000000000ull) : 0;
         uint32_t *w = (uint32_t *)(uintptr_t)site;

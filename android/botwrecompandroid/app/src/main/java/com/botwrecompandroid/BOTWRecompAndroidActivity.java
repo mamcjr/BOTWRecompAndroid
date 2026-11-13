@@ -55,6 +55,8 @@ import java.util.zip.ZipInputStream;
 
 public class BOTWRecompAndroidActivity extends SDLActivity {
     private static final String TAG = "BOTWRecompAndroid";
+    private static String bootState;
+    private static native void nativeMemoryPressure(int level, long available, long total, long threshold, boolean low, int pss);
 
     private final Handler stats = new Handler(Looper.getMainLooper());
     private final Runnable report = new Runnable() {
@@ -106,6 +108,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             copyIfChanged(new File(games, "botwgame.so.id"), new File(res, "botwgame.so.id"));
             setenv("LARECOMP_NATIVE_LIB_DIR", getApplicationInfo().nativeLibraryDir);
             setenv("LARECOMP_LAST_EXIT", lastExit());
+            setenv("LARECOMP_BOOT_STATE", bootState());
             File gen = new File(getFilesDir(), "gen");
             unpackGen(gen);
             setenv("LARECOMP_GEN_DIR", gen.getAbsolutePath());
@@ -1286,6 +1289,40 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
                     e.getPss() / 1024, e.getRss() / 1024, e.getDescription());
         } catch (Exception e) {
             return "";
+        }
+    }
+
+    // A device reboot may leave no process crash report. Preserve the previous boot count
+    // once per process so activity recreation does not masquerade as a new test session.
+    private synchronized String bootState() {
+        if (bootState != null) return bootState;
+        int current = -1;
+        try { current = android.provider.Settings.Global.getInt(getContentResolver(),
+                android.provider.Settings.Global.BOOT_COUNT, -1); }
+        catch (Exception ignored) { /* Some firmware restricts access to this counter. */ }
+        android.content.SharedPreferences p = getSharedPreferences("crash_diagnostics", MODE_PRIVATE);
+        int previous = p.getInt("boot_count", -1);
+        bootState = "boot count " + current + ", previous session " + previous + ", uptime "
+                + android.os.SystemClock.elapsedRealtime() / 1000 + " s; "
+                + (current >= 0 && previous >= 0 ? (current > previous ? "system rebooted between sessions"
+                   : current == previous ? "same system boot" : "boot counter reset") : "reboot status unknown");
+        if (!p.edit().putInt("boot_count", current).commit())
+            Log.w(TAG, "could not persist boot counter for crash diagnostics");
+        return bootState;
+    }
+
+    @Override
+    public void onTrimMemory(int level) {
+        super.onTrimMemory(level);
+        try {
+            android.app.ActivityManager am = (android.app.ActivityManager) getSystemService(Context.ACTIVITY_SERVICE);
+            android.app.ActivityManager.MemoryInfo info = new android.app.ActivityManager.MemoryInfo();
+            am.getMemoryInfo(info);
+            android.os.Debug.MemoryInfo process = new android.os.Debug.MemoryInfo();
+            android.os.Debug.getMemoryInfo(process);
+            nativeMemoryPressure(level, info.availMem, info.totalMem, info.threshold, info.lowMemory, process.getTotalPss());
+        } catch (Exception | UnsatisfiedLinkError e) {
+            Log.w(TAG, "memory pressure level " + level + " (details unavailable)");
         }
     }
 

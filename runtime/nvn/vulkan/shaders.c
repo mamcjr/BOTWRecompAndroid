@@ -83,6 +83,7 @@ static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
     size_t n = *nwords, insert = 0, count = 0;
     uint32_t bound = spv[3];
     uint8_t *done = calloc(bound, 1);  // already decorated (glslang does it for what it traces from precise)
+    if (!done) return spv;
     for (size_t i = 5; i < n;) {
         uint32_t wc = spv[i] >> 16, op = spv[i] & 0xFFFF;
         if (!wc) break;
@@ -98,6 +99,7 @@ static uint32_t *no_contraction(uint32_t *spv, size_t *nwords) {
     }
     if (!insert || !count) { free(done); return spv; }
     uint32_t *out = malloc((n + count * 3) * 4);
+    if (!out) { free(done); return spv; }
     memcpy(out, spv, insert * 4);
     size_t o = insert;
     for (size_t i = 5; i < n;) {
@@ -166,12 +168,18 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
                                                                                   : shaderc_optimization_level_zero);
     shaderc_compilation_result_t r = shaderc_compile_into_spv(comp, src, strlen(src), kind_of(stage), name, "main", o);
     shaderc_compile_options_release(o);
+    if (!r) { LOG("[shader] %s: compiler returned no result\n", name); return NULL; }
     if (shaderc_result_get_compilation_status(r) != shaderc_compilation_status_success) {
         static int nlog;
         if (nlog++ < 20) LOG("[shader] %s: GLSL compile failed:\n%s\n%s\n", name, shaderc_result_get_error_message(r), src);
     } else {
         size_t n = shaderc_result_get_length(r);
         out = malloc(n);
+        if (!out) {
+            LOG("[shader] %s: cannot allocate %zu SPIR-V bytes\n", name, n);
+            shaderc_result_release(r);
+            return NULL;
+        }
         memcpy(out, shaderc_result_get_bytes(r), n);
         *nwords = n / 4;
         strip_names(out, nwords);
