@@ -39,6 +39,9 @@ Settings g_settings = {
     .show_fps = true,  // (the performance overlay, ui/perf_overlay.mm: on until turned off in the menu)
     .touch_controls = true,
     .overlay_pos = {-1, -1},
+    .overlay_scale = 100,
+    .overlay_opacity = 100,
+    .overlay_items = OVERLAY_ALL,
     .touch_pos = {{-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1},
                   {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}, {-1, -1}},
     .touch_scheme = 1,
@@ -51,6 +54,8 @@ Settings g_settings = {
     .touch_aim_sens = 1.0f,
     .touch_talk = true,
     .touch_minimap_top = true,
+    .lsfg_mult = 2,
+    .lsfg_flow = 75,
     .gpu_heap = -1,
     .inplace_reads = -1,
     .turnip_lrz = -1,
@@ -215,9 +220,15 @@ void settings_reset_defaults(void) {
     g_settings.motion = d->motion;
     g_settings.motion_source = d->motion_source;
     g_settings.motion_flat = d->motion_flat;
+    g_settings.lsfg = d->lsfg;
+    g_settings.lsfg_mult = d->lsfg_mult;
+    g_settings.lsfg_flow = d->lsfg_flow;
 #ifdef __ANDROID__
     g_settings.touch_controls = d->touch_controls;
     g_settings.overlay_style = d->overlay_style;
+    g_settings.overlay_scale = d->overlay_scale;
+    g_settings.overlay_opacity = d->overlay_opacity;
+    g_settings.overlay_items = d->overlay_items;
     g_settings.fps_mode = d->fps_mode;
     g_settings.event_fps_unlock = d->event_fps_unlock;
     g_settings.shader_int32 = d->shader_int32;
@@ -258,9 +269,15 @@ void settings_load(void) {
         else if (!strcmp(key, "motion")) g_settings.motion = atoi(val) != 0;
         else if (!strcmp(key, "motion_source")) g_settings.motion_source = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
         else if (!strcmp(key, "motion_flat")) g_settings.motion_flat = atoi(val) != 0;
+        else if (!strcmp(key, "frame_generation")) g_settings.lsfg = atoi(val) != 0;
+        else if (!strcmp(key, "frame_generation_mult")) g_settings.lsfg_mult = atoi(val);
+        else if (!strcmp(key, "frame_generation_flow")) g_settings.lsfg_flow = atoi(val);
 #ifdef __ANDROID__
         else if (!strcmp(key, "overlay")) g_settings.overlay_style = !strcmp(val, "compact");
         else if (!strcmp(key, "overlay_pos")) sscanf(val, "%f,%f", &g_settings.overlay_pos[0], &g_settings.overlay_pos[1]);
+        else if (!strcmp(key, "overlay_scale")) g_settings.overlay_scale = atoi(val);
+        else if (!strcmp(key, "overlay_opacity")) g_settings.overlay_opacity = atoi(val);
+        else if (!strcmp(key, "overlay_items")) g_settings.overlay_items = atoi(val);
 #endif
 #ifdef __ANDROID__
         else if (!strcmp(key, "touch_controls")) g_settings.touch_controls = atoi(val) != 0;
@@ -366,9 +383,13 @@ void settings_save(void) {
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "motion = %d\nmotion_source = %d\nmotion_flat = %d\n", g_settings.motion, g_settings.motion_source,
             g_settings.motion_flat);
+    fprintf(f, "frame_generation = %d\nframe_generation_mult = %d\nframe_generation_flow = %d\n", g_settings.lsfg,
+            g_settings.lsfg_mult, g_settings.lsfg_flow);
 #ifdef __ANDROID__
     fprintf(f, "overlay = %s\n", g_settings.overlay_style == 1 ? "compact" : "full");
     fprintf(f, "overlay_pos = %.4f,%.4f\n", g_settings.overlay_pos[0], g_settings.overlay_pos[1]);
+    fprintf(f, "overlay_scale = %d\noverlay_opacity = %d\noverlay_items = %d\n", g_settings.overlay_scale,
+            g_settings.overlay_opacity, g_settings.overlay_items);
 #endif
 #ifdef __ANDROID__
     fprintf(f, "touch_controls = %d\n", g_settings.touch_controls);
