@@ -241,9 +241,41 @@ void motion_open(void) {
     if (!gyro) LOG("[motion] no gyroscope among %d sensors: motion controls only from a controller that has one\n", n);
 }
 
+// A controller's sensors in another axis order: LARECOMP_PAD_GYRO=a,b,c (each x, y or z, with an optional -), the axes
+// SDL reports for the controller's x, y and z - e.g. "z,y,x" swaps pitch and roll. Gyroscope and accelerometer alike.
+// A Nintendo Pro Controller aimed up when its left side was lifted (#338), while the phone's gyroscope was right: a
+// player can try orders through Settings > Driver compatibility > Driver variables, without a build.
+static void pad_axes(const float d[3], float out[3]) {
+    static int axis[3] = {-1}, sign[3];
+    if (axis[0] == -1) {
+        for (int i = 0; i < 3; i++) axis[i] = i, sign[i] = 1;
+        const char *e = ENV("LARECOMP_PAD_GYRO");
+        int a[3], s[3], n = 0;
+        for (const char *p = e; p && *p && n < 3; p++) {
+            int neg = 0;
+            while (*p == ' ' || *p == ',') p++;
+            if (*p == '-') neg = 1, p++;
+            else if (*p == '+') p++;
+            if (*p < 'x' || *p > 'z') break;
+            a[n] = *p - 'x', s[n] = neg ? -1 : 1, n++;
+        }
+        if (n == 3 && a[0] != a[1] && a[1] != a[2] && a[0] != a[2]) {
+            for (int i = 0; i < 3; i++) axis[i] = a[i], sign[i] = s[i];
+            LOG("[motion] the controller's axes taken as %s (LARECOMP_PAD_GYRO)\n", e);
+        } else if (e) LOG("[motion] LARECOMP_PAD_GYRO=%s not understood (three of x, y, z, each with an optional -)\n", e);
+    }
+    for (int i = 0; i < 3; i++) out[i] = sign[i] * d[axis[i]];
+}
+
 // A controller that has a gyroscope: its own sensors, in place of the phone's while it sends them
 void motion_pad_opened(SDL_Gamepad *g) {
     if (!SDL_GamepadHasSensor(g, SDL_SENSOR_GYRO)) return;
+    {   // (which controller and through which of SDL's drivers: a controller's axes depend on it, #338)
+        const char *path = SDL_GetGamepadPath(g);
+        LOG("[motion] controller %s: vendor %04x product %04x, type %d, path %s, sensor rate %.0f Hz\n",
+            SDL_GetGamepadName(g), SDL_GetGamepadVendor(g), SDL_GetGamepadProduct(g), (int)SDL_GetGamepadType(g),
+            path ? path : "-", SDL_GetGamepadSensorDataRate(g, SDL_SENSOR_GYRO));
+    }
     // (Motion sensor: Phone - the controller's left off: a USB-C controller the phone sits in, its sensors on, and the
     // phone's aim stopped after a few shots until the controller was plugged in again, #78)
     if (g_settings.motion_source == 1) { LOG("[motion] %s: its gyroscope left off (Phone)\n", SDL_GetGamepadName(g)); return; }
@@ -280,8 +312,10 @@ void motion_event(const SDL_Event *e) {
         feed(type, s, e->sensor.sensor_timestamp ? e->sensor.sensor_timestamp : SDL_GetTicksNS(), true);
     } else if (e->type == SDL_EVENT_GAMEPAD_SENSOR_UPDATE) {
         if (source == 1) return;
+        float pd[3];
+        pad_axes(e->gsensor.data, pd);
         if (source == 2) {
-            feed((SDL_SensorType)e->gsensor.sensor, e->gsensor.data,
+            feed((SDL_SensorType)e->gsensor.sensor, pd,
                  e->gsensor.sensor_timestamp ? e->gsensor.sensor_timestamp : SDL_GetTicksNS(), false);
             return;
         }
@@ -322,7 +356,7 @@ void motion_event(const SDL_Event *e) {
         }
         if (!pad_live) return;
         pad_until_ns = SDL_GetTicksNS() + 500000000;
-        feed((SDL_SensorType)e->gsensor.sensor, e->gsensor.data,
+        feed((SDL_SensorType)e->gsensor.sensor, pd,
              e->gsensor.sensor_timestamp ? e->gsensor.sensor_timestamp : SDL_GetTicksNS(), false);
     }
 }
