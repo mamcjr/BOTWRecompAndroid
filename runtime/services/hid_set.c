@@ -1,4 +1,5 @@
 // hid (shared memory, input state filled in later) and settings (set, set:sys).
+#include <stdlib.h>
 #include <string.h>
 
 #include "../hle.h"
@@ -26,13 +27,42 @@ static void applet_resource(Service *s, IpcReq *req, IpcResp *resp) {
 
 SERVICE("hid", hid) {
     (void)s;
+    {   // LARECOMP_LOG_HID=1 (diagnosis): each command the game asks of hid, the first time
+        static int on = -1;
+        static uint8_t seen[1024];
+        if (on < 0) on = getenv("LARECOMP_LOG_HID") != NULL;
+        if (on && req->cmd < 1024 && !seen[req->cmd]++) LOG("[hid] command %u\n", req->cmd);
+    }
     switch (req->cmd) {
     case 0: ipc_return_object(resp, service_new("IAppletResource", applet_resource, NULL)); break;
     case 40: case 106: resp->copy_handles[resp->ncopy++] = new_event_handle(); break;
     case 101: OUT(uint32_t, 0) = 0x1F; resp_size(resp, 4); break;  // GetSupportedNpadStyleSet
     case 121: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadJoyHoldType
     case 129: OUT(int64_t, 0) = 0; resp_size(resp, 8); break;      // GetNpadHandheldActivationMode
-    case 201: case 202: case 203: case 206: case 207: case 208: case 209: break;  // vibration
+    // Vibration: the game's own vibration graph (recompiled) sends what each motor plays - a VibrationValue: low band
+    // amplitude, frequency, high band amplitude, frequency (floats) - per device handle (hle/input.c: low bit = left /
+    // right). hle/input.c input_rumble_set turns it into a controller's rumble.
+    case 201: {  // SendVibrationValue(handle, value, aruid)
+        extern void input_rumble_set(uint32_t handle, const float *v);
+        float v[4];
+        memcpy(v, req->data + 4, sizeof v);
+        input_rumble_set(IN(uint32_t, 0), v);
+        break;
+    }
+    case 206: {  // SendVibrationValues(aruid; handles, values in two X buffers)
+        extern void input_rumble_set(uint32_t handle, const float *v);
+        if (req->nx >= 2) {
+            uint64_t n = req->x[0].size / 4, m = req->x[1].size / 16;
+            for (uint64_t i = 0; i < n && i < m && i < 8; i++) {
+                float v[4];
+                memcpy(v, (const uint8_t *)(uintptr_t)req->x[1].addr + i * 16, sizeof v);
+                input_rumble_set(((const uint32_t *)(uintptr_t)req->x[0].addr)[i], v);
+            }
+        }
+        break;
+    }
+    case 205: OUT(uint8_t, 0) = 1; resp_size(resp, 1); break;  // IsVibrationPermitted (0 left the game silent)
+    case 202: case 203: case 204: case 207: case 208: case 209: case 210: break;  // vibration: its state asked, accepted
     case 200: memset(resp->data, 0, 0x10); OUT(uint32_t, 0) = 1; resp_size(resp, 0x10); break;
     default: break;  // Activate*/Set*: accept
     }

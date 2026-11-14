@@ -2265,6 +2265,8 @@ int ui_run(void) {
         }
         extern void motion_open(void);  // (runtime/hle/motion.c: the phone's sensors, once the setting is on)
         motion_open();
+        extern void input_rumble_apply(void);  // (runtime/hle/input.c: the game's vibration to the controllers)
+        input_rumble_apply();
         menu_apply_window_requests(window);
 #ifdef __ANDROID__
         {   // the pipeline cache to disk now and then while it grows: an app is killed rather than exited, so

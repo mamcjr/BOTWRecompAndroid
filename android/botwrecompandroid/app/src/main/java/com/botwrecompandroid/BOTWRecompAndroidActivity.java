@@ -1248,6 +1248,33 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     private static boolean dlgDone;
     private static String dlgText;
 
+    // The game's vibration on the phone's (or a handheld's) own motor, where the controller has none (hle/input.c
+    // input_rumble_apply, Controls > Vibration): a one-shot of ms at amplitude 1-255 the native side renews while the
+    // game keeps vibrating, so a stalled game stops it; 0 stops it now.
+    public static void vibrateDevice(int amplitude, int ms) {
+        BOTWRecompAndroidActivity a = self;
+        if (a == null) return;
+        try {
+            android.os.Vibrator v;
+            if (android.os.Build.VERSION.SDK_INT >= 31) {
+                android.os.VibratorManager vm = (android.os.VibratorManager) a.getSystemService(Context.VIBRATOR_MANAGER_SERVICE);
+                v = vm != null ? vm.getDefaultVibrator() : null;
+            } else {
+                v = (android.os.Vibrator) a.getSystemService(Context.VIBRATOR_SERVICE);
+            }
+            if (v == null || !v.hasVibrator()) return;
+            if (amplitude <= 0) { v.cancel(); return; }
+            int amp = v.hasAmplitudeControl() ? Math.max(1, Math.min(255, amplitude)) : android.os.VibrationEffect.DEFAULT_AMPLITUDE;
+            // as a game's (media), not the default touch feedback: with the phone's touch vibration off, HyperOS ignored
+            // every one ("ignored_for_settings", usage TOUCH - POCO F7 Ultra, 2026-11-14)
+            android.media.AudioAttributes aa = new android.media.AudioAttributes.Builder()
+                .setUsage(android.media.AudioAttributes.USAGE_GAME).build();
+            v.vibrate(android.os.VibrationEffect.createOneShot(ms, amp), aa);
+        } catch (Throwable t) {
+            Log.w("BOTWRecompAndroid", "vibrateDevice: " + t);
+        }
+    }
+
     public static boolean driverErrorDialog(String text) {
         BOTWRecompAndroidActivity a = self;
         if (a == null) return false;

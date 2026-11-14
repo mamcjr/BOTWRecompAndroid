@@ -187,6 +187,87 @@ static void pad_close(SDL_JoystickID id) {
     note_family();
 }
 
+// ---- vibration: what the game sends its two motors (services/hid_set.c, SendVibrationValue(s), on the game's thread)
+// becomes the open controllers' rumble, applied on this thread (input_rumble_apply, once a frame from the event loop:
+// the pads are opened and closed here). The left device drives the low-frequency (strong) motor, the right one the
+// high-frequency motor, each at the stronger of its two bands; Controls > Vibration scales it (0: off). Every rumble
+// lasts 150 ms and is renewed while the game keeps sending, so a stalled game doesn't leave a motor running; nothing
+// for 200 ms counts as stopped.
+static _Atomic uint32_t rumble_level[2];  // left, right: 0..65535
+static _Atomic uint64_t rumble_ns;        // when the game last sent one (SDL_GetTicksNS)
+void input_rumble_set(uint32_t handle, const float *v) {
+    float a = v[0] > v[2] ? v[0] : v[2];
+    if (!(a > 0)) a = 0;  // (and NaN)
+    if (a > 1) a = 1;
+    // A hit sends ~0.11 (low band): felt on the Switch's motors, but a phone's or a controller's at 11% is next to
+    // nothing. The square root for what's felt (0.11 -> 0.33); under 0.02 none - the game sends ~0.005 at rest.
+    float felt = a < 0.02f ? 0.0f : sqrtf(a);
+    atomic_store(&rumble_level[handle & 1], (uint32_t)(felt * 65535.0f));
+    atomic_store(&rumble_ns, SDL_GetTicksNS());
+    static int logged;
+    if (a > 0 && !logged++) LOG("[input] vibration from the game (handle %#x: low %.2f at %.0f Hz, high %.2f at %.0f Hz)\n", handle,
+                                v[0], v[1], v[2], v[3]);
+    {   // the strongest of each second the game vibrated in, the first 40 (what a hit or an explosion sends)
+        static uint64_t win;
+        static float peak, peak_v[4];
+        static uint32_t peak_h, nwin;
+        uint64_t now = SDL_GetTicksNS();
+        if (a > peak) peak = a, peak_h = handle, memcpy(peak_v, v, sizeof peak_v);
+        if (!win) win = now;
+        if (now - win >= 1000000000ull) {
+            if (peak >= 0.02f && nwin++ < 40)
+                LOG("[input] vibration peak %.2f (handle %#x: low %.2f at %.0f Hz, high %.2f at %.0f Hz)\n", peak, peak_h,
+                    peak_v[0], peak_v[1], peak_v[2], peak_v[3]);
+            peak = 0, win = now;
+        }
+    }
+}
+// Controllers whose motors Android exposes (SDL's rumble capability: a Bluetooth GameSir X4A, for one, has none there):
+// they get it; with none of them, the phone's own motor when Controls > "Phone's motor" is on (off by default: it costs
+// battery and buzzes the hands holding the phone) - also the built-in controls of handhelds that only vibrate that way.
+void input_rumble_apply(void) {
+    uint64_t now = SDL_GetTicksNS();
+#ifdef __ANDROID__
+    int pct = g_settings.vibration;
+    bool phone = g_settings.vibration_phone;
+#else
+    int pct = 100;
+    bool phone = false;
+#endif
+    uint32_t l = atomic_load(&rumble_level[0]), r = atomic_load(&rumble_level[1]);
+    if (now - atomic_load(&rumble_ns) > 200000000ull) l = r = 0;
+    l = (uint32_t)((uint64_t)l * (uint32_t)pct / 100), r = (uint32_t)((uint64_t)r * (uint32_t)pct / 100);
+    int motors = 0;
+    for (int p = 0; p < npads; p++)
+        if (SDL_GetBooleanProperty(SDL_GetGamepadProperties(pads[p]), SDL_PROP_GAMEPAD_CAP_RUMBLE_BOOLEAN, false)) motors++;
+    static uint32_t last_l, last_r;
+    static uint64_t last_sent;
+    static bool last_phone;
+    bool to_phone = !motors && phone;
+    if (l | r) {  // (where it goes, each time that changes: the log tells a player's "it doesn't vibrate" apart)
+        static int last_where = -1;
+        int where = motors ? 1 : to_phone ? 2 : !npads ? 3 : 4;
+        if (where != last_where) {
+            last_where = where;
+            static const char *const name[] = {"", "the controllers' motors", "the phone's motor",
+                                               "nowhere: no controller, and Controls > \"Phone's motor\" is off",
+                                               "nowhere: the controller shows Android no motor, and Controls > \"Phone's motor\" is off"};
+            LOG("[input] vibration (%u, %u of 65535) to %s\n", (unsigned)l, (unsigned)r, name[where]);
+        }
+    }
+    if (l == last_l && r == last_r && to_phone == last_phone && (!(l | r) || now - last_sent < 80000000ull)) return;
+    if ((l | r) && (last_l | last_r) && to_phone == last_phone && now - last_sent < 40000000ull) return;  // (a change: 40 ms apart)
+    if (motors) {
+        for (int p = 0; p < npads; p++) SDL_RumbleGamepad(pads[p], (Uint16)l, (Uint16)r, (l | r) ? 150 : 0);
+    }
+#ifdef __ANDROID__
+    extern void plat_vibrate(int amplitude, int ms);
+    if (to_phone) plat_vibrate((int)((l > r ? l : r) * 255 / 65535), (l | r) ? 150 : 0);
+    else if (last_phone && (last_l | last_r)) plat_vibrate(0, 0);  // (moved to a controller: the phone's stops)
+#endif
+    last_l = l, last_r = r, last_sent = now, last_phone = to_phone;
+}
+
 void input_handle_event(const SDL_Event *e) {
     static bool scanned;  // pads present at startup: their ADDED event may have gone to the start screen's loop
     if (!scanned) {

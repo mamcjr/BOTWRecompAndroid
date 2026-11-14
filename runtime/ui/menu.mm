@@ -840,6 +840,20 @@ static void tab_about(void) {
     if (toggle("Phone motion like the Switch's screen", &g_settings.motion_flat)) settings_save();  // (hle/motion.c, #211 #247)
     hint("Off: the phone moves the aim as a controller would. On: as the Switch's own screen in handheld mode - try it if "
          "tilting the phone turns the aim, and turning it tilts.");
+#ifdef __ANDROID__
+    {   // the game's vibration (hle/input.c input_rumble_apply): here, not in the bindings below - those give way to the
+        // touch layout while no controller is connected, and the phone's motor is for exactly then
+        static const char *const vib_names[] = {"Off", "25%", "50%", "75%", "100%"};
+        int vi = (g_settings.vibration + 12) / 25;
+        if (vi < 0) vi = 0;
+        if (vi > 4) vi = 4;
+        if (choice("Vibration", &vi, vib_names, 5)) { g_settings.vibration = vi * 25; settings_save(); }
+        hint("The game's rumble on a controller's motors, when it has them. Off: none.");
+        if (toggle("Phone's motor when the controller has none", &g_settings.vibration_phone)) settings_save();
+        hint("Some controllers don't show their motors to Android, and handhelds' built-in controls vibrate through the "
+             "device's motor: this plays the rumble there instead (touch play too).");
+    }
+#endif
     ImGui::Spacing();
     controls_bindings_draw(ImGui::GetFontSize() / 34);
     ImGui::Spacing();

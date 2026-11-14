@@ -68,6 +68,21 @@ static void log_file_line(const char *line) {
     pthread_mutex_unlock(&g_logf_lock);
 }
 
+// The phone's own vibration motor (BOTWRecompAndroidActivity.vibrateDevice): amplitude 1-255 for ms, 0 stops it.
+// From the SDL thread (hle/input.c input_rumble_apply).
+void plat_vibrate(int amplitude, int ms) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return;
+    jclass c = (*env)->GetObjectClass(env, act);
+    static jmethodID m;
+    if (!m) m = (*env)->GetStaticMethodID(env, c, "vibrateDevice", "(II)V");
+    if (m) (*env)->CallStaticVoidMethod(env, c, m, (jint)amplitude, (jint)ms);
+    if ((*env)->ExceptionCheck(env)) (*env)->ExceptionClear(env);
+    (*env)->DeleteLocalRef(env, c);
+    (*env)->DeleteLocalRef(env, act);
+}
+
 static int picked_folder_log(bool first) {  // BOTWRecompAndroidActivity.openLog: a descriptor, -1 without a usable folder
     JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
     jobject act = (jobject)SDL_GetAndroidActivity();
