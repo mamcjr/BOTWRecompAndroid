@@ -6,6 +6,9 @@
 #include <pthread.h>
 #include <stdlib.h>
 #include <string.h>
+#ifdef __ANDROID__
+#include <sys/mman.h>
+#endif
 
 #include "vk.h"
 #include "../astc.h"
@@ -540,7 +543,11 @@ static void create_image(NvnTexture *t, TexBackend *b) {
             if (half) LOG("[vk] textures from their second level (half size): low RAM\n");
         }
         b->skip = 0;
-        if (half && !depthfmt && b->rs_group == RS_NONE && !(t->flags & (8 | 0x50)) && type == VK_IMAGE_TYPE_2D &&
+        // Only block-compressed ones (BC / ASTC: colours, materials, most of the memory): an uncompressed one may be data
+        // a shader reads texel by texel - the terrain's heights (R16, 1024x1024x8) at half size left the ground around
+        // Link missing (Galaxy Tab A9+, 2026-11-13).
+        bool compressed = t->layout.fmt && t->layout.fmt->bw > 1;
+        if (half && compressed && !depthfmt && b->rs_group == RS_NONE && !(t->flags & (8 | 0x50)) && type == VK_IMAGE_TYPE_2D &&
             samples == 1 && levels >= 2 && t->layout.levels >= 2 && tw >= 128 && th >= 128) {
             tw >>= 1, th >>= 1, levels--, b->skip = 1;
         }
@@ -782,6 +789,52 @@ void vk_textures_reset(void) {
 // ================================================================== uploads (same change detection as metal.m)
 static uint64_t full_hash_budget, full_hash_budget_frame;
 
+// Low RAM (exec.c vk_low_ram): the periodic full hash of textures the page write tracking saw unwritten is left out
+// (LARECOMP_TEX_PERIODIC=1 / 0); on a 4 GB tablet the game's memory is mostly in swap, and the safety net read every
+// texture back in.
+static bool tex_periodic(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern bool vk_low_ram(void);
+        const char *e = getenv("LARECOMP_TEX_PERIODIC");
+        on = e ? atoi(e) != 0 : !vk_low_ram();
+        if (!on) LOG("[vk] textures: no periodic full hash of unwritten ones (low RAM)\n");
+    }
+    return on;
+}
+
+// Low RAM (exec.c vk_low_ram; LARECOMP_TEX_DISCARD=1 / 0): a sampled texture's guest bytes go back to the OS once
+// uploaded (MADV_DONTNEED: zero pages there from then on) - the guest copy of every texture otherwise sat in RAM or
+// swap next to its image. On a Galaxy Tab A9+ (3.4 GB) ~190 MB, and the game's memory stopped being read back from
+// swap ~5000 times a second: ~14.5 fps after 9 minutes instead of ~10 (2026-11-13). Only where the page write
+// tracking watches it, so a CPU write (new contents) is still seen; a texture first uploaded over such bytes is
+// logged ("[discard]": it would read zeros).
+static bool tex_discard(void) {
+    static int on = -1;
+    if (on < 0) {
+        extern bool vk_low_ram(void);
+        const char *e = getenv("LARECOMP_TEX_DISCARD");
+        on = e ? atoi(e) != 0 : vk_low_ram();
+        if (on) LOG("[vk] textures: guest bytes given back after upload (low RAM)\n");
+    }
+    return on;
+}
+static uint64_t tex_discarded_bytes;
+static int tex_alias_logs;
+
+// The guest bytes of the textures uploaded from memory, and of those discarded (the memory log)
+uint64_t vk_texture_guest_bytes(uint64_t *discarded) {
+    uint64_t all = 0;
+    for (int i = 0; i < g_nlive; i++) {
+        NvnTexture *t = g_live[i];
+        TexBackend *b = t ? t->backend : NULL;
+        if (!b || !b->uploaded || b->gpu_owned || !t->addr) continue;
+        all += tegra_total_size(&t->layout);
+    }
+    if (discarded) *discarded = tex_discarded_bytes;
+    return all;
+}
+
 // Four independent lanes (one serial multiply chain ran at ~1.5 bytes/cycle; dynamic textures are hashed every
 // frame). Values are only compared within a run.
 static uint64_t hash_full(const uint8_t *p, uint64_t n) {
@@ -955,14 +1008,25 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // ~2.4 MB a frame in the overworld). The periodic full hash stays as a safety net. LARECOMP_VK_TEX_WATCH=0: off.
     static int watch = -1;
     if (watch < 0) { const char *e = getenv("LARECOMP_VK_TEX_WATCH"); watch = !e || atoi(e) != 0; }
+    bool tracked = false;
     if (watch && !always_full) {
         extern int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
         uint32_t now = 0;
         int ch = vk_pages_changed(t->addr, total, b->wgen, &now);
         if (ch >= 0) {
+            tracked = true;
             b->wgen = now;
+            if (ch && b->discarded) {  // (written after its bytes were given back: the rest of it reads zeros now)
+                static int n;
+                if (n++ < 60)
+                    LOG("[discard] frame %llu: written after discard: %ux%ux%u fmt %#x levels %u layers %u flags %#x target %u at %llx+%llx\n",
+                        (unsigned long long)frame, t->width, t->height, t->depth, t->format, t->layout.levels,
+                        t->layout.layers, t->flags, t->target, (unsigned long long)t->addr, (unsigned long long)total);
+            }
             if (!ch && b->uploaded && !restyle) {
-                if (!periodic) { prof_tex_watch_skips++; return; }
+                // (low RAM: no periodic full hash of a texture the CPU hasn't written - it read every texture back
+                // in from swap, ~90 MB each 2 s on a 4 GB tablet; LARECOMP_TEX_PERIODIC=1 / 0)
+                if (!periodic || !tex_periodic()) { prof_tex_watch_skips++; return; }
                 if (b->dynamic) full_hash_budget = full_hash_budget > total ? full_hash_budget - total : 0;  // (the others took theirs above)
             }
         }
@@ -977,7 +1041,23 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     uint64_t h = hash_full(mem, total), last_full = b->full_frame, old_sample = b->sample_hash;
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
+    if (b->discarded && h == b->disc_hash && !restyle) return;  // (its zero pages, as discarded: nothing new)
     if (b->uploaded && h == b->data_hash && !restyle) return;
+    if (!b->uploaded && tex_discard() && tex_alias_logs < 40) {  // (a new texture over discarded bytes: it reads zeros)
+        for (int i = 0; i < g_nlive; i++) {
+            NvnTexture *e = g_live[i];
+            TexBackend *eb = e ? e->backend : NULL;
+            if (!eb || eb == b || !eb->discarded || !e->addr) continue;
+            uint64_t ee = e->addr + tegra_total_size(&e->layout);
+            if (e->addr >= t->addr + total || ee <= t->addr) continue;
+            tex_alias_logs++;
+            LOG("[discard] frame %llu: %ux%ux%u fmt %#x levels %u at %llx+%llx first uploaded over the discarded %ux%ux%u fmt "
+                "%#x levels %u at %llx+%llx\n", (unsigned long long)frame, t->width, t->height, t->depth, t->format,
+                t->layout.levels, (unsigned long long)t->addr, (unsigned long long)total, e->width, e->height, e->depth,
+                e->format, e->layout.levels, (unsigned long long)e->addr, (unsigned long long)(ee - e->addr));
+            break;
+        }
+    }
     if (b->uploaded && h != b->data_hash && !b->dynamic && !always_full) {
         // LARECOMP_LOG_TEX_MISS=1 (diagnosis): a change the sampled check didn't see, found by the periodic full hash -
         // the texture showed its old contents meanwhile (the stretched-terrain curtains after a tower: gone with
@@ -1136,6 +1216,20 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             texture_trace_record(TEX_TRACE_NATIVE, sz, (uint64_t)out_row * l.hb * l.d, 0);
         }
     }
+#ifdef __ANDROID__
+    // (low RAM: tex_discard) its guest bytes back to the OS: the whole pages inside it, once its
+    // contents are in the image (the copies above took them). Not dynamic, linear, drawn-into or restyled ones.
+    if (tex_discard() && tracked && !b->dynamic && !linear && b->rs_group == RS_NONE && !b->gpu_owned && !b->scalable &&
+        b->tp <= 0 && total >= (64u << 10)) {
+        uint64_t lo = (t->addr + 0xFFF) & ~0xFFFull, hi = (t->addr + total) & ~0xFFFull;
+        if (hi > lo && !madvise((void *)(uintptr_t)lo, hi - lo, MADV_DONTNEED)) {
+            if (!b->discarded) tex_discarded_bytes += hi - lo;
+            b->discarded = true;
+            b->disc_hash = hash_full(mem, total);
+            b->sample_hash = fnv_sample(mem, total);
+        }
+    }
+#endif
 }
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render) {

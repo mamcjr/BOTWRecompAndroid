@@ -8,7 +8,8 @@
 // its command list is), and a wait first waits for the render thread to reach it, then for the GPU as before.
 //
 // Requests: EXEC (a command list), PRESENT (the window's half of backend_present: the game's half - pacing, input,
-// tests - stays on the game's thread), FENCE (nvnQueueFenceSync). Everything else that reaches into the renderer from
+// tests - stays on the game's thread), FENCE (nvnQueueFenceSync), CALL (vk_async_call: a write the render thread
+// reads, in order). Everything else that reaches into the renderer from
 // the game's thread (a texture destroyed, a movie frame, the heap, a reset) first waits for the queue to empty
 // (vk_async_drain): those are rare, and so they run as before, with the render thread idle.
 #ifdef __ANDROID__
@@ -23,7 +24,7 @@
 #include "../../platform.h"
 #include "../../rt.h"
 
-enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE };
+enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE, REQ_CALL };
 typedef struct { int type; uint64_t a; void *p; uint64_t id; } Req;
 
 #define QN 4096  // requests in flight (a frame has a few dozen)
@@ -96,7 +97,8 @@ static void *render_main(void *arg) {
         vk_tl(r.type == REQ_EXEC ? "render: list start" : r.type == REQ_PRESENT ? "render: present start" : "render: fence", r.id, 0);
         if (r.type == REQ_EXEC) { vk_execute_now(r.a); free(r.p); }  // (r.p: the list copy, vk_async_execute)
         else if (r.type == REQ_PRESENT) vk_present_now((NvnTexture *)r.p, r.a);
-        if (r.type != REQ_FENCE) vk_tl(r.type == REQ_EXEC ? "render: list end" : "render: present end", r.id, 0);
+        else if (r.type == REQ_CALL) { ((void (*)(void *))(uintptr_t)r.a)(r.p); free(r.p); }
+        if (r.type == REQ_EXEC || r.type == REQ_PRESENT) vk_tl(r.type == REQ_EXEC ? "render: list end" : "render: present end", r.id, 0);
         else if (r.type == REQ_FENCE) nvn_sync_set_seq(r.a, renderer_fence_seq());
         uint64_t elapsed = plat_now_ns() - t0;
         frame_cpu += cpu_timing ? render_cpu_ns() - cpu0 : elapsed;
@@ -231,6 +233,23 @@ void vk_async_execute(uint64_t handle) {
 void vk_async_present(NvnTexture *t) {
     pthread_mutex_lock(&p_lock);
     push(REQ_PRESENT, plat_now_ns(), t);  // (a: when the game handed it over: device.c vsync_update)
+    pthread_mutex_unlock(&p_lock);
+}
+
+// fn(arg) in order with the requests queued so far: by the render thread after them (it frees arg after), or right
+// here when it has nothing left to run (arg freed here too). The game's writes into state the render thread reads
+// while translating - a texture pool slot (objects.c register_texture) - without waiting for it to catch up.
+void vk_async_call(void (*fn)(void *), void *arg) {
+    pthread_mutex_lock(&p_lock);
+    pthread_mutex_lock(&q_lock);
+    bool idle = !g_vk_render_started || q_done == q_tail;
+    pthread_mutex_unlock(&q_lock);
+    if (idle || vk_async_is_render_thread()) {
+        fn(arg);
+        free(arg);
+    } else {
+        push(REQ_CALL, (uint64_t)(uintptr_t)fn, arg);
+    }
     pthread_mutex_unlock(&p_lock);
 }
 

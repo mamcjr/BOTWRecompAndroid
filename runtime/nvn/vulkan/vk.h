@@ -115,6 +115,8 @@ typedef struct TexBackend {
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
     uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
     uint8_t skip;   // guest levels left out at the top (half-size textures on low RAM: textures.c create_image)
+    bool discarded; // (low RAM) its guest bytes given back to the OS after the upload: zero pages there (textures.c)
+    uint64_t disc_hash;  // (discarded) the full hash of its memory right after: still that one = unchanged
     bool scalable, presented;
     uint8_t rs_group;  // RS_*: which output scale its allocation follows (textures.c)
     uint64_t touched_frame, frame_cleared;
