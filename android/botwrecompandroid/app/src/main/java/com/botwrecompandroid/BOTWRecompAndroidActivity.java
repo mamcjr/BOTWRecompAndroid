@@ -463,6 +463,38 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         }
     }
 
+    // The start screen's banner (runtime/ui/launcher.mm banner_thread, on its own thread, never the UI's): url (https,
+    // or a file:// one for tests) saved to dst, at most maxBytes. false on any failure (offline, 404, too big): dst is
+    // then left as it was.
+    public static boolean download(String url, String dst, int maxBytes) {
+        File part = new File(dst + ".part");
+        try {
+            java.net.URLConnection c = new java.net.URL(url).openConnection();
+            c.setConnectTimeout(8000);
+            c.setReadTimeout(8000);
+            c.setUseCaches(false);
+            c.setRequestProperty("User-Agent", "BOTWRecompAndroid/" + appVersion());
+            if (c instanceof java.net.HttpURLConnection && ((java.net.HttpURLConnection) c).getResponseCode() != 200) {
+                ((java.net.HttpURLConnection) c).disconnect();
+                return false;
+            }
+            try (InputStream in = c.getInputStream(); OutputStream out = new FileOutputStream(part)) {
+                byte[] buf = new byte[65536];
+                long total = 0;
+                for (int n; (n = in.read(buf)) > 0;) {
+                    if ((total += n) > maxBytes) throw new IOException("over " + maxBytes + " bytes");
+                    out.write(buf, 0, n);
+                }
+            }
+            if (!part.renameTo(new File(dst))) throw new IOException("rename");
+            return true;
+        } catch (Exception e) {
+            Log.i(TAG, "banner: " + url + ": " + e);
+            part.delete();
+            return false;
+        }
+    }
+
     // A file the SDL dialog picked, as the content:// URI it hands back (the start screen's Import fonts,
     // runtime/ui/launcher.mm import_fonts): its name - the URI ends in a document id - and a copy of it at dst, an
     // absolute path (fopen can't open the URI; issue #122). "" / false when it can't be read.
