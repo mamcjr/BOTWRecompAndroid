@@ -1084,19 +1084,36 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
 // submission that allocated from it has completed, and given back after 10 s unused (down to RING_KEEP of them).
 // On devices sold with up to 4 GB of RAM (reported MemTotal below 4 GiB), 16 MB chunks and 2 kept - the 64 MB ones, 4
 // kept, were a quarter of the GPU memory the Android killed the game over, as the world loaded (Galaxy Tab A9+,
-// 2026-11-08). Leave 6 GB devices on the normal path. LARECOMP_LOW_RAM=1 / 0 overrides detection.
-bool vk_low_ram(void) {
-    static int low = -1;
-    if (low < 0) {
-        const char *e = getenv("LARECOMP_LOW_RAM");
-        long total_kb = 0;
+// 2026-11-08). Leave 6 GB devices on the normal path. Video > "RAM saving" (g_settings.low_ram: Automatic / On / Off)
+// chooses, read once as the app starts; LARECOMP_LOW_RAM=1 / 0 overrides both.
+// What Automatic picks on this device, and its MemTotal in MB (the menu says it)
+bool vk_low_ram_auto(long *total_mb) {
+    static long total_kb = -1;
+    if (total_kb < 0) {
+        total_kb = 0;
         FILE *f = fopen("/proc/meminfo", "r");
         if (f) {
             if (fscanf(f, "MemTotal: %ld kB", &total_kb) != 1) total_kb = 0;
             fclose(f);
         }
-        low = e ? atoi(e) != 0 : total_kb && total_kb < 4L * 1024 * 1024;
-        if (low) LOG("[vk] low on RAM (%ld MB): smaller buffers\n", total_kb >> 10);
+    }
+    if (total_mb) *total_mb = total_kb >> 10;
+    return total_kb && total_kb < 4L * 1024 * 1024;
+}
+
+bool vk_low_ram(void) {
+    static int low = -1;
+    if (low < 0) {
+        const char *e = getenv("LARECOMP_LOW_RAM");
+        long total_mb = 0;
+        bool autolow = vk_low_ram_auto(&total_mb);
+        int set = -1;
+#ifdef __ANDROID__
+        set = g_settings.low_ram;
+#endif
+        low = e ? atoi(e) != 0 : set >= 0 ? set != 0 : autolow;
+        LOG("[vk] RAM saving %s (%ld MB; %s)\n", low ? "on: smaller buffers" : "off", total_mb,
+            e ? "LARECOMP_LOW_RAM" : set >= 0 ? "chosen in Video" : "automatic");
     }
     return low;
 }

@@ -532,6 +532,12 @@ static void android_call(const char *method) {  // a static method of the activi
     env->DeleteLocalRef(act);
 }
 
+// The app closed and opened again, the settings saved first (the menu's options read once as it starts: menu.mm)
+void launcher_restart_app(void) {
+    settings_save();
+    android_call("restartApp");
+}
+
 static void android_call_int(const char *method, int v) {  // (one int argument)
     JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
     jobject act = (jobject)SDL_GetAndroidActivity();

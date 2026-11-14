@@ -58,6 +58,7 @@ Settings g_settings = {
     .lsfg_mult = 2,
     .lsfg_flow = 75,
     .gpu_heap = -1,
+    .low_ram = -1,
     .inplace_reads = -1,
     .turnip_lrz = -1,
     .event_fps_unlock = false,  // (some events count frames: hle/framepace.c in_event)
@@ -236,6 +237,7 @@ void settings_reset_defaults(void) {
     g_settings.thermal_cap = d->thermal_cap;
     g_settings.shader_int32 = d->shader_int32;
     g_settings.sync_lag = d->sync_lag;
+    g_settings.low_ram = d->low_ram;
     g_settings.native_code = d->native_code;
     g_settings.files_in_place = d->files_in_place;
 #endif
@@ -292,6 +294,7 @@ void settings_load(void) {
         else if (!strcmp(key, "native_code")) g_settings.native_code = atoi(val) != 0;
         else if (!strcmp(key, "files_in_place")) g_settings.files_in_place = atoi(val) != 0;
         else if (!strcmp(key, "gpu_heap")) g_settings.gpu_heap = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
+        else if (!strcmp(key, "low_ram")) g_settings.low_ram = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "inplace_reads")) g_settings.inplace_reads = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "turnip_lrz")) g_settings.turnip_lrz = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "log_file")) g_settings.log_file = atoi(val) != 0;
@@ -410,6 +413,7 @@ void settings_save(void) {
     fprintf(f, "gpu_heap = %s\ninplace_reads = %s\nturnip_lrz = %s\nlog_file = %d\ngpu_model = %s\n", TRI(g_settings.gpu_heap),
             TRI(g_settings.inplace_reads), TRI(g_settings.turnip_lrz), g_settings.log_file, g_settings.gpu_model);
     fprintf(f, "driver_env = %s\nheap_file = %d\n", g_settings.driver_env, g_settings.heap_file);
+    fprintf(f, "low_ram = %s\n", TRI(g_settings.low_ram));
 #undef TRI
     fprintf(f, "touch_drag_camera = %d\ntouch_drag_sens = %.2f\ntouch_sticks_hidden = %d\ntouch_half_areas = %d\n",
             g_settings.touch_drag_camera, g_settings.touch_drag_sens, g_settings.touch_sticks_hidden,

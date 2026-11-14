@@ -22,6 +22,8 @@
 #else
 #include "imgui_impl_vulkan.h"
 extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
+extern "C" bool vk_low_ram(void);                // runtime/nvn/vulkan/exec.c: RAM saving as the app started
+extern "C" bool vk_low_ram_auto(long *total_mb); // (what Automatic picks on this device)
 #endif
 
 extern "C" {
@@ -762,6 +764,29 @@ static void tab_display(void) {
                "Translates the game's shaders with 32-bit address math, the path used for drivers without 64-bit "
                "integers (Adreno 6xx / 7xx and Mali stock drivers). Try it if lighting, grass or text are missing or wrong "
                "on your GPU. Applies to shaders translated from now on: restart the app for all of them.");
+    {   // RAM saving (vulkan/exec.c vk_low_ram): read once as the app starts
+        void launcher_restart_app(void);  // (ui/launcher.mm)
+        static const char *ram[] = {"Automatic", "On", "Off"};  // display order -> low_ram -1 / 1 / 0
+        int ri = g_settings.low_ram < 0 ? 0 : g_settings.low_ram ? 1 : 2;
+        bool autolow = vk_low_ram_auto(NULL);
+        if (opt_choice("RAM saving", &ri, ram, 3, 0,
+                       autolow ? "For devices with 4 GB of RAM or less, where Android closes the game when memory runs out: "
+                                 "smaller GPU buffers, textures' copies given back once on the GPU, compressed textures at "
+                                 "half size, and the drawing thread on a fast core. Uses less memory and is faster on such "
+                                 "devices; textures can look a little softer. Automatic: on for this device. Applies when "
+                                 "BOTWRecompAndroid restarts."
+                               : "For devices with 4 GB of RAM or less, where Android closes the game when memory runs out: "
+                                 "smaller GPU buffers, textures' copies given back once on the GPU, compressed textures at "
+                                 "half size, and the drawing thread on a fast core. Uses less memory and is faster on such "
+                                 "devices; textures can look a little softer. Automatic: off for this device (more than 4 GB). "
+                                 "Applies when BOTWRecompAndroid restarts."))
+            g_settings.low_ram = ri == 0 ? -1 : ri == 1 ? 1 : 0;
+        bool want = g_settings.low_ram < 0 ? autolow : g_settings.low_ram != 0;
+        if (want != vk_low_ram() && !getenv("LARECOMP_LOW_RAM") &&
+            opt_button("Restart to apply RAM saving", "Closes BOTWRecompAndroid and opens it again with the new setting. "
+                                                      "Progress since the game's last save is lost."))
+            launcher_restart_app();
+    }
 #endif
     opt_end();
 }
