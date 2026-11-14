@@ -4484,8 +4484,18 @@ static uint64_t gmem_tried;  // heap size the import was last attempted for (gme
 bool vk_heap_file_possible(void) { return g_vk.mem_fd; }  // (the start screen's Driver compatibility)
 
 // The heap through an exported file asked for (the setting, or LARECOMP_VK_MEMFD) and possible here (vk_heap_place)
+// Not with RADV unless forced: on the Xclipse 530 / 540 its exported memory, mapped at the heap's address, took a SIGBUS
+// at the game's first access (its first malloc, atomics on that memory: #234, #383, #387); the setting is ignored there
+// and said so, and CPU copies run (as they did with RADV and the setting off, #393).
 bool vk_heap_file_asked(void) {
     const char *e = getenv("LARECOMP_VK_MEMFD");
+    extern bool vk_driver_is_radv(void);
+    if (!e && g_settings.heap_file && g_vk.mem_fd && vk_driver_is_radv()) {
+        static int told;
+        if (!told++) LOG("[vk] game memory through a shared file: on in the settings, but not with RADV (the game crashed at "
+                         "its first access to it) - shader global memory through CPU copies\n");
+        return false;
+    }
     return g_vk.mem_fd && (e ? atoi(e) != 0 : g_settings.heap_file);
 }
 

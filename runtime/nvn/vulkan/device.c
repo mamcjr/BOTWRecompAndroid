@@ -2181,6 +2181,19 @@ bool vk_driver_is_turnip(void) {
     }
     return t > 0;
 }
+
+// Mesa's RADV (the Xclipse builds players load: radv-xclipse): the game's memory through its exported file broke the
+// game's first access to it (exec.c vk_heap_file_asked)
+bool vk_driver_is_radv(void) {
+    static int r = -1;
+    if (r < 0 && g_vk.phys) {
+        VkPhysicalDeviceDriverProperties d = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &d};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &p);
+        r = d.driverID == VK_DRIVER_ID_MESA_RADV;
+    }
+    return r > 0;
+}
 #endif
 
 void backend_init(void) {
