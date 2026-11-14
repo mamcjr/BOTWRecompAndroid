@@ -11,7 +11,10 @@ for cfg in "$@"; do
     tag=${cfg%%:*}; env=${cfg#*:}
     adb shell am force-stop com.botwrecomp.android
     (for t in ${TIMES//,/ }; do sleep 1; done) >/dev/null
-    bash android/run_boot.sh "$SECS" "${COMMON:+$COMMON,}$env,LARECOMP_INPUT=700:A:6,820:A:6,940:A:6,1100:A:6" > /dev/null 2>&1 &
+    all="${COMMON:+$COMMON,}$env"
+    # (the save's A presses unless the config brings its own LARECOMP_INPUT: a second one, after it, replaced it)
+    case ",$all" in *,LARECOMP_INPUT=*) ;; *) all="$all,LARECOMP_INPUT=700:A:6,820:A:6,940:A:6,1100:A:6" ;; esac
+    bash android/run_boot.sh "$SECS" "$all" > /dev/null 2>&1 &
     run=$!
     start=$(date +%s)
     for t in ${TIMES//,/ }; do
