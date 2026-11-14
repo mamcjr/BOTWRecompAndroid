@@ -7,6 +7,7 @@
 #include <sys/stat.h>
 #include <unistd.h>
 
+#include "../benchmark_perf.h"
 #include "../mods.h"
 #include "../hle.h"
 #include "../ipc.h"
@@ -536,8 +537,10 @@ static void storage(Service *s, IpcReq *req, IpcResp *resp) {
         if (!b) { resp->result = MAKE_RESULT(2, 6001); break; }
         if (size > b->size) size = b->size;
         plat_write_prepare(b->addr, size);  // (pread into pages write tracking made read-only: EFAULT)
+        uint64_t bench_read_t = bench_clock();
         ssize_t n = st->plain ? pread(st->fd, (uint8_t *)(uintptr_t)b->addr, size, (off_t)off)
                               : romfs_read(st->fd, (uint8_t *)(uintptr_t)b->addr, size, off);
+        bench_io_done(BP_FILE_NS, BP_FILE_BYTES, bench_read_t, n > 0 ? (uint64_t)n : 0);
         if (n < 0) LOG("[fs] storage read failed at %llx: %s\n", off, strerror(errno));
         if (st->plain || R->dlc) break;
         {
@@ -671,7 +674,9 @@ static void file(Service *s, IpcReq *req, IpcResp *resp) {
         IpcBuf *b = out_buf(req, 0);
         if ((uint64_t)size > b->size) size = (int64_t)b->size;
         plat_write_prepare(b->addr, size);
+        uint64_t bench_read_t = bench_clock();
         ssize_t n = pread(f->fd, (void *)(uintptr_t)b->addr, (size_t)size, off);
+        bench_io_done(BP_FILE_NS, BP_FILE_BYTES, bench_read_t, n > 0 ? (uint64_t)n : 0);
         if (strstr(f->path, "savedata")) {
             LOG("[save] read %s off %lld size %lld -> guest %llx\n", f->path, (long long)off, (long long)size, (unsigned long long)b->addr);
         }

@@ -1,3 +1,4 @@
+#include "../../benchmark_perf.h"
 // Vulkan textures: NVN formats, images, change-detected uploads from guest memory, views and samplers
 // (counterpart of the texture half of metal.m and the view helpers of renderer.m).
 #include <SDL3/SDL_timer.h>
@@ -641,10 +642,15 @@ static uint64_t bc_upload_blocks(VkCommandBuffer cb, TexBackend *b, const uint8_
     bc_target(b->bc_vf, &bpp);
     uint64_t out_size = bpp ? (uint64_t)wb * 4 * hb * 4 * bpp : (uint64_t)wb * hb * 16;
     VkSpan s = vk_transient(out_size, 16);
-    uint64_t decode_start = decode_ns ? SDL_GetTicksNS() : 0;
+    bool measure_decode = bench_on();
+    uint64_t decode_start = (decode_ns || measure_decode) ? SDL_GetTicksNS() : 0;
     if (bpp) bc_decode(b->bc_vf, blocks, wb, hb, bsize, s.ptr, bpp);
     else bc1_to_astc(blocks, s.ptr, (uint64_t)wb * hb);
-    if (decode_ns) *decode_ns = SDL_GetTicksNS() - decode_start;
+    if (decode_start) {
+        uint64_t elapsed = SDL_GetTicksNS() - decode_start;
+        if (decode_ns) *decode_ns = elapsed;
+        if (measure_decode) bench_record(BP_BC_NS, elapsed);
+    }
     uint32_t iw = level_w(b, lv), ih = level_h(b, lv);
     VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = wb * 4, .bufferImageHeight = hb * 4,
                             .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, layer, 1}, .imageOffset = {0, 0, (int32_t)z},
@@ -1090,6 +1096,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 (unsigned long long)e->addr, (unsigned long long)(ee - e->addr));
         }
     }
+    bench_add(BP_TEX_BYTES, total);
     b->data_hash = h;
     b->uploaded = true;
 #ifdef __ANDROID__
@@ -1097,6 +1104,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
 #else
     if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
 #endif
+    uint64_t bench_upload_start = bench_clock();
     VkCommandBuffer cb = vk_upload_cmd();
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
@@ -1118,9 +1126,11 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                 else tegra_deswizzle(src, blocks, l.wb, l.hb, 1, 16, l.block_height_log2, l.block_depth_log2);
                 if (b->tp > 0 && layer == 0) texpatch_apply(b->tp - 1, lv, blocks, l.w, l.h, l.wb * 16);
                 VkSpan s = vk_transient((uint64_t)l.w * l.h * 4, 16);
-                uint64_t decode_start = texture_trace_on() ? SDL_GetTicksNS() : 0;
+                bool measure_decode = bench_on();
+                uint64_t decode_start = (texture_trace_on() || measure_decode) ? SDL_GetTicksNS() : 0;
                 astc_decode_ldr(blocks, l.w, l.h, b->astc_bw, b->astc_bh, b->astc_srgb, s.ptr);
                 uint64_t decode_ns = decode_start ? SDL_GetTicksNS() - decode_start : 0;
+                if (measure_decode) bench_record(BP_ASTC_NS, decode_ns);
                 VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = l.w, .bufferImageHeight = l.h,
                                         .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, il, layer, 1},
                                         .imageExtent = {l.w < level_w(b, il) ? l.w : level_w(b, il), l.h < level_h(b, il) ? l.h : level_h(b, il), 1}};
@@ -1216,6 +1226,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             texture_trace_record(TEX_TRACE_NATIVE, sz, (uint64_t)out_row * l.hb * l.d, 0);
         }
     }
+    bench_elapsed(BP_TEX_NS, bench_upload_start);
 #ifdef __ANDROID__
     // (low RAM: tex_discard) its guest bytes back to the OS: the whole pages inside it, once its
     // contents are in the image (the copies above took them). Not dynamic, linear, drawn-into or restyled ones.
@@ -1681,12 +1692,14 @@ static void bc_shadow_resolve(TexBackend *b) {
         vk_readback_ready(total);
         uint64_t t1 = SDL_GetTicksNS();
         cb = vk_cmd();
+        uint64_t bench_up_t = bench_clock();
         for (uint32_t i = 0; i < n; i++) {
             const VkBufferImageCopy *r = &rg[i];
             bc_upload_blocks(cb, b, (const uint8_t *)rb.ptr + (r->bufferOffset - rb.off), r->imageExtent.width,
                              r->imageExtent.height, s->bsize, r->imageSubresource.mipLevel,
                              r->imageSubresource.baseArrayLayer, (uint32_t)r->imageOffset.z, NULL);
         }
+        bench_io_done(BP_TEX_NS, BP_TEX_BYTES, bench_up_t, total);
         vk_full_barrier(cb);
         // (each decode: the GPU waited for - the render thread blocked - and the CPU's decode; the first 8, then every 64th)
         static uint64_t nres;

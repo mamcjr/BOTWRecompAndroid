@@ -8,6 +8,9 @@ warmup_s = 20
 calm_s = 20
 warmup_max_s = 180
 window_s = 45
+# Optional: wait at the title before EVERY scene/repeat; timeout gives harness_error.
+# thermal_max = 1
+# thermal_wait_s = 300
 
 [scene]
 name = plateau

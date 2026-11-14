@@ -1,3 +1,4 @@
+#include "../../benchmark_perf.h"
 // Vulkan device, window, swapchain and presentation (counterpart of the window/present half of metal.m).
 #include <SDL3/SDL.h>
 #include <SDL3/SDL_vulkan.h>
@@ -1366,6 +1367,7 @@ static void vsync_update(uint64_t queued) {
     VkPastPresentationTimingGOOGLE past[8];
     uint32_t n = 8;
     if (vkGetPastPresentationTimingGOOGLE(g_vk.dev, g_vk.swapchain, &n, past) < 0) n = 0;  // (INCOMPLETE: the newest 8)
+    if (g_benchmark) for (uint32_t i = 0; i < n; i++) bench_present_actual(past[i].presentID, past[i].actualPresentTime);
     uint64_t a = 0;
     for (uint32_t i = 0; i < n; i++) if (past[i].actualPresentTime > a) a = past[i].actualPresentTime;
     if (a <= vs_anchor) return;
@@ -1440,6 +1442,7 @@ void vk_frame_end(const char *shot_path) {
 #endif
     VkResult r = vkQueuePresentKHR(g_vk.queue, &pi);
 #ifdef __ANDROID__
+    if (g_benchmark && display_timing && r >= 0) bench_present_queue(when.presentID, present_asked);
     if (display_timing && r >= 0) vsync_update(queued);
     if (trace_start) vk_timing_trace_wait(VK_TIMING_PRESENT, SDL_GetTicksNS() - trace_start);
     if (r == VK_ERROR_OUT_OF_DATE_KHR) recreate_swapchain();  // (SUBOPTIMAL: every frame of an unrotated swapchain)
@@ -1529,7 +1532,9 @@ static void present_game_half(void) {
 void vk_present_now(NvnTexture *t, uint64_t asked);
 void backend_present(NvnTexture *t) {
     if (!vk_async_on()) {
-        vk_present_now(t, plat_now_ns());
+        uint64_t asked = plat_now_ns();
+        if (g_benchmark) bench_handoff(asked);
+        vk_present_now(t, asked);
         return;
     }
     g_game_frames++;

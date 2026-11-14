@@ -11,6 +11,11 @@
 
 // ---- the rest of the runtime, as far as the shadows reach it
 VkG g_vk;
+#ifdef __ANDROID__
+bool g_benchmark;
+_Atomic uint64_t g_bench_perf[BP_COUNT];
+uint64_t plat_now_ns(void) { return 1; }
+#endif
 void rt_fatal_trace(void) { abort(); }
 static uint8_t staging[1 << 20];
 VkSpan vk_transient(uint64_t size, uint64_t align) { (void)size, (void)align; return (VkSpan){VK_NULL_HANDLE, 0, staging}; }
