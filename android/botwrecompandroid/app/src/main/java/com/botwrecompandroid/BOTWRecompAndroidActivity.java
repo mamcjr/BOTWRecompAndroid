@@ -108,6 +108,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             copyIfChanged(new File(games, "botwgame.so"), new File(res, "botwgame.so"));
             copyIfChanged(new File(games, "botwgame.so.id"), new File(res, "botwgame.so.id"));
             setenv("LARECOMP_NATIVE_LIB_DIR", getApplicationInfo().nativeLibraryDir);
+            setenv("LARECOMP_APP", appLine());
             setenv("LARECOMP_LAST_EXIT", lastExit());
             setenv("LARECOMP_BOOT_STATE", bootState());
             File gen = new File(getFilesDir(), "gen");
@@ -1310,6 +1311,19 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
 
     // How the previous run ended (ApplicationExitInfo), for the log: a setup that vanished with nothing in the log was
     // the system closing the app - for memory or something else (issue #18). "" when unknown.
+    // The log's first line: which build wrote it, on what ("0.4.0-beta (versionCode 39), Xiaomi 2510DPC44G, Android 16
+    // (API 36)") - the reports' logs couldn't be told apart by version.
+    private String appLine() {
+        String v = "?";
+        try {
+            android.content.pm.PackageInfo p = getPackageManager().getPackageInfo(getPackageName(), 0);
+            v = p.versionName + " (versionCode " + p.getLongVersionCode() + ")";
+        } catch (Exception ignored) {
+        }
+        return v + ", " + android.os.Build.MANUFACTURER + " " + android.os.Build.MODEL + ", Android "
+                + android.os.Build.VERSION.RELEASE + " (API " + android.os.Build.VERSION.SDK_INT + ")";
+    }
+
     private static final String[] EXIT_REASONS = {"unknown", "exit self", "signaled", "low memory", "crash", "native crash",
             "not responding", "initialization failure", "permission change", "excessive resource usage", "user requested",
             "user stopped", "dependency died", "other", "freezer", "package state change", "package updated"};

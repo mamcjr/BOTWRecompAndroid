@@ -188,6 +188,8 @@ bool plat_reserve_guest(uint64_t lo, uint64_t hi) {
             return false;
         }
         g_guest_lo = base;
+        const char *app = getenv("LARECOMP_APP");  // (the activity: version, versionCode, phone, Android)
+        if (app && *app) fprintf(stderr, "BOTWRecompAndroid %s\n", app);
         fprintf(stderr, "[android] guest window %#llx-%#llx\n", (unsigned long long)base, (unsigned long long)(base + hi - lo));
         const char *last = getenv("LARECOMP_LAST_EXIT");  // (the activity: ApplicationExitInfo)
         if (last && *last) fprintf(stderr, "[android] the last run ended: %s\n", last);
