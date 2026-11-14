@@ -764,6 +764,8 @@ JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nati
     g_ds.headroom = headroom;
     g_ds.plugged = plugged;
     pthread_mutex_unlock(&g_ds_lock);
+    extern void framepace_thermal_sample(int thermal, float headroom);  // (hle/framepace.c: 30 fps while too hot)
+    framepace_thermal_sample(thermal, headroom);
     // LARECOMP_LOG_POWER=1 (a test, on battery only: on the charger the current is the charger's): the power draw each
     // second with the CPU clusters' clocks, this process's CPU share and the A/B side (LARECOMP_AB)
     static int log_power = -1;

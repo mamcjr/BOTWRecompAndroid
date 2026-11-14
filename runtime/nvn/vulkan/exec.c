@@ -403,8 +403,8 @@ void vk_pace_frame(void) {
     // A failed trial describes the old workload. Reconsider Auto immediately when the user changes resolution
     // or returns from a fixed FPS mode; otherwise its old exponential backoff can keep the new workload at 30
     // for up to 80 seconds. Keep ordinary hitches from restarting trials (and causing repeated oscillation).
-    bool changed = last_mode != g_settings.fps_mode || last_resolution != g_settings.res_mode;
-    last_mode = g_settings.fps_mode;
+    bool changed = last_mode != fps_mode_now() || last_resolution != g_settings.res_mode;
+    last_mode = fps_mode_now();
     last_resolution = g_settings.res_mode;
     if (changed) {
         memset(over, 0, sizeof over);
@@ -412,9 +412,9 @@ void vk_pace_frame(void) {
         avg = 0;
         slow_since = probe_at = 0;
         probe_wait = 10000000000ull;
-        pace_slow = pace_on && (g_settings.fps_mode == 1 || g_settings.fps_mode == 3);
+        pace_slow = pace_on && (fps_mode_now() == 1 || fps_mode_now() == 3);
         last = 0;  // discard the transition frame's timing, including menu time and resource reallocation
-        LOG("[pace] settings changed: fresh %s pacing history\n", g_settings.fps_mode ? "fixed" : "auto");
+        LOG("[pace] settings changed: fresh %s pacing history\n", fps_mode_now() ? "fixed" : "auto");
     }
 #endif
     uint64_t now = plat_now_ns(), w = g_blocked_ns;
@@ -460,8 +460,8 @@ void vk_pace_frame(void) {
         // Three quarters of the frame, not all of it: the governor lowers the clocks until the work just fits its
         // target, and a phone whose frames weigh near 33 ms then went over it every few frames - each a vsync late, 50
         // ms: 17-20 fps at any quality where 0.2.6 held 30 (Mali-G925, #89; 0.2.9 brought the 33 ms budget)
-        bool fixed30 = g_settings.fps_mode == 1 && AB("adpf30") != 1;
-        uint64_t budget = g_settings.fps_mode == 3 ? 37500000ull  // (Frame rate 20: 20 fps's, three quarters)
+        bool fixed30 = fps_mode_now() == 1 && AB("adpf30") != 1;
+        uint64_t budget = fps_mode_now() == 3 ? 37500000ull  // (Frame rate 20: 20 fps's, three quarters)
                           : (follow && pace_slow) || fixed30 ? 25000000ull : 16666667ull;
         static double budget30 = -1;  // (LARECOMP_ADPF30_MS=<ms>, a test: the 30 fps budget instead of 25 ms)
         if (budget30 < 0) budget30 = getenv("LARECOMP_ADPF30_MS") ? atof(getenv("LARECOMP_ADPF30_MS")) : 0;
@@ -545,11 +545,11 @@ void vk_pace_frame(void) {
     idx = (idx + 1) % 60;
     if (!pace_on) return;  // (measured and counted all the same: LARECOMP_LOG_PACE, the stats)
 #ifdef __ANDROID__
-    if (g_settings.fps_mode) {  // (Video: Frame rate 20 / 30 / 40-45 / 60) fixed: no measuring, no trials
+    if (fps_mode_now()) {  // (Video: Frame rate 20 / 30 / 40-45 / 60) fixed: no measuring, no trials
         extern int vk_between_fps(void);
-        bool slow = g_settings.fps_mode == 1 || g_settings.fps_mode == 3;
+        bool slow = fps_mode_now() == 1 || fps_mode_now() == 3;
         if (slow != pace_slow)
-            LOG("[pace] frame rate set to %d fps\n", g_settings.fps_mode == 3 ? 20 : slow ? 30 : g_settings.fps_mode == 4 ? vk_between_fps() : 60);
+            LOG("[pace] frame rate set to %d fps\n", fps_mode_now() == 3 ? 20 : slow ? 30 : fps_mode_now() == 4 ? vk_between_fps() : 60);
         pace_slow = slow;
         return;
     }
@@ -616,7 +616,7 @@ static uint64_t pace_end_counter(const uint64_t *start_entry, const uint64_t *en
     static int fast = -1;
     if (fast < 0) fast = getenv("LARECOMP_FAST_COUNTERS") ? atoi(getenv("LARECOMP_FAST_COUNTERS")) : 0;
     // (Frame rate 45 as 60: the game in its 60 fps way)
-    if ((!pace_slow && pace_on > 0 && (fast || g_settings.fps_mode == 2 || g_settings.fps_mode == 4)) || fast == 2) {  // (2: with LARECOMP_PACE=0 too, a test)
+    if ((!pace_slow && pace_on > 0 && (fast || fps_mode_now() == 2 || fps_mode_now() == 4)) || fast == 2) {  // (2: with LARECOMP_PACE=0 too, a test)
         uint64_t max = start_entry[1] + ns_to_gpu_ticks(PACE_FAST_NS);
         return value > max ? max : value;
     }

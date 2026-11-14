@@ -99,6 +99,60 @@ static bool in_event(void) {
 
 bool framepace_in_event(void) { return g_game_version >= 182 && in_event(); }  // (hle/benchmark.c)
 
+// ---- thermal cap (Video > "30 fps when the phone overheats", g_settings.thermal_cap; after totk-android's
+// thermal_step, MIT): at 60 fps a phone heats until Android lowers its clocks, and the frame rate then jumps between 60
+// and ~40; held at 30 it runs steady, cooler and on less power. Android's own reading, once a second (platform/android.c
+// from BOTWRecompAndroidActivity.reportDeviceStats): thermal status SEVERE (3) or worse, or the headroom forecast 10 s
+// ahead at 1.0 or more (throttling ahead) -> 30 fps; back after 30 readings in a row below both (status under SEVERE,
+// headroom under 0.9), a gap of over 2 s between readings starting the count again. Only 60 and 40 / 45 fps modes:
+// the others are 30 or less already, or the game's own choice. LARECOMP_THERMAL_CAP=1 / 0 over the setting.
+static volatile int g_thermal_hot;  // (1: capped now)
+static int thermal_cap_on(void) {
+    static int env = -2;
+    if (env == -2) env = getenv("LARECOMP_THERMAL_CAP") ? atoi(getenv("LARECOMP_THERMAL_CAP")) != 0 : -1;
+    return env >= 0 ? env : g_settings.thermal_cap;
+}
+void framepace_thermal_sample(int thermal, float headroom) {
+    static uint64_t last_ns;
+    static int cool;  // readings in a row below both lines
+    uint64_t now = plat_now_ns();
+    bool gap = last_ns && now - last_ns > 2000000000ull;
+    last_ns = now;
+    {   // LARECOMP_THERMAL_TEST=<from>,<to> (a test): the readings between those seconds of the run say SEVERE - the POCO
+        // F7 Ultra held 60 fps at 97 C for 12 minutes with HyperOS's status at 0 throughout
+        static double from = -2, to;
+        static uint64_t t0;
+        if (from == -2) {
+            from = -1;
+            const char *e = getenv("LARECOMP_THERMAL_TEST");
+            if (e && sscanf(e, "%lf,%lf", &from, &to) != 2) from = -1;
+        }
+        if (!t0) t0 = now;
+        double s = (now - t0) / 1e9;
+        if (from >= 0 && s >= from && s < to) thermal = 3;
+    }
+    bool hot = thermal >= 3 || headroom >= 1.0f;
+    bool cold = thermal >= 0 && thermal < 3 && (headroom < 0 || headroom < 0.9f);
+    if (gap) cool = 0;
+    if (hot) {
+        cool = 0;
+        if (!g_thermal_hot) {
+            g_thermal_hot = 1;
+            LOG("[framepace] the phone is too hot (thermal status %d, headroom %.2f): 30 fps until it cools%s\n", thermal,
+                headroom, thermal_cap_on() ? "" : " (cap off in the settings: not applied)");
+        }
+    } else if (cold && g_thermal_hot && ++cool >= 30) {
+        g_thermal_hot = 0, cool = 0;
+        LOG("[framepace] the phone has cooled (thermal status %d, headroom %.2f): the chosen frame rate again\n", thermal, headroom);
+    }
+}
+int fps_mode_now(void) {
+    int m = g_settings.fps_mode;
+    if (g_thermal_hot && (m == 2 || m == 4) && thermal_cap_on()) return 1;
+    return m;
+}
+bool framepace_thermal_capped(void) { return g_thermal_hot && thermal_cap_on() && (g_settings.fps_mode == 2 || g_settings.fps_mode == 4); }
+
 int framepace_target(void) {
     static int forced = -2, movie = -2, menu = -2, event = -2;
     if (forced == -2) forced = env_int("LARECOMP_FPS", -1);
@@ -108,8 +162,8 @@ int framepace_target(void) {
     // (Video > Frame rate: 20, 30, 40 / 45, 60; Auto is 60 here - the clock follows whatever the frames really take.
     // 40 / 45: whichever the screen shows evenly, vulkan/device.c vk_between_fps - the game in its 60 fps way)
     extern int vk_between_fps(void);
-    int fps = forced >= 0 ? forced : g_settings.fps_mode == 1 ? 30 : g_settings.fps_mode == 3 ? 20
-            : g_settings.fps_mode == 4 ? vk_between_fps() : 60;
+    int fps = forced >= 0 ? forced : fps_mode_now() == 1 ? 30 : fps_mode_now() == 3 ? 20
+            : fps_mode_now() == 4 ? vk_between_fps() : 60;
     if (movie > 0 && __atomic_load_n(&g_movie_playing, __ATOMIC_RELAXED) > 0 && (fps == 0 || fps > movie)) fps = movie;
     if (menu > 0 && (fps == 0 || fps > menu) && in_menu()) fps = menu;
     int ev = event >= 0 ? event : g_settings.event_fps_unlock ? 0 : 30;
@@ -202,9 +256,9 @@ void rt_vfr_update(uint64_t vfr) {
         // the frame loop's interval (nvn/objects.c, following this one) and the clock's ratio not matching meanwhile,
         // and Link sank into the ground going from 20 to 30 fps (2026-11-02)
         static int last_mode = -1;
-        if (g_settings.fps_mode != last_mode) {
+        if (fps_mode_now() != last_mode) {
             if (last_mode >= 0) slow = period * 30;
-            last_mode = g_settings.fps_mode;
+            last_mode = fps_mode_now();
         }
         smooth += (s - smooth) * 0.05;
         real += s;
@@ -231,7 +285,7 @@ void rt_vfr_update(uint64_t vfr) {
     uint32_t iv = g_vfr_iv;
     // (Frame rate 40 / 45: the game's 60 fps way, interval 1, whatever the ratio - at 40 (0.75) the rule below kept 2
     // while the frame loop ran at 1 (nvn/objects.c), the mismatch that sank Link at 20 fps)
-    if (g_settings.fps_mode == 4) iv = 1, slow = ratio;
+    if (fps_mode_now() == 4) iv = 1, slow = ratio;
     else if (iv == 1 && slow > 0.85) iv = 2;
     else if (iv == 2 && slow < 0.7) iv = 1;
     else if (iv == 2 && slow > 1.3) iv = 3;
@@ -245,8 +299,8 @@ void rt_vfr_update(uint64_t vfr) {
         static int off = -1;
         if (off < 0) off = env_int("LARECOMP_NO_INTERVAL_ESCAPE", 0);
         double w = off ? -1 : vk_frame_work_ms();
-        bool can = (iv == 3 && g_settings.fps_mode != 3 && w > 0 && w < 26.0) ||
-                   (iv == 2 && g_settings.fps_mode == 2 && w > 0 && w < 13.0);
+        bool can = (iv == 3 && fps_mode_now() != 3 && w > 0 && w < 26.0) ||
+                   (iv == 2 && fps_mode_now() == 2 && w > 0 && w < 13.0);
         fits = can ? fits + 1 : 0;
         if (fits > 60) iv--, slow = iv == 1 ? 0.5f : 1.0f, fits = 0;
     }

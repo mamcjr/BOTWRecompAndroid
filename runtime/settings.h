@@ -49,6 +49,8 @@ typedef struct {
     float overlay_pos[2]; // its top left, a share of the screen, dragged there with a finger (negative: the corner)
     bool event_fps_unlock;  // in-game cutscenes and talks at the chosen frame rate, not 30 (hle/framepace.c)
     int fps_mode;         // 0: the game's own choice (30 / 60, the frame pacer), 1: 30 fps, 2: 60 fps, 3: 20 fps, 4: 45 fps
+                          // (what runs: fps_mode_now - 30 while the phone overheats, thermal_cap)
+    bool thermal_cap;     // Android: 60 (or 40 / 45) fps drop to 30 while Android says the phone is too hot (hle/framepace.c)
     bool shader_int32;    // shader address math in 32-bit words even where the driver offers 64-bit (vulkan/exec.c)
     bool native_code;     // Android: the game's own code on the CPU, no build of it (runtime/native.c); off by default
     bool files_in_place;  // Android: a setup reads the picked romfs/ where it is, no copy (services/fs.c); off by default
@@ -97,6 +99,10 @@ typedef struct {
 
 extern Settings g_settings;
 
+// The frame rate mode in effect (hle/framepace.c): g_settings.fps_mode, or 1 (30 fps) while the thermal cap holds a
+// 60 or 40 / 45 fps mode down. What the pacer, the swap interval and the resolution go by; the menus show the setting.
+int fps_mode_now(void);
+void framepace_thermal_sample(int thermal, float headroom);  // (once a second, from the activity: platform/android.c)
 void settings_load(void);
 void settings_save(void);
 // The menu's RESTORE DEFAULTS: the Video and Audio options back to the defaults (the language, the controls, the touch

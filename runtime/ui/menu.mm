@@ -33,6 +33,7 @@ void controls_bindings_draw(float scale);  // controls_ui.mm
 #include "../input_bind.h"
 #include "../paths.h"
 int vk_fg_status(const char **why);  // (vulkan/lsfg/lsfg_present.c: frame generation)
+bool framepace_thermal_capped(void);  // hle/framepace.c: the thermal cap holds 60 / 45 fps at 30 now
 const char *vk_fg_dll_path(void);
 }
 
@@ -612,6 +613,15 @@ static void tab_display(void) {
                                "30. 20 fps: always 20, for slower devices. 30 fps: always 30 - where a frame takes longer, "
                                "the game runs slightly slower instead of dropping to 20."))
             g_settings.fps_mode = fr_mode[fi];
+        if (sixty && (g_settings.fps_mode == 2 || g_settings.fps_mode == 4)) {  // (hle/framepace.c fps_mode_now)
+            opt_toggle("30 fps when the phone overheats", &g_settings.thermal_cap, true,
+                       framepace_thermal_capped()
+                           ? "On now: Android says the phone is too hot, so the game runs at 30 fps until it has cooled for 30 "
+                             "seconds, then at the chosen rate again."
+                           : "While Android says the phone is too hot (its thermal status, or the heat it expects in the next "
+                             "seconds), 30 fps instead of a frame rate that jumps as the clocks drop; the chosen one again "
+                             "once it has cooled for 30 seconds.");
+        }
         if (sixty)
             opt_toggle("Cutscenes at 60 fps (experimental)", &g_settings.event_fps_unlock, false,
                        "In-game cutscenes and talks run at the chosen frame rate instead of 30. Some of them count frames "
