@@ -10,7 +10,8 @@
 //   .75x / .50x / .25x  of Match display
 //   Dynamic        Match display, lowered in steps while the GPU can't hold the frame rate and raised again when it
 //                  can (each change reallocates the render targets: a short hitch, so it changes rarely, with hysteresis)
-// Test overrides: LARECOMP_SCALE=<f> (the scene's height = 900 x f), LARECOMP_WIDE_TEST=<f> (forced shape).
+// Test overrides: LARECOMP_SCALE=<f> (the scene's height = 900 x f), LARECOMP_WIDE_TEST=<f> (a window of that shape -
+// its aspect over 16:9 - in the middle of the real one, as if the screen were that).
 #include <math.h>
 #include <stdlib.h>
 
@@ -79,8 +80,18 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     static double forced = -1, wide_test = -1;
     if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
     if (wide_test < 0) wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
-    double shape = wide_test > 0 ? wide_test : (dw / dh) / (16.0 / 9.0);
-    bool reshape = reshape_allowed && fabs(shape - 1.0) > 0.005;
+    double ox = 0, oy = 0;  // (LARECOMP_WIDE_TEST: a window of that shape in the middle of the real one, as a screen)
+    if (wide_test > 0) {
+        double ww = fmin(dw, dh * 16.0 / 9.0 * wide_test), wh = ww / (16.0 / 9.0 * wide_test);
+        ox = (dw - ww) / 2, oy = (dh - wh) / 2, dw = ww, dh = wh;
+        fit = fmin(dw / 1920.0, dh / 1080.0);
+    }
+    double shape = (dw / dh) / (16.0 / 9.0);
+    // Only wider than 16:9: the game's cameras widen to the window (hle/widescreen.c rt_persp_update), and its HUD and
+    // menus move out to the sides. Narrower (4:3, 16:10), nothing narrows them: the 16:9 view went into a narrower
+    // image, squeezed from the sides (an Anbernic RG477M, 4:3). There the 16:9 image fits the window with bars above
+    // and below, as with Original.
+    bool reshape = reshape_allowed && shape > 1.005;
     if (!reshape) shape = 1.0;
     // the final image: the window's resolution, in units of the Switch's 1080 lines
     double h = fmax(reshape ? dh / 1080.0 : fit, 0.1);
@@ -123,9 +134,5 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
     // where the image goes in the window: fills it when reshaped, else a fitted 16:9 box
     if (reshape) { o->vw = dw; o->vh = dh; }
     else { o->vw = 1920.0 * fit; o->vh = 1080.0 * fit; }
-    if (wide_test > 0) {
-        double f2 = fmin(dw / (1920.0 * wide_test), dh / 1080.0);
-        o->vw = 1920.0 * wide_test * f2; o->vh = 1080.0 * f2;
-    }
-    o->vx = (dw - o->vw) / 2; o->vy = (dh - o->vh) / 2;
+    o->vx = ox + (dw - o->vw) / 2; o->vy = oy + (dh - o->vh) / 2;
 }
