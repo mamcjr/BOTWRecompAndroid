@@ -1172,8 +1172,12 @@ static void emit_tmml(Ctx *c, uint64_t w, bool bindless, uint32_t pc) {
     else if (ncoord == 2) snprintf(coords, sizeof coords, "float2(%s, %s)", cs[0], cs[1]);
     else snprintf(coords, sizeof coords, "float3(%s, %s, %s)", cs[0], cs[1], cs[2]);
     if (c->glsl && c->stage == STAGE_FRAGMENT) {
+        // Both as unsigned 24.8, a negative LOD (a magnified texture) as 0 - yuzu's F2U.32 (2e478a66c, "TOTK flickering
+        // clouds"; TOTKRecompAndroid c193510). Through int() a LOD of -0.5 became 0xffffff80, which the shader turns back
+        // into a float as unsigned (I2F.U32): a LOD of ~16 million, clamped to the texture's last level - whatever the
+        // camera was close to sampled from the wrong mip.
         sp(&c->body, "    { float2 lod = textureQueryLod(t%d, %s);\n"
-                     "      uint4 q = uint4(uint(int(lod.x * 256.0f)), uint(int(lod.y * 256.0f)), 0u, 0u);\n",
+                     "      uint4 q = uint4(uint(max(lod.x * 256.0f, 0.0f)), uint(max(lod.y * 256.0f, 0.0f)), 0u, 0u);\n",
            slot, coords);
     } else {
         sp(&c->body, "    { uint4 q = uint4(0u, 0u, 0u, 0u);\n");

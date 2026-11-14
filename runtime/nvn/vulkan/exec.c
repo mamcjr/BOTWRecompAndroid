@@ -5478,11 +5478,34 @@ static bool gsnap_prepare(void) {
     return true;
 }
 
-static void gcopy_prepare(unsigned stage_mask, bool store) {
-    memset(gmap_tab, 0, sizeof gmap_tab);
-    gfast_n = 0;
-    gc_size = 0;
+// The bound storage buffers of the stages in stage_mask as heap ranges (with gcopy_prepare's margin), sorted and merged
+static int gcopy_ranges(unsigned stage_mask, bool store, GcRange *r);
+
+// A storing draw's ranges made resident before its render pass opens (copy mode, the arena: Mali, whose shared-file heap
+// fails, or LARECOMP_VK_NO_PLACED=1). gres_get merges a new range with the resident ones it overlaps by copying slot to
+// slot, which needs no render pass open: inside draw_ it ended the pass, and the draw was then recorded outside any
+// render pass (draw_ opens the pass before it prepares the arena). Now the pass is ended, if at all, before begin_pass;
+// from then on the range is resident and needs nothing. In TOTKRecompAndroid (27be190), whose gres_get refused the merge
+// instead, ~95 draws a frame took the plain copies and the light flashed every other frame on Mali.
+// LARECOMP_GRES_PREMERGE=0: off.
+static void gres_premerge(unsigned stage_mask) {
+    static int on = -1;
+    if (on < 0) on = !getenv("LARECOMP_GRES_PREMERGE") || atoi(getenv("LARECOMP_GRES_PREMERGE"));
+    if (!on || !gres_init()) return;
     GcRange r[6 * 16];
+    int m = gcopy_ranges(stage_mask, true, r);
+    for (int i = 0; i < m; i++) {
+        if (gres_get(r[i].lo, r[i].hi, false)) continue;  // (covered already)
+        bool overlaps = false;
+        for (int k = 0; k < ga_nres && !overlaps; k++)
+            overlaps = ga_res[k].live && ga_res[k].lo < r[i].hi && r[i].lo < ga_res[k].hi;
+        if (!overlaps) continue;  // (a new slot needs no copies: gres_get makes it inside the pass too)
+        if (in_pass) vk_end_pass();
+        gres_get(r[i].lo, r[i].hi, true);
+    }
+}
+
+static int gcopy_ranges(unsigned stage_mask, bool store, GcRange *r) {
     int n = 0;
     // a margin before each bound range (LARECOMP_GMARGIN bytes, 4 KB): the lighting's shaders read a header 0x100-0x200
     // bytes before the light list's bound address (the light count: ~950k reads a frame outside the tables - zero
@@ -5507,6 +5530,15 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
         else r[m++] = r[i];
     }
     if (m > GMAP_MAX) m = GMAP_MAX;
+    return m;
+}
+
+static void gcopy_prepare(unsigned stage_mask, bool store) {
+    memset(gmap_tab, 0, sizeof gmap_tab);
+    gfast_n = 0;
+    gc_size = 0;
+    GcRange r[6 * 16];
+    int m = gcopy_ranges(stage_mask, store, r);
     // The learned ranges (reached through pointers - gres_learn): newest first while table slots remain, never
     // expanding a storing range's write-back or collapsing unrelated heap regions into one multi-megabyte span.
     for (int i = gl_n - 1; i >= 0 && m < GMAP_MAX - 2; i--) {
@@ -6816,6 +6848,10 @@ static void draw_(CmdRec *r, bool indexed) {
             else snapshots_invalidate(st.rt.color[i]);
         }
     }
+#ifdef __ANDROID__
+    if (gcopy_mode && (pr->vi->uses_gmem_store || pr->fi->uses_gmem_store) && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map))
+        gres_premerge((pr->vi->uses_gmem_map ? 1u : 0u) | (pr->fi->uses_gmem_map ? 2u : 0u));  // (before the pass opens)
+#endif
     begin_pass();
     VkCommandBuffer cb = vk_cmd();
 
