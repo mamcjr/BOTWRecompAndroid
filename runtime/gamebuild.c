@@ -339,6 +339,7 @@ static void add_cflags(Args *a, const Tools *t) {
 static uint64_t *g_hot;
 static size_t g_nhot;
 static unsigned long long g_cold_fns, g_heavy_fns, g_all_fns, g_cold_files;
+static bool g_fast_build;  // (opts->fast: everything at -O0, no marking - the quick first build a phone set up with)
 
 static int cmp_u64(const void *a, const void *b) {
     uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
@@ -463,7 +464,7 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     Args a = {0};
     compiler(&a, t);
     add_cflags(&a, t);
-    if (u->o0) add(&a, "-O0");  // (after GAMELIB_CFLAGS' -O1: the last one counts)
+    if (u->o0 || g_fast_build) add(&a, "-O0");  // (after GAMELIB_CFLAGS' -O1: the last one counts)
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
@@ -530,15 +531,27 @@ static void mark_done(const Unit *u) {
 // one, and on a hot phone no more than half of them run - Android's thermal status moderate or worse, its headroom
 // near throttling, or the battery past 42 degrees (the activity's, once a second; a CPU zone read 70 degrees on the
 // POCO F7 Ultra from the build's first second, so it doesn't count). One always runs.
+// Fast mode (-O0, what the setup's first build uses on a phone) is another world: the compiler holds a fraction of
+// the memory (a -O1 graph of a 1500-function file is the gigabytes; -O0 codegen is linear) and finishes each file
+// in a third of the time, so it runs up to 6 side by side - measured on a 4 GB Helio G95, where -O1 could only
+// afford 2. LARECOMP_GAMEBUILD_MAX caps either mode.
 static bool may_start_another(int nrun, int jobs) {
     static uint64_t last_start;
     static int last_cap = -1;  // (0: waiting for memory)
+    static int max_override = -2;
+    if (max_override == -2) {
+        const char *e = getenv("LARECOMP_GAMEBUILD_MAX");
+        max_override = e && atoi(e) > 0 ? atoi(e) : 0;
+    }
     uint64_t now = plat_now_ns();
     if (nrun == 0) { last_start = now; return true; }
     if (now - last_start < 1000000000ull) return false;
+    if (max_override && nrun >= max_override) return false;
     PlatDeviceStats s;
     plat_device_stats(&s);
-    bool low = s.avail_mb && s.avail_mb < (last_cap == 0 ? 1792u : 1536u);  // (on again with 256 MB more: no flapping)
+    int floor_mb = g_fast_build ? 512 : 1536;  // (-O0: a compiler needs a few hundred MB, not a -O1 graph)
+    int cap_mb = g_fast_build ? 768 : 1792;    // (on again with 256 MB more: no flapping)
+    bool low = s.avail_mb && s.avail_mb < (last_cap == 0 ? (unsigned)cap_mb : (unsigned)floor_mb);
     bool hot = s.thermal >= 2 || s.headroom >= 0.95f || s.batt_temp_c > 42;
     int cap = low ? 0 : hot ? (jobs + 1) / 2 : jobs;
     if (cap != last_cap) {
@@ -552,11 +565,12 @@ static bool may_start_another(int nrun, int jobs) {
 }
 #endif
 
-// ------------------------------------------------------------------ the build
+    // ------------------------------------------------------------------ the build
 bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size_t why_size) {
     uint64_t t0 = plat_now_ns();
     static bool registered;
     if (!registered) registered = true, atexit(end_all);
+    g_fast_build = o->fast;
     Tools t;
     if (!find_tools(&t)) {
         snprintf(why, why_size, "the game code builder is missing from this copy of BOTWRecompAndroid");
@@ -603,7 +617,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     int resumed = 0;
 #ifdef __ANDROID__
     android_env(work);
-    load_hot_for(game_dir);
+    if (!g_fast_build) load_hot_for(game_dir);  // (fast mode: no list, no marking - everything -O0 anyway)
     {   // (the previous one in internal storage: a failed build must not leave it looking current)
         char idp[1200];
         snprintf(idp, sizeof idp, "%s.id", lib);
@@ -650,12 +664,30 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         g->p = spawn(a.v, g->log);
         args_free(&a);
         if (!g->p) { snprintf(why, why_size, "the game code builder didn't start"); ok = false; }
+        else {  // the generator is the long pole of a fast build: single-threaded Python, and it goes 2-3x faster on
+            // one A76 than fighting for the A55s the compilers leave it. (Only in fast mode: in a full build the
+            // compilers want both A76s more than the generator wants one.) g95_perf.c finds the cluster; on other
+            // SoCs this does nothing.
+            extern void plat_spawned_pin_big(int pid);
+            if (g_fast_build) plat_spawned_pin_big((int)(intptr_t)g->p);
+        }
     }
 
     Units units = {0};
     int queued[2] = {0, 0};  // chunk files of each module put in units so far
     bool tables[2] = {false, false};
     int next = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
+#ifdef __ANDROID__
+    // More of them at once in fast mode: -O0 needs a fraction of -O1's memory per compiler (the 2-job cap on a 4 GB
+    // phone was measured against -O1's graphs), and the build is short enough that thermal never gets there. Up to
+    // 6: one per A55, leaving the two A76s to the generator - it is the other half of the wait (a single-threaded
+    // Python process, faster on one big core than contending for six little ones). LARECOMP_GAMEBUILD_MAX caps it.
+    if (g_fast_build) {
+        const char *e = getenv("LARECOMP_GAMEBUILD_MAX");
+        int mx = e && atoi(e) > 0 ? atoi(e) : 6;
+        if (jobs < mx) jobs = mx;
+    }
+#endif
     struct { PlatProc p; int unit; } run[64];
     int nrun = 0;
     unsigned long long done_bytes = 0;
@@ -727,7 +759,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
 #endif
 #ifdef __ANDROID__  // (unit 0 is the shipped entry file; a file that can't be marked just stays at -O1)
             Unit *nu = &units.u[next];
-            if (next > 0 && !nu->marked) {
+            if (next > 0 && !nu->marked && !g_fast_build) {
                 nu->marked = true;
                 if (!mark_cold(nu->src, &nu->o0, &nu->alone))
                     LOG("[gamebuild] couldn't mark cold functions in %s\n", nu->src);
@@ -854,8 +886,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     // the C, the objects, the logs - kept after a failure, for the next build to go on from
     if (ok) rt_remove_game_file(game_dir, ".gamebuild");
 #ifdef __ANDROID__
-    LOG("[gamebuild] %llu of %llu functions cold (optnone, or %llu files all cold at -O0), %llu giant (their files at "
-        "-O0)\n", g_cold_fns, g_all_fns, g_cold_files, g_heavy_fns);
+    LOG("[gamebuild] %s%s build: %llu of %llu functions cold (optnone, or %llu files all cold at -O0), %llu giant "
+        "(their files at -O0)\n", g_fast_build ? "fast -O0" : "full", g_fast_build ? "" : "", g_cold_fns, g_all_fns,
+        g_cold_files, g_heavy_fns);
 #endif
     LOG("[gamebuild] %s in %.0fs\n", ok ? "done" : "failed", (double)(plat_now_ns() - t0) / 1e9);
     if (ok && o->progress) o->progress(1, "Finishing...");

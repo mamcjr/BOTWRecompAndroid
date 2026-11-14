@@ -14,7 +14,7 @@ RUN=$!
 sleep 5
 t=0
 while kill -0 $RUN 2>/dev/null; do
-    pid=$(adb shell pidof com.botwrecomp.android | tr -d '\r')
+    pid=$(adb shell pidof com.zbotw.recomp | tr -d '\r')
     avail=$(adb shell "grep -E 'MemAvailable|SwapFree|SwapTotal' /proc/meminfo" | awk '{printf "%s %d MB  ", $1, $2/1024}')
     if [ -n "$pid" ]; then
         pss=$(adb shell "dumpsys meminfo $pid" | tr -d '\r' | grep -E '^ *TOTAL PSS:|TOTAL SWAP|^ *TOTAL ' | head -2 | tr -s ' ' | tr '\n' '|')

@@ -745,7 +745,7 @@ void plat_terminate(void) { _exit(0); }
 static pthread_mutex_t g_ds_lock = PTHREAD_MUTEX_INITIALIZER;
 static PlatDeviceStats g_ds = {.batt_temp_c = -1, .batt_pct = -1, .thermal = -1, .headroom = -1, .plugged = -1};
 
-JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeMemoryPressure(
+JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeMemoryPressure(
         JNIEnv *env, jclass cls, jint level, jlong available, jlong total, jlong threshold, jboolean low, jint pss) {
     (void)env; (void)cls;
     LOG("[android] memory pressure level %d: available %llu MB / %llu MB, low threshold %llu MB, low %d, process PSS %d MB\n",
@@ -753,7 +753,7 @@ JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nati
         (unsigned long long)threshold >> 20, low != 0, pss / 1024);
 }
 
-JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeDeviceStats(JNIEnv *env, jclass cls, jfloat batt_temp_c,
+JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeDeviceStats(JNIEnv *env, jclass cls, jfloat batt_temp_c,
                                                                             jfloat batt_pct, jfloat watts, jint thermal,
                                                                             jfloat headroom, jint plugged) {
     (void)env, (void)cls;
@@ -944,6 +944,10 @@ void plat_thread_unpin(void) {
     uclamp_min_thread();
     g95_uclamp_thread();  // (the G95 profile's floor, unless LARECOMP_UCLAMP_MIN said one itself)
 }
+
+// A child process the runtime started (the setup's game code generator) onto the fast cluster, when the G95 profile
+// is active: platform.h has the portable name, g95_perf.c the implementation; on the desktop builds it's a no-op.
+void plat_spawned_pin_big(int pid) { g95_pin_pid_big(pid); }
 
 static void pin_to_fastest_cores(void) {
     if (!getenv("LARECOMP_PIN")) return;

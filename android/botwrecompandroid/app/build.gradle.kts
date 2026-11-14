@@ -13,16 +13,16 @@ val gen = layout.buildDirectory.dir("generated/botwrecompandroid")
 val releaseKey: File = File(System.getProperty("user.home"), ".botwrecompandroid/keystore.properties")
 
 android {
-    namespace = "com.botwrecompandroid"
+    namespace = "com.zbotw.recomp"
     compileSdk = 36
     ndkVersion = "30.0.16248370"
 
     defaultConfig {
-        applicationId = "com.botwrecomp.android"
+        applicationId = "com.zbotw.recomp"
         minSdk = 30
         targetSdk = 36
-        versionCode = 42
-        versionName = "0.4.2"
+        versionCode = 43
+        versionName = "0.4.3"
         ndk {
             abiFilters += "arm64-v8a"
         }

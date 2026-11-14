@@ -1,4 +1,4 @@
-package com.botwrecompandroid;
+package com.zbotw.recomp;
 import java.nio.file.Files;
 import java.nio.file.Path;
 public class WatchMapImageTest {

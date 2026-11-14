@@ -3,7 +3,7 @@
 // (runtime/nvn/vulkan/device.c), so Settings > Files > Choose driver is out of reach (issues #2, #5, #6, #9). The
 // package goes where that button puts it (BOTWRecompAndroidActivity.installDriver), then the app starts again in a new
 // process, as restartApp does: the driver is loaded once, at start.
-package com.botwrecompandroid;
+package com.zbotw.recomp;
 
 import android.app.Activity;
 import android.content.Intent;

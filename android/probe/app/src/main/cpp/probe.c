@@ -107,7 +107,7 @@ static void memory_probe(Sb *b) {
     munmap((void *)(uintptr_t)base, GW_SIZE);
 }
 
-JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_probe_MainActivity_memoryProbe(JNIEnv *env, jobject self) {
+JNIEXPORT jstring JNICALL Java_com_zbotw_recomp_probe_MainActivity_memoryProbe(JNIEnv *env, jobject self) {
     (void)self;
     Sb b = {0};
     memory_probe(&b);
@@ -118,7 +118,7 @@ JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_probe_MainActivity_memoryPr
 
 // driver_dir == NULL: the system driver. Otherwise the custom driver driver_dir/driver_name (driver_dir ends in '/',
 // in the app's internal storage), loaded through adrenotools with the hooks from native_lib_dir.
-JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_probe_MainActivity_vulkanProbe(JNIEnv *env, jobject self, jstring jlibdir,
+JNIEXPORT jstring JNICALL Java_com_zbotw_recomp_probe_MainActivity_vulkanProbe(JNIEnv *env, jobject self, jstring jlibdir,
                                                                             jstring jdir, jstring jname) {
     (void)self;
     Sb b = {0};

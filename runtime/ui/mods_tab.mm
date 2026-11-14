@@ -24,7 +24,7 @@ static pthread_mutex_t g_lock = PTHREAD_MUTEX_INITIALIZER;
 static std::string g_msg;  // the last import's outcome (set from the activity's thread)
 static bool g_busy;
 
-extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeModImportDone(JNIEnv *env, jclass,
+extern "C" JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeModImportDone(JNIEnv *env, jclass,
                                                                                                           jstring message) {
     const char *text = env->GetStringUTFChars(message, NULL);
     pthread_mutex_lock(&g_lock);

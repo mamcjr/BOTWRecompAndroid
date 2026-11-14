@@ -177,7 +177,7 @@ static int markers_json(char *json, size_t capacity, bool *available) {
     return used;
 }
 
-JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_WatchMapServer_nativeMapState(JNIEnv *env, jclass cls) {
+JNIEXPORT jstring JNICALL Java_com_zbotw_recomp_WatchMapServer_nativeMapState(JNIEnv *env, jclass cls) {
     (void)cls;
     const char *unavailable = "{\"version\":1,\"status\":\"unavailable\",\"player\":null,\"markers\":[],\"markersAvailable\":false}";
     if (g_start_screen || g_rt_unwind || !supported_revision()) return (*env)->NewStringUTF(env, unavailable);

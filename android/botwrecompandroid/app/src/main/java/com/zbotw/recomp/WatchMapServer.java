@@ -1,4 +1,4 @@
-package com.botwrecompandroid;
+package com.zbotw.recomp;
 
 import android.app.Activity;
 import android.app.AlertDialog;
@@ -37,7 +37,7 @@ import java.util.concurrent.TimeUnit;
 
 /** Opt-in, loopback-only snapshots of the game's minimap. No guest-memory or video stream access. */
 final class WatchMapServer {
-    static final String ACTION = "com.botwrecompandroid.action.WATCH_MAP";
+    static final String ACTION = "com.zbotw.recomp.action.WATCH_MAP";
     private static final int PORT = 18880, SIZE = 240;
     private final Activity activity;
     private final SharedPreferences prefs;

@@ -60,7 +60,7 @@ const char *vk_fg_dll_path(void) {
     const char *e = getenv("LARECOMP_LSFG_DLL");
     if (e && *e) { snprintf(found, sizeof found, "%s", e); return found; }
     static const char *const places[] = {
-        "/storage/emulated/0/Android/data/com.botwrecomp.android/files/Lossless.dll",
+        "/storage/emulated/0/Android/data/com.zbotw.recomp/files/Lossless.dll",
         "/storage/emulated/0/Documents/Emulation/bios/Lossless.dll",
         "/storage/emulated/0/Switch2/Lossless.dll",
         "/storage/emulated/0/LSFG/Lossless.dll",

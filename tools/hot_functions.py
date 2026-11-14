@@ -4,9 +4,9 @@ LASRecompAndroid's, per game version here).
 
 Collect on the phone (counts from process start, the file rewritten every 1800 frames while playing), e.g. for 1.8.2:
   bash android/run_ver.sh v182 3600 \\
-    'LARECOMP_FNPROF=0:999999999,LARECOMP_FNPROF_EVERY=1800,LARECOMP_FNPROF_OUT=/sdcard/Android/data/com.botwrecomp.android/files/v182/build/fnprof.txt'
+    'LARECOMP_FNPROF=0:999999999,LARECOMP_FNPROF_EVERY=1800,LARECOMP_FNPROF_OUT=/sdcard/Android/data/com.zbotw.recomp/files/v182/build/fnprof.txt'
 play through as many places as possible, then
-  adb pull /sdcard/Android/data/com.botwrecomp.android/files/v182/build/fnprof.txt session1.txt
+  adb pull /sdcard/Android/data/com.zbotw.recomp/files/v182/build/fnprof.txt session1.txt
 Merge one or more sessions of one game version into the list the APK ships (android/botwrecompandroid/app/
 build.gradle.kts copies tools/hot_functions_*.txt; runtime/gamebuild.c picks the one of the game it builds):
   hot_functions.py session1.txt [session2.txt ...] [-o tools/hot_functions_182.txt]

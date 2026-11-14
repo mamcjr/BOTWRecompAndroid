@@ -1,4 +1,4 @@
-package com.botwrecompandroid;
+package com.zbotw.recomp;
 
 import android.app.Notification;
 import android.app.NotificationChannel;

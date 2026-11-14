@@ -9,7 +9,7 @@ SECS=$1 TIMES=$2; shift 2
 mkdir -p android/out/shots
 for cfg in "$@"; do
     tag=${cfg%%:*}; env=${cfg#*:}
-    adb shell am force-stop com.botwrecomp.android
+    adb shell am force-stop com.zbotw.recomp
     (for t in ${TIMES//,/ }; do sleep 1; done) >/dev/null
     bash android/run_boot.sh "$SECS" "${COMMON:+$COMMON,}$env,LARECOMP_INPUT=700:A:6,820:A:6,940:A:6,1100:A:6" > /dev/null 2>&1 &
     run=$!
@@ -23,4 +23,4 @@ for cfg in "$@"; do
     fps=$(grep -o "frame [0-9]* [0-9.]* fps" "android/out/boot-$tag.log" | tail -8 | awk '{s+=$3; n++} END {if (n) printf "%.1f", s/n}')
     echo "$tag: $fps fps"
 done
-adb shell am force-stop com.botwrecomp.android
+adb shell am force-stop com.zbotw.recomp

@@ -272,6 +272,15 @@ static std::string g_job_detail;    // a failure: its cause as the code saw it, 
 static std::string g_fail_detail;   // (that cause, from the import thread, until its failure is set)
 static bool g_busy, g_job_failed;
 static bool g_confirm_delete;       // game-files page: "Delete the game files?" shown
+#ifdef __ANDROID__
+// The fast (-O0) library a first setup built: the session that runs after it records the functions the player's
+// own game entered (fnprof), and the game code is rebuilt at -O1 from that list in the background while the start
+// screen is up (the played functions hot, the rest optnone). -O0 vs -O1 of the generated code: about 10-15% of the
+// frame time - the fast library is playable, the full one is worth having.
+static bool g_upgrade_after_session;  // (set by the setup thread: the fast build went in)
+static bool g_session_recorded;       // (this process played a session with fnprof on: the list is on disk)
+static bool g_upgrade_started;        // (the background rebuild began - once per process)
+#endif
 
 static void set_job(const std::string &s, bool failed = false, const std::string &hint = "") {
     pthread_mutex_lock(&g_lock);
@@ -384,11 +393,14 @@ static float extract_progress(void) {
     return f < 0 ? 0 : f > 0.99f ? 0.99f : f;
 }
 
-// Builds the game code from the copied files in dir (a few minutes); false = failed (the job line says so)
-static bool build_game_code(const std::string &dir) {
+// Builds the game code from the copied files in dir (a few minutes); false = failed (the job line says so).
+// fast (Android): everything at -O0 - minutes to first play instead of an hour on a mid phone (4 GB, little
+// cores); the played functions' hot list then rebuilds it at -O1 in the background (session_end_upgrade, after
+// the first play session). The full build also runs when the app is updated over an old library, as before.
+static bool build_game_code(const std::string &dir, bool fast = false) {
     if (native_wanted()) return true;  // (the game's own code runs as it is)
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
-    GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};
+    GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1, fast};
     char why[256] = "";
     g_build_frac = 0;
 #ifdef __ANDROID__
@@ -416,6 +428,94 @@ static bool build_game_code(const std::string &dir) {
     return ok;
 }
 
+#ifdef __ANDROID__
+// ------------------------------------------------------------------ the fast build's upgrade
+// The first setup on a phone builds the game code at -O0 (minutes, playable). What follows makes it whole without
+// the player ever waiting on a progress bar: the first session records which functions their own game entered
+// (fnprof, the project's function-entry profiler - the same machinery the hot lists are made with), and the next
+// time the start screen is up the game code is rebuilt at -O1 with those functions hot and the rest optnone, in a
+// background thread (the start screen stays usable; the game cannot run while it goes - it doesn't have to). The
+// old library stays in place until the new one is whole: a failed upgrade changes nothing.
+// The generator's log says what the hot list found; LARECOMP_NO_UPGRADE=1 turns the whole scheme off (the fast
+// library is then simply kept - the next app start builds the full one, as updates always did).
+
+// What the session recorded: the hot list for this game version, in the shape gamebuild.c's load_hot reads (one
+// address a line, as the generated code names its functions: main at 0x7000000000, sdk at 0x7004000000). fnprof's
+// counts are the session's own guest-window addresses: rebased against its "# main_base" line, as hot_functions.py
+// does - the window moves between runs, the generated names don't. Every function with at least one entry is hot:
+// the play session's own idea of what "hot" is.
+static bool session_hot_list(char *path, size_t n) {
+    const char *out = getenv("LARECOMP_FNPROF_OUT");
+    if (!out || !*out) return false;
+    FILE *f = fopen(out, "rb");
+    if (!f) return false;
+    char line[256];
+    int version = 0;
+    unsigned long long main_base = 0;
+    bool any = false;
+    FILE *o = NULL;
+    while (fgets(line, sizeof line, f)) {
+        if (!strncmp(line, "# game_version ", 15)) { version = atoi(line + 15); continue; }
+        if (!strncmp(line, "# main_base ", 12)) { main_base = strtoull(line + 12, NULL, 16); continue; }
+        if (line[0] == '#' || line[0] == '\n') continue;
+        unsigned long long addr, count;
+        if (sscanf(line, "%llx %llu", &addr, &count) != 2 || !count) continue;
+        unsigned long long named = addr - main_base + 0x7000000000ull;  // (as the generated code names it)
+        if (named < 0x7000000000ull || named >= 0x7000000000ull + 0x8000000ull) continue;  // (not generated code)
+        if (!o) {  // (the path needs the version, known only from the file's header: opened on the first entry)
+            snprintf(path, n, "%s/hot_functions_session_%d.txt",
+                     getenv("LARECOMP_GEN_DIR") ? getenv("LARECOMP_GEN_DIR") : ".", version ? version : 100);
+            o = fopen(path, "wb");
+            if (!o) break;
+        }
+        fprintf(o, "%llx\n", named);
+        any = true;
+    }
+    fclose(f);
+    if (o) fclose(o);
+    if (!any) remove(path);
+    return any;
+}
+
+// The background rebuild: the start screen is up (launcher_run calls this once per frame, cheap when nothing to
+// do). gamebuild_run compiles with the hot list of the game it builds (LARECOMP_GAMEBUILD_HOT: load_hot reads it),
+// so this is the full build with the player's own functions at -O1 and everything else optnone - a few minutes of
+// background, not an hour: the giant -O1 graphs of the cold 90% are gone.
+static void upgrade_after_session(void) {
+    if (!g_upgrade_after_session || g_session_recorded || g_upgrade_started) return;
+    if (getenv("LARECOMP_NO_UPGRADE")) { g_upgrade_after_session = false; return; }
+    char list[1200];
+    if (!session_hot_list(list, sizeof list)) {  // (nothing recorded yet: the session still playing, or too short)
+        static uint64_t wait_since;
+        uint64_t now = SDL_GetTicksNS();
+        if (!wait_since) wait_since = now;
+        else if (now - wait_since > 60000000000ull)  // (a minute on the start screen and no list: the library is
+            g_upgrade_after_session = false;          //  what it is - a later app start builds the full one anyway)
+        return;
+    }
+    g_session_recorded = true;   // (a whole session is in the list: not again - the next one would add nothing)
+    setenv("LARECOMP_GAMEBUILD_HOT", list, 1);
+    struct Args { std::string dir, list; };
+    static Args a;  // (the thread's: outlives the call)
+    a.dir = g_root, a.list = list;
+    pthread_t th;
+    if (pthread_create(&th, NULL, [](void *p) -> void * {
+        Args *a = (Args *)p;
+        fprintf(stderr, "[launcher] upgrading the game code to -O1 (hot list: %s)\n", a->list.c_str());
+        android_call("buildServiceStart");
+        GameBuildOpts o = {build_progress, SDL_GetNumLogicalCPUCores() < 4 ? SDL_GetNumLogicalCPUCores() : 4, false};
+        char why[256] = "";
+        bool ok = gamebuild_run(a->dir.c_str(), &o, why, sizeof why);
+        android_call("buildServiceStop");
+        fprintf(stderr, "[launcher] upgrade %s%s%s\n", ok ? "done" : "failed", ok ? "" : ": ", ok ? "" : why);
+        return NULL;
+    }, &a) == 0) {
+        pthread_detach(th);
+        g_upgrade_after_session = false, g_upgrade_started = true;
+    }  // (couldn't start: the next start screen tries again - the flags stand)
+}
+#endif
+
 // The setup's folder: the picked files' version's extracted/ (g_dest), else this run's
 static std::string setup_dest(void) {
     pthread_mutex_lock(&g_lock);
@@ -438,8 +538,8 @@ static void *extract_thread(void *) {
     if (g_android_imported.exchange(false)) {  // (the activity copied exefs/ and built romfs.bin: below) the code -
         // unless the picked folder brought it built already for this app (its id: runtime/gamelib.c)
         if (gamelib_present(dest.c_str())) fprintf(stderr, "[launcher] game code from the picked folder\n");
-        else if (!build_game_code(dest)) goto done;
-        goto check;
+        else if (!build_game_code(dest, true)) goto done;  // (fast: -O0, playable at once; upgraded after the first
+        goto check;                                          //  session - the hot list from the player's own game)
     }
 #endif
     if (src.empty() && check_copied_files(dest).empty()) {  // copied already (an update needs new game code)
@@ -488,7 +588,15 @@ static void *extract_thread(void *) {
             set_job_detail(why);
             goto done;
         }
+#ifdef __ANDROID__
+        // First copy on this phone: the fast build (-O0, minutes). An update over the same game files (a new app
+        // build, the library's id changed): the full one, as before - the fast library isn't there to upgrade.
+        bool first = !gamelib_present(dest.c_str());
+        if (!build_game_code(dest, first)) goto done;
+        if (first) g_upgrade_after_session = true;  // (the background -O1 rebuild, after the first play session)
+#else
         if (!build_game_code(dest)) goto done;
+#endif
     }
 check:
     {
@@ -645,7 +753,7 @@ static void log_folder_read() {  // (BOTWRecompAndroidActivity.logFolderName, on
     env->DeleteLocalRef(act);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeLogFolderPicked(JNIEnv *env, jclass, jstring name) {
+extern "C" JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeLogFolderPicked(JNIEnv *env, jclass, jstring name) {
     const char *t = env->GetStringUTFChars(name, NULL);
     pthread_mutex_lock(&g_lock);
     if (t && *t) g_log_folder = t;  // ("": cancelled - the folder before stays)
@@ -658,13 +766,13 @@ extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidAc
 static std::string g_save_msg;  // (g_lock) the last import's or export's, shown under the buttons
 static bool g_save_failed, g_save_busy;
 
-extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeSaveDir(JNIEnv *env, jclass) {
+extern "C" JNIEXPORT jstring JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeSaveDir(JNIEnv *env, jclass) {
     char r[1024];
     std::string d = rt_version_root(rt_game_version(), r, sizeof r) ? std::string(r) + "/save/save_0" : "";
     return env->NewStringUTF(d.c_str());
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeSaveDone(JNIEnv *env, jclass,
+extern "C" JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeSaveDone(JNIEnv *env, jclass,
                                                                                                     jint result, jstring detail) {
     const char *t = env->GetStringUTFChars(detail, NULL);
     std::string d = t ? t : "";
@@ -686,7 +794,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidAc
 }
 
 // The game version of the picked main module's first bytes (game_version_of_build: 0 = not one this app runs)
-extern "C" JNIEXPORT jint JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeGameVersion(JNIEnv *env, jclass, jbyteArray head) {
+extern "C" JNIEXPORT jint JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeGameVersion(JNIEnv *env, jclass, jbyteArray head) {
     if (env->GetArrayLength(head) < 0x48) return 0;
     jbyte b[8];
     env->GetByteArrayRegion(head, 0x40, 8, b);
@@ -698,11 +806,11 @@ extern "C" JNIEXPORT jint JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidAc
 // (the folders searched so far: shown in place of the 0% - a big folder picked, Download or the storage's root, kept it
 // at 0% long enough to look stuck, #373)
 static std::atomic<int> g_searched;
-extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportSearched(JNIEnv *, jclass, jint n) {
+extern "C" JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeImportSearched(JNIEnv *, jclass, jint n) {
     g_searched = n;
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportLooking(JNIEnv *, jclass) {
+extern "C" JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeImportLooking(JNIEnv *, jclass) {
     g_searched = 0;
     pthread_mutex_lock(&g_lock);
     g_busy = true;
@@ -712,7 +820,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidAc
 
 // The import of that version's files begins: its own extracted/ (runtime/paths.h), emptied of an earlier setup - its
 // path back, for the activity to copy exefs/ into
-extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportBegin(JNIEnv *env, jclass, jstring name,
+extern "C" JNIEXPORT jstring JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeImportBegin(JNIEnv *env, jclass, jstring name,
                                                                                                          jint version) {
     const char *n = env->GetStringUTFChars(name, NULL);
     char vr[1024] = "";
@@ -735,7 +843,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroi
 // The picked romfs/'s files (relative paths) and its System/Version.txt's first bytes against the picked exefs/'s
 // version, before nativeImportBegin: a folder that can't be used leaves an earlier setup alone. false = the failure is
 // set (nativeImportDone(6) follows)
-extern "C" JNIEXPORT jboolean JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeCheckRomfs(JNIEnv *env, jclass, jint version,
+extern "C" JNIEXPORT jboolean JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeCheckRomfs(JNIEnv *env, jclass, jint version,
                                                                                                          jobjectArray paths, jstring version_txt) {
     int n = env->GetArrayLength(paths);
     std::vector<std::string> keep(n);
@@ -762,7 +870,7 @@ static bool keep_loose(const char *rel);
 // A romfs.bin brought ready-made (the picked folder: exefs/ and romfs.bin - made on a PC from the game's own files, no
 // 41,000 files to copy through the file provider): nativeCheckRomfs for it, its descriptor (closed here) read from its
 // own tables and System/Version.txt. false = the failure is set (nativeImportDone(6) follows)
-extern "C" JNIEXPORT jboolean JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeCheckRomfsImage(JNIEnv *, jclass,
+extern "C" JNIEXPORT jboolean JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeCheckRomfsImage(JNIEnv *, jclass,
                                                                                                               jint version, jint fd) {
     char why[256] = "";
     int r = romfs_check_image(version, fd, why, sizeof why);
@@ -773,7 +881,7 @@ extern "C" JNIEXPORT jboolean JNICALL Java_com_botwrecompandroid_BOTWRecompAndro
 
 // The few files the runtime opens by path (keep_loose: the movies), out of a ready-made romfs.bin (its descriptor,
 // closed here) into this setup's romfs/. NULL, or why it failed.
-extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImageLoose(JNIEnv *env, jclass, jint fd) {
+extern "C" JNIEXPORT jstring JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeImageLoose(JNIEnv *env, jclass, jint fd) {
     set_job("Taking the movies out of the game data...");
     std::string romfs = setup_dest() + "/romfs";
     mkdir(romfs.c_str(), 0755);
@@ -788,7 +896,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroi
     return env->NewStringUTF(why);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportProgress(JNIEnv *, jclass, jlong done, jlong total) {
+extern "C" JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeImportProgress(JNIEnv *, jclass, jlong done, jlong total) {
     g_total = (unsigned long long)total;  // (exefs/ copied, then the data image read straight from romfs/: one pass)
     g_done = (unsigned long long)done;
 }
@@ -810,7 +918,7 @@ static int romfs_jni_open(void *ctx, int index) {
     if (j->env->ExceptionCheck()) { j->env->ExceptionClear(); return -1; }
     return fd;
 }
-extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeBuildRomfs(
+extern "C" JNIEXPORT jstring JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeBuildRomfs(
         JNIEnv *env, jobject act, jobjectArray paths, jlongArray sizes) {
     int n = env->GetArrayLength(paths);
     std::vector<std::string> keep_alive(n);
@@ -856,7 +964,7 @@ static std::string dlc_dir(void) {
     return rt_version_root(100, r, sizeof r) ? std::string(r) + "/dlc" : std::string();
 }
 static void dlc_progress(uint64_t done, uint64_t total) { g_dlc_frac = total ? (float)((double)done / (double)total) : 0; }
-extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeBuildDlc(
+extern "C" JNIEXPORT jstring JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeBuildDlc(
         JNIEnv *env, jobject act, jobjectArray paths, jlongArray sizes) {
     int n = env->GetArrayLength(paths);
     std::vector<std::string> keep_alive(n);
@@ -889,7 +997,7 @@ extern "C" JNIEXPORT jstring JNICALL Java_com_botwrecompandroid_BOTWRecompAndroi
     return env->NewStringUTF(why[0] ? why : "Could not build the DLC's data image. Check free storage and try again.");
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeDlcDone(JNIEnv *env, jclass,
+extern "C" JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeDlcDone(JNIEnv *env, jclass,
                                                                                                    jint result, jstring detail) {
     const char *t = env->GetStringUTFChars(detail, NULL);
     std::string d = t ? t : "";
@@ -925,7 +1033,7 @@ static void remove_tree(const std::string &p) {
 }
 
 // The import thread's cause of a failure (an exception: "IOException: ..."), ahead of nativeImportDone
-extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportDetail(JNIEnv *env, jclass,
+extern "C" JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeImportDetail(JNIEnv *env, jclass,
                                                                                                          jstring what) {
     const char *c = what ? env->GetStringUTFChars(what, NULL) : NULL;
     pthread_mutex_lock(&g_lock);
@@ -971,7 +1079,7 @@ static void android_prune_loose(void) {  // (start screen, game files ready)
 
 // 0 copied, 1 cancelled, 2 no game files found, 3 game packages instead of files, 4 another version, 5 copy failed,
 // 6 the romfs/ doesn't go with the exefs/ (nativeCheckRomfs set the failure)
-extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeImportDone(JNIEnv *, jclass, jint result) {
+extern "C" JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeImportDone(JNIEnv *, jclass, jint result) {
     if (result == 0) {
         g_android_imported = true;
         pthread_t t;
@@ -993,7 +1101,7 @@ extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidAc
     set_job_detail(detail);
 }
 
-extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeDriverPicked(JNIEnv *env, jclass, jstring name) {
+extern "C" JNIEXPORT void JNICALL Java_com_zbotw_recomp_BOTWRecompAndroidActivity_nativeDriverPicked(JNIEnv *env, jclass, jstring name) {
     const char *n = env->GetStringUTFChars(name, NULL);
     pthread_mutex_lock(&g_lock);
     char m[512];
@@ -2154,6 +2262,7 @@ extern "C" void launcher_run(const char *root) {
             settings_save();
             android_call("restartApp");
         }
+        upgrade_after_session();  // (a played session behind us and a fast library in place: rebuild at -O1, quietly)
 #endif
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -2787,6 +2896,23 @@ extern "C" void launcher_run(const char *root) {
         }
     }
     // play: hand the window to the game
+#ifdef __ANDROID__
+    // The fast library's upgrade, part 1: this session records what the player's own game runs (fnprof counts every
+    // generated function it enters - one predictable branch per call when off, an atomic bump when on: the frame
+    // cost is a rounding error). The start screen after the session turns the list into the -O1 rebuild. Only while
+    // the fast library is the one about to run (LARECOMP_NO_UPGRADE turns the whole scheme off; so does a session
+    // already recorded - the counts would add nothing).
+    if (g_upgrade_after_session && !g_session_recorded && !getenv("LARECOMP_NO_UPGRADE") &&
+        !getenv("LARECOMP_FNPROF")) {
+        char out[1200];
+        const char *gen = getenv("LARECOMP_GEN_DIR");
+        snprintf(out, sizeof out, "%s/fnprof_session.txt", gen && *gen ? gen : ".");
+        setenv("LARECOMP_FNPROF", "0:999999999", 1);  // (from process start: threads before the first frame count)
+        setenv("LARECOMP_FNPROF_EVERY", "1800", 1);   // (the file rewritten every 1800 frames: a stopped session keeps its counts)
+        setenv("LARECOMP_FNPROF_OUT", out, 1);
+        fprintf(stderr, "[launcher] recording this session's functions (upgrade list): %s\n", out);
+    }
+#endif
     settings_save();
 #ifdef __APPLE__
     ImGui_ImplMetal_Shutdown();

@@ -8,7 +8,7 @@ set -euo pipefail
 export MSYS_NO_PATHCONV=1  # (Git Bash: leave the device paths alone)
 cd "$(dirname "$0")/.."
 VER=${1:?usage: android/run_ver.sh <v160|v182> [seconds] [LARECOMP_X=1,...]}
-PKG=com.botwrecomp.android
+PKG=com.zbotw.recomp
 EXT=/sdcard/Android/data/$PKG/files/$VER
 INT=/data/data/$PKG/files/$VER
 adb shell am force-stop $PKG

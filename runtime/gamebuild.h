@@ -13,6 +13,9 @@ typedef struct {
     // now and then, from the calling thread: how far the whole build is (0..1) and what it's doing
     void (*progress)(double fraction, const char *step);
     int jobs;  // compiler processes at once (>= 1)
+    // Fast mode (Android): everything at -O0, no cold-function scan - minutes, not an hour, to first play (a
+    // background rebuild with the played functions' list upgrades it: launcher.mm, after the first session).
+    bool fast;
 } GameBuildOpts;
 
 // Builds it (a few minutes). false: why says what went wrong (details in the log).

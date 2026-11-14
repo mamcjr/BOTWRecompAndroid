@@ -13,10 +13,10 @@
 //   found in it; exefs/ is copied to its version's extracted/ - <external files>/extracted for 1.0.0, v160/ and v182/
 //   inside it for the others, runtime/paths.h - and romfs.bin built there straight from romfs/) and the Vulkan driver
 //   (a .zip copied to the drivers folder).
-// The data root (game files, saves, settings) is <external files>: /sdcard/Android/data/com.botwrecomp.android/files.
+// The data root (game files, saves, settings) is <external files>: /sdcard/Android/data/com.zbotw.recomp/files.
 // While in front it reports the battery and thermal state once a second for the performance overlay
 // (runtime/ui/perf_overlay.mm): apps can't read those in /sys.
-package com.botwrecompandroid;
+package com.zbotw.recomp;
 
 import android.app.Activity;
 import android.app.AlertDialog;
@@ -119,7 +119,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             setenv("LARECOMP_VK_DRIVER", driver != null ? driver.getAbsolutePath() : "");
             // testing: the runtime's LARECOMP_* switches from the launch intent, separated by commas (adb shell drops
             // the quotes around spaces), e.g. LARECOMP_VK_DRIVER= is the system driver:
-            // adb shell am start -n com.botwrecomp.android/com.botwrecompandroid.BOTWRecompAndroidActivity --es env LARECOMP_NO_LAUNCHER=1,LARECOMP_VK_DRIVER=
+            // adb shell am start -n com.zbotw.recomp/com.zbotw.recomp.BOTWRecompAndroidActivity --es env LARECOMP_NO_LAUNCHER=1,LARECOMP_VK_DRIVER=
             String env = getIntent() != null ? getIntent().getStringExtra("env") : null;
             // Opened again from the recent apps, Android hands back that test launch's intent: keep only which game
             // version it ran (a scripted input left in it ignored the touch screen - the menu looked frozen)
@@ -332,7 +332,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     // The app icon's long-press shortcut (res/xml/shortcuts.xml): the system driver, settings out of reach or not - a
     // custom driver that draws garbage (Turnip_v26.3.0-R6 on an Adreno 830: stripes, the menus unreadable) or crashes.
     // Before the driver loads when it starts the app; a running one (a single instance) drops it and starts again.
-    static final String SYSTEM_DRIVER = "com.botwrecompandroid.action.SYSTEM_DRIVER";
+    static final String SYSTEM_DRIVER = "com.zbotw.recomp.action.SYSTEM_DRIVER";
     // (android/run_ver.sh: the game version a test launch ran, and its own start without the launcher)
     static final List<String> KEEP_FROM_RECENTS = Arrays.asList("LARECOMP_DATA_ROOT", "LARECOMP_GAME_LIB",
             "LARECOMP_SAVE_SEED", "LARECOMP_NO_LAUNCHER");

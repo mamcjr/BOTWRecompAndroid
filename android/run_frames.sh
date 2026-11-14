@@ -6,10 +6,10 @@ set -uo pipefail
 export MSYS_NO_PATHCONV=1
 cd "$(dirname "$0")/.."
 TAG=$1 FROM=$2 SECS=$3 ENVS=${4:-}
-D=/sdcard/Android/data/com.botwrecomp.android/files/v190/build
-adb shell am force-stop com.botwrecomp.android
+D=/sdcard/Android/data/com.zbotw.recomp/files/v190/build
+adb shell am force-stop com.zbotw.recomp
 bash android/run_boot.sh "$SECS" "LARECOMP_SCREENSHOT_EVERY=1,LARECOMP_SCREENSHOT_FROM=$FROM,$ENVS" > /dev/null 2>&1
-adb shell am force-stop com.botwrecomp.android
+adb shell am force-stop com.zbotw.recomp
 rm -rf "android/out/frames/$TAG"
 mkdir -p "android/out/frames/$TAG"
 adb pull -a "$D/frames/." "android/out/frames/$TAG/" > /dev/null

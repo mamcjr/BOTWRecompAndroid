@@ -1,4 +1,4 @@
-package com.botwrecompandroid;
+package com.zbotw.recomp;
 
 /** Uncompressed Zepp palette TGA: 64-byte header, BGRA palette, top-left pixel indices. */
 final class WatchMapImage {

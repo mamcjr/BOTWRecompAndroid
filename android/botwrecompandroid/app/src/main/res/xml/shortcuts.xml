@@ -11,9 +11,9 @@
         android:shortcutShortLabel="@string/shortcut_pick_driver"
         android:shortcutLongLabel="@string/shortcut_pick_driver_long">
         <intent
-            android:action="com.botwrecompandroid.action.PICK_DRIVER"
-            android:targetPackage="com.botwrecomp.android"
-            android:targetClass="com.botwrecompandroid.DriverPickActivity" />
+            android:action="com.zbotw.recomp.action.PICK_DRIVER"
+            android:targetPackage="com.zbotw.recomp"
+            android:targetClass="com.zbotw.recomp.DriverPickActivity" />
     </shortcut>
     <shortcut
         android:shortcutId="watch_map"
@@ -22,9 +22,9 @@
         android:shortcutShortLabel="@string/shortcut_watch_map"
         android:shortcutLongLabel="@string/shortcut_watch_map_long">
         <intent
-            android:action="com.botwrecompandroid.action.WATCH_MAP"
-            android:targetPackage="com.botwrecomp.android"
-            android:targetClass="com.botwrecompandroid.BOTWRecompAndroidActivity" />
+            android:action="com.zbotw.recomp.action.WATCH_MAP"
+            android:targetPackage="com.zbotw.recomp"
+            android:targetClass="com.zbotw.recomp.BOTWRecompAndroidActivity" />
     </shortcut>
     <shortcut
         android:shortcutId="system_driver"
@@ -33,8 +33,8 @@
         android:shortcutShortLabel="@string/shortcut_system_driver"
         android:shortcutLongLabel="@string/shortcut_system_driver_long">
         <intent
-            android:action="com.botwrecompandroid.action.SYSTEM_DRIVER"
-            android:targetPackage="com.botwrecomp.android"
-            android:targetClass="com.botwrecompandroid.BOTWRecompAndroidActivity" />
+            android:action="com.zbotw.recomp.action.SYSTEM_DRIVER"
+            android:targetPackage="com.zbotw.recomp"
+            android:targetClass="com.zbotw.recomp.BOTWRecompAndroidActivity" />
     </shortcut>
 </shortcuts>

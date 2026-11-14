@@ -9,9 +9,9 @@ SECS=${1:-60}
 ENV=LARECOMP_NO_LAUNCHER=1${2:+,$2}
 OUT=android/out/boot.log
 mkdir -p android/out
-adb shell am force-stop com.botwrecomp.android
+adb shell am force-stop com.zbotw.recomp
 adb logcat -c
-adb shell am start -n com.botwrecomp.android/com.botwrecompandroid.BOTWRecompAndroidActivity --es env "$ENV" >/dev/null
+adb shell am start -n com.zbotw.recomp/com.zbotw.recomp.BOTWRecompAndroidActivity --es env "$ENV" >/dev/null
 timeout "$SECS" adb logcat -v time BOTWRecompAndroid:V SDL:V DEBUG:V libc:F AndroidRuntime:E '*:S' > "$OUT" || true
 grep -c . "$OUT" | sed 's/^/lines: /'
 tail -40 "$OUT"

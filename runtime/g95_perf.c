@@ -168,6 +168,21 @@ void g95_keep_resident(uint64_t lo, uint64_t size) {
         (unsigned long long)hi, (unsigned long long)((hi - lo) >> 20));
 }
 
+// Pin a child process (the game code generator: single-threaded Python) to the fast cluster: its run is the long
+// pole of the setup's first build, and one A76 does the work of several A55s contending for it. sched_setaffinity
+// on the child's pid works while it is alive (a direct child of this process); if it fails the scheduler decides,
+// exactly as before. Nothing on any other SoC.
+void g95_pin_pid_big(int pid) {
+    if (!g95_on()) return;
+    const G95Profile *p = g95_profile();
+    cpu_set_t set;
+    CPU_ZERO(&set);
+    for (int i = 0; i < p->nfast; i++) CPU_SET(p->fast_cpu[i], &set);
+    int r = sched_setaffinity(pid, sizeof set, &set);
+    LOG("[g95] generator (pid %d) on the %d A76 core%s: %s\n", pid, p->nfast, p->nfast == 1 ? "" : "s",
+        r ? strerror(errno) : "ok");
+}
+
 #else  // !__ANDROID__
 
 // (compiled out on the desktop builds: the whole file is about one phone)
