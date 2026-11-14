@@ -1,3 +1,4 @@
+#include "../../benchmark_perf.h"
 // Executes recorded NVN command lists with Vulkan (port of renderer.m; same structure, same behaviour).
 #include <SDL3/SDL_cpuinfo.h>
 #ifdef __ANDROID__
@@ -243,9 +244,12 @@ void vk_wait_seq(uint64_t seq) {
     VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
                               .pValues = &seq};
     uint64_t t0 = SDL_GetTicksNS();
-    VkResult r = seq_thread_on() && atomic_load(&done_cached) >= seq ? VK_SUCCESS  // (finished already: no driver call)
+    bool already_done = seq_thread_on() && atomic_load(&done_cached) >= seq;
+    VkResult r = already_done ? VK_SUCCESS  // (finished already: no driver call)
                  : vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
-    stat_wait_ns += SDL_GetTicksNS() - t0;
+    uint64_t elapsed = SDL_GetTicksNS() - t0;
+    if (bench_on() && !already_done) bench_record(BP_GPU_WAIT_NS, elapsed);
+    stat_wait_ns += elapsed;
     cum_wait += SDL_GetTicksNS() - t0;
     wait_account(SDL_GetTicksNS() - t0);
 #ifdef __ANDROID__
@@ -423,7 +427,7 @@ void vk_pace_frame(void) {
     last = now, last_wait = w;
     extern bool g_benchmark;
     extern void benchmark_frame(double period, double busy, double game, double render, double gpu);
-    if (g_benchmark && !first && p > 100000000ull) benchmark_frame(p / 1e6, -1, -1, -1, -1);  // (its window keeps these too)
+    if (g_benchmark && !first && p > 100000000ull) benchmark_frame(p / 1e6, (p > wt ? p - wt : 0) / 1e6, (p > wt ? p - wt : 0) / 1e6, -1, -1);  // (its window keeps these too)
     if (first || p > 100000000ull) return;  // (loading, a hitch: not a pace)
     double busy = (p > wt ? p - wt : 0) / 1e6;
 #ifdef __ANDROID__
@@ -1366,7 +1370,9 @@ static void wait_built(_Atomic int *state) {
     if (atomic_load(state)) return;
     uint64_t t0 = plat_now_ns();
     while (!atomic_load(state)) usleep(200);
-    stat_build_wait_ns += plat_now_ns() - t0;
+    uint64_t elapsed = plat_now_ns() - t0;
+    bench_add(BP_BUILD_WAIT_NS, elapsed);
+    stat_build_wait_ns += elapsed;
 }
 static bool rt_is_persistent(NvnTexture *t) {
     static int on = -1;
@@ -2702,6 +2708,7 @@ static void subst_glsl(ShaderInfo *si, uint64_t addr, const char *suffix) {
 #endif
 
 static void compile_program(void *arg) {
+    BENCH_BUILD();
     Prog *p = arg;
     size_t nv = 0, nf = 0;
     uint32_t *sv = vk_glsl_to_spirv(p->vi->msl, STAGE_VERTEX, "vs", &nv);
@@ -3198,12 +3205,13 @@ static void pipe_evict(void) {
     int keep = pipe_keep();
     if (keep <= 0 || now < next) return;
     next = now + 10000000000ull;  // (every 10 s)
+    uint64_t evict_start = bench_clock();
     int live = 0;
     for (size_t i = 0; i < pipe_cache.capacity; i++) {
         Pipe *p = pipe_cache.entries[i].object;
         if (p && !p->evicted && atomic_load(&p->state) == 1) live++;
     }
-    if (live <= keep) return;
+    if (live <= keep) { bench_elapsed(BP_EVICT_NS, evict_start); return; }
     uint64_t done = vk_completed_seq();
     int target = keep * 4 / 5, gone = 0;
     // oldest first: two passes, the unused for 2 minutes, then for 30 s
@@ -3224,6 +3232,8 @@ static void pipe_evict(void) {
             live--, gone++;
         }
     }
+    bench_elapsed(BP_EVICT_NS, evict_start);
+    if (evict_start) bench_add(BP_EVICTED, gone);
     static int nlog;
     if (gone && nlog++ < 20) LOG("[vk] pipelines: %d unused ones destroyed, %d kept\n", gone, live);
 }
@@ -3248,6 +3258,7 @@ static VkPrimitiveTopology topo_class_base(uint8_t c) {
 }
 
 static void build_pipeline(void *arg) {
+    BENCH_BUILD();
     Pipe *pp = arg;
     PipeKey *k = &pp->k;
     VkPipelineShaderStageCreateInfo stages[2] = {
@@ -6158,6 +6169,7 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
 typedef struct { Prog p; ShaderInfo *si; VkPipeline pipe; uint32_t local[3]; uint64_t code_addr; } CsProg;
 
 static void build_compute(void *arg) {
+    BENCH_BUILD();
     CsProg *cp = arg;
     size_t n = 0;
     uint32_t *spv = vk_glsl_to_spirv(cp->si->msl, STAGE_COMPUTE, "cs", &n);
@@ -6979,6 +6991,7 @@ static void draw_(CmdRec *r, bool indexed) {
             run_job(build_pipeline, pp);
         } else if (pp->evicted) {  // (destroyed by pipe_evict: built again)
             pp->evicted = false;
+            bench_add(BP_REBUILDS, 1);
             run_job(build_pipeline, pp);
         }
         // Verification rebuilds the original key to detect missing invalidations during later device tests.

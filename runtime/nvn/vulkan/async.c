@@ -1,3 +1,4 @@
+#include "../../benchmark_perf.h"
 // Android: the game's command lists translated on a render thread of their own (LARECOMP_VK_ASYNC=0: off).
 //
 // The game's thread records its commands into its own command memory (cmdbuf.c) and, at submit, used to translate
@@ -232,7 +233,9 @@ void vk_async_execute(uint64_t handle) {
 
 void vk_async_present(NvnTexture *t) {
     pthread_mutex_lock(&p_lock);
-    push(REQ_PRESENT, plat_now_ns(), t);  // (a: when the game handed it over: device.c vsync_update)
+    uint64_t asked = plat_now_ns();
+    if (g_benchmark) bench_handoff(asked);
+    push(REQ_PRESENT, asked, t);  // (a: when the game handed it over: device.c vsync_update)
     pthread_mutex_unlock(&p_lock);
 }
 
