@@ -32,6 +32,7 @@
 #include "../paths.h"
 #include "../platform.h"
 #include "../rt.h"
+#include "../g95_perf.h"
 #include "../../android/common/guest_window.h"
 
 uint64_t g_guest_lo;  // the window's start (rt.h GUEST_LO), set by plat_reserve_guest before main()
@@ -900,27 +901,16 @@ static void uclamp_min_thread(void) {
         const char *e = getenv("LARECOMP_UCLAMP_MIN");
         want = e && atoi(e) > 0 ? (atoi(e) > 1024 ? 1024 : atoi(e)) : 0;
     }
-    if (!want) return;
-    struct {
-        uint32_t size, policy;
-        uint64_t flags;
-        int32_t nice;
-        uint32_t priority;
-        uint64_t runtime, deadline, period;
-        uint32_t util_min, util_max;
-    } attr = {.size = 56, .flags = 0x08 | 0x10 | 0x20, .util_min = (uint32_t)want};  // (KEEP_POLICY | KEEP_PARAMS |
-                                                                                    //  UTIL_CLAMP_MIN; struct ver. 1)
-    long r = syscall(__NR_sched_setattr, 0, &attr, 0);
-    static atomic_int logged;
-    if (!atomic_exchange(&logged, 1))
-        LOG("[android] uclamp.min %d for the game's threads: %s\n", want, r ? strerror(errno) : "ok");
+    if (want) set_uclamp_min(want, "LARECOMP_UCLAMP_MIN");
 }
 
 // The render thread (vulkan/async.c, ours: no part of the game's job system that LARECOMP_PIN broke) on the fastest
 // cores. Left to the scheduler on a Galaxy Tab A9+ (Snapdragon 695: 2 x A78, 6 x A55) it sat on a little core,
 // 90 ms a frame translating the world, while the game's thread had a big one (2026-11-08). Default: on low RAM
-// (vulkan/exec.c vk_low_ram - the weak phones); LARECOMP_RENDER_BIG=1 / 0.
+// (vulkan/exec.c vk_low_ram - the weak phones); LARECOMP_RENDER_BIG=1 / 0. The Helio G95 profile (g95_perf.c) takes
+// this further: on a G90 family SoC the pin is always on, to the A76 cluster it found itself.
 void plat_render_thread_pin(void) {
+    if (g95_pin_render_thread()) return;
     const char *e = getenv("LARECOMP_RENDER_BIG");
     extern bool vk_low_ram(void);
     if (e ? !atoi(e) : !vk_low_ram()) return;
@@ -952,6 +942,7 @@ void plat_render_thread_pin(void) {
 void plat_thread_unpin(void) {
     if (g_pinned) sched_setaffinity(0, sizeof g_all_cores, &g_all_cores);
     uclamp_min_thread();
+    g95_uclamp_thread();  // (the G95 profile's floor, unless LARECOMP_UCLAMP_MIN said one itself)
 }
 
 static void pin_to_fastest_cores(void) {

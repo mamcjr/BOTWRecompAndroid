@@ -70,7 +70,9 @@ Settings g_settings = {
 #endif
 #ifdef __ANDROID__
     .upscaler = UPSCALE_SGSR1,  // (one pass: ~1 ms on the Adreno 830 to 2560x1440, FSR 1's two ~2.7 ms; 40 fps against 38)
-    .native_code = false,       // (an experiment: runtime/native.c)
+    .native_code = true,        // (the game's own code on the CPU, runtime/native.c: on by default for this build -
+                                //  the Helio G95 profile in g95_perf.c is built around its native path, and the menu's
+                                //  setting still says what the player chose)
     .sync_lag = true,           // (a few more fps; the CPU's reads of GPU results a frame old: nvn/objects.c nvnSyncWait)
     .out_lines = OUT_AUTO,      // (POCO F7 Ultra, 3200x1440, 1.8.2's Great Plateau: GPU 22.8 ms a frame at the screen's,
                                 // 18.6 at 1080 lines with a larger scene - the final image's passes over 2.2x the pixels)

@@ -21,8 +21,8 @@ android {
         applicationId = "com.botwrecomp.android"
         minSdk = 30
         targetSdk = 36
-        versionCode = 40
-        versionName = "0.4.1-beta"
+        versionCode = 42
+        versionName = "0.4.2"
         ndk {
             abiFilters += "arm64-v8a"
         }

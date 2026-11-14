@@ -166,7 +166,12 @@ static bool seq_thread_on(void) {
     if (seq_thread < 0) {
         extern bool vk_low_ram(void);
         const char *e = getenv("LARECOMP_SEQ_THREAD");
-        seq_thread = e ? atoi(e) != 0 : vk_low_ram();
+        // Default on for low-RAM phones (the weak ones, vk_low_ram) and for Mali drivers, whose timeline value
+        // read blocks in the kernel until the GPU catches up - the same stall the Turnip-on-KGSL case above was
+        // made for: without the waiter, the render thread stops after every submission until the GPU finishes,
+        // and the two never work at the same time. On a Helio G95's Mali-G76 that is half the render thread's
+        // frame gone.
+        seq_thread = e ? atoi(e) != 0 : vk_low_ram() || g_vk.props.vendorID == 0x13B5;
         if (seq_thread) {
             pthread_t th;
             if (pthread_create(&th, NULL, seq_waiter, NULL)) seq_thread = 0;
@@ -1100,8 +1105,23 @@ bool vk_low_ram(void) {
     }
     return low;
 }
-#define CHUNK_SIZE (vk_low_ram() ? 16ull << 20 : 64ull << 20)
-#define RING_KEEP (vk_low_ram() ? 2 : 4)
+// The transient ring's size and how many chunks to keep, as variables (the same numbers as before everywhere else:
+// LARECOMP_RING_CHUNK_MB / LARECOMP_RING_KEEP say one, and on a Mali - the Helio G95's G76, with no device-local
+// memory of its own - the ring is kept a little smaller than the 4 x 64 MB the desktop path holds, so the game's
+// own heap has the room instead).
+static uint64_t ring_chunk_mb(void) {
+    const char *e = getenv("LARECOMP_RING_CHUNK_MB");
+    if (e && atoi(e) > 0) return (uint64_t)atoi(e);
+    if (vk_low_ram()) return 16;
+    return g_vk.props.vendorID == 0x13B5 ? 32 : 64;
+}
+static int ring_keep(void) {
+    const char *e = getenv("LARECOMP_RING_KEEP");
+    if (e && atoi(e) > 0) return atoi(e);
+    return vk_low_ram() ? 2 : 4;
+}
+#define CHUNK_SIZE (ring_chunk_mb() << 20)
+#define RING_KEEP (ring_keep())
 typedef struct { VkBuffer buf; VmaAllocation mem; uint8_t *ptr; uint64_t size, used, seq, frame; } Chunk;  // frame: last picked
 static Chunk *chunks;
 static int nchunks, active = -1;

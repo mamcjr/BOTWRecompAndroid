@@ -24,6 +24,7 @@
 #include "kernel.h"
 #include "rt.h"
 #include "settings.h"
+#include "g95_perf.h"
 
 typedef struct { uint64_t tp; Cpu *cpu; } NativeTabEnt;
 // Open addressing from the hashed slot (native_gate.S: the same hash; up to 64 probes, past the end: no wrap). tp 0:
@@ -35,6 +36,10 @@ static pthread_mutex_t tab_lock = PTHREAD_MUTEX_INITIALIZER;
 
 void native_enter(Cpu *c, uint64_t addr);  // native_gate.S
 extern char native_svc_gate[], native_hle_gate[];
+
+// CNTVCT's rate into the Switch's 19.2 MHz tick, as a 64.64 fixed-point factor (0: the counter already matches;
+// set by native_prepare). Applied in native_ticks, so the runtime's own clock keeps Switch time on any SoC.
+static __uint128_t g_tick_scale;
 
 // Chosen per boot (main.c boot): the setting (Native game code), or LARECOMP_NATIVE=0/1 over it
 static bool g_on;
@@ -580,6 +585,8 @@ static void prepare_module(Module *m) {
     __builtin___clear_cache((char *)(uintptr_t)area, (char *)(uintptr_t)(area + asize));
     if (mprotect((void *)(uintptr_t)t0, tsz, PROT_READ | PROT_EXEC) || mprotect((void *)(uintptr_t)area, asize, PROT_READ | PROT_EXEC))
         FATAL("[native] %s: the code can't be made executable (errno %d)\n", m->name, errno);
+    g95_keep_resident(t0, tsz);        // (the G95 profile: no page faults in the middle of gameplay)
+    g95_keep_resident(area, asize);    // (the rewritten stubs: taken on every svc / TLS access)
     LOG("[native] %s: %u svc, %u TLS, %u counter reads rewritten, %u fixes; stubs at %llx (%llu KB)\n", m->name, nsvc,
         ntls, ncnt, nfixed, (unsigned long long)area, (unsigned long long)(asize >> 10));
 }
@@ -601,6 +608,7 @@ static void prepare_hle(void) {
     __builtin___clear_cache((char *)(uintptr_t)HLE_BASE, (char *)(uintptr_t)(HLE_BASE + size));
     if (mprotect((void *)(uintptr_t)HLE_BASE, size, PROT_READ | PROT_EXEC))
         FATAL("[native] the HLE slots can't be made executable (errno %d)\n", errno);
+    g95_keep_resident(HLE_BASE, size);  // (the G95 profile: every host call the game makes goes through these)
 }
 
 void native_prepare(void) {
@@ -608,14 +616,27 @@ void native_prepare(void) {
     uint64_t f;
     __asm__ volatile("mrs %0, cntfrq_el0" : "=r"(f));
     LOG("[native] the game's code runs on the CPU (counter %llu Hz%s)\n", (unsigned long long)f,
-        f == 19200000 ? ", as the Switch's" : ": NOT the Switch's 19.2 MHz - the game's timing will be off");
+        f == 19200000 ? ", as the Switch's" : ": NOT the Switch's 19.2 MHz - the tick is scaled to it");
+    // The counter's rate into the Switch's 19.2 MHz, as a 64.64 fixed-point factor: the game's own reads of the
+    // rewritten counter (the mrs sites, not this C path) see raw ticks, so the factor only shapes the runtime's
+    // own tick (rt_ticks) and the frame pacer's; the raw reads stay what they were (a stable, monotonic clock -
+    // never changed in place, which would break the rewriter's one-instruction substitutions).
+    if (f > 0 && f != 19200000) {
+        g_tick_scale = (__uint128_t)f << 64;
+        g_tick_scale /= 19200000;
+    } else g_tick_scale = 0;
     memset(g_native_tab, 0, sizeof g_native_tab);
     for (int i = 0; i < g_nmodules; i++) prepare_module(&g_modules[i]);
     prepare_hle();
 }
 
 // The Switch's tick: the counter the rewritten reads see (rt_ticks, kernel.c)
-uint64_t native_ticks(void) { uint64_t v; __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v)); return v; }
+uint64_t native_ticks(void) {
+    uint64_t v;
+    __asm__ volatile("mrs %0, cntvct_el0" : "=r"(v));
+    if (g_tick_scale) v = (uint64_t)((__uint128_t)v * g_tick_scale >> 64);
+    return v;
+}
 #else
 #include "rt.h"
 bool native_wanted(void) { return false; }

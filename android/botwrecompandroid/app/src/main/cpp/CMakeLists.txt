@@ -76,7 +76,13 @@ else()
 endif()
 # -O2 -g whatever the Gradle build type (the Android runtime optimization flags): a debug build left the runtime at -O0, about half of the
 # game thread's time
-target_compile_options(main PRIVATE -O2 -g -fno-strict-aliasing -Wall -Wno-unused-function -Wno-format  # (as on Linux: %llx for uint64_t)
+# -O3, the A76's tuning and its architecture for one known SoC (a Helio G95: 2 x A76 + 6 x A55, both clusters
+# Armv8.2). march is kept at plain v8.2 - no +fp16, no +dotprod, no +lse - because the little cores run the runtime's
+# own threads too and an instruction they lack is a crash, not a slowdown; the A76's scheduling, its fused
+# multiply-adds (-ffp-contract=fast, the runtime's own math only) and its branch predictors are what -mtune buys.
+# -fno-strict-aliasing stays: the runtime reads the game's memory through every kind of pointer.
+target_compile_options(main PRIVATE -O3 -g -march=armv8.2-a -mtune=cortex-a76 -ffp-contract=fast
+    -fno-strict-aliasing -Wall -Wno-unused-function -Wno-format  # (as on Linux: %llx for uint64_t)
     $<$<COMPILE_LANGUAGE:CXX>:-std=c++17>)
 target_link_libraries(main PRIVATE SDL3 shaderc_shared adrenotools android log dl m)
 # (runtime/hle.h, ipc.h, main.c: tables in named sections found through __start_ / __stop_ symbols)
