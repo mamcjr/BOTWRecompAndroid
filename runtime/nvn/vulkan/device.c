@@ -2001,11 +2001,25 @@ const char *vk_driver_env_at_start(void) { return g_driver_env_at_start; }
 const char *vk_gpu_name(void) { return g_vk.props.deviceName; }
 #endif
 
+#ifdef __ANDROID__
+// The app to the background and back (SDL sends these from its event pump on this thread, as the activity pauses and
+// resumes, before it blocks: a watch sees them even then): the game stops at its next present meanwhile
+// (nvn/objects.c nvn_background)
+void nvn_background(bool on);
+static bool SDLCALL background_watch(void *user, SDL_Event *e) {
+    (void)user;
+    if (e->type == SDL_EVENT_DID_ENTER_BACKGROUND) nvn_background(true);
+    else if (e->type == SDL_EVENT_WILL_ENTER_FOREGROUND) nvn_background(false);
+    return true;
+}
+#endif
+
 void ui_window_init(void) {
     if (window) return;
     SDL_SetHint(SDL_HINT_JOYSTICK_ALLOW_BACKGROUND_EVENTS, "1");
 #ifdef __ANDROID__
     SDL_SetHint(SDL_HINT_ANDROID_TRAP_BACK_BUTTON, "1");  // (the back button opens the menu: ui/touch_controls.mm)
+    SDL_AddEventWatch(background_watch, NULL);
 #endif
     settings_load();
 #ifdef __ANDROID__

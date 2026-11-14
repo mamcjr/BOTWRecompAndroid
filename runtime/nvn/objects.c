@@ -1509,9 +1509,68 @@ NVN(nvnQueueAcquireTexture) {
     w->next = (w->next + 1) % (w->active ? w->active : 1);
     RET(0);
 }
+#ifdef __ANDROID__
+// The app in the background (Home, the recent apps, another app on top: vulkan/device.c gets SDL's background and
+// foreground events): the game stops at its next present until it is back. Before, it kept running unseen, without
+// its pace (nothing presented): 55-60 fps on a POCO F7 Ultra, 232% of a core against 178% in play, the world going on.
+// A save being written goes on first (services/fs.c fs_save_pending: until its Commit), so Android killing the app in
+// the background doesn't cut it in half. The presenting thread gives core 0 back while it waits (kernel.c), as for
+// the renderer. LARECOMP_BG_PAUSE=0: off.
+bool fs_save_pending(void);
+static pthread_mutex_t bg_m = PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t bg_cv = PTHREAD_COND_INITIALIZER;
+static bool bg_paused;  // (bg_m)
+void nvn_background(bool on) {
+    static int enabled = -1;
+    if (enabled < 0) enabled = !getenv("LARECOMP_BG_PAUSE") || atoi(getenv("LARECOMP_BG_PAUSE"));
+    if (!enabled) return;
+    pthread_mutex_lock(&bg_m);
+    bg_paused = on;
+    pthread_cond_broadcast(&bg_cv);
+    pthread_mutex_unlock(&bg_m);
+}
+static void bg_wait(void) {
+    if (!__atomic_load_n(&bg_paused, __ATOMIC_RELAXED)) return;
+    uint64_t t0 = plat_now_ns();
+    bool waited = false;
+    pthread_mutex_lock(&bg_m);
+    // (a save written meanwhile - the save's own thread, which may need the game's frames to finish it: let them go
+    // on until its Commit, checked every 100 ms)
+    while (bg_paused && !fs_save_pending()) {
+        if (!waited) {
+            waited = true;
+            pthread_mutex_unlock(&bg_m);
+            LOG("[pace] in the background: the game stopped at its present\n");
+            kernel_blocking_begin();
+            pthread_mutex_lock(&bg_m);
+            continue;
+        }
+        struct timespec until;
+        clock_gettime(CLOCK_REALTIME, &until);
+        until.tv_nsec += 100000000;
+        if (until.tv_nsec >= 1000000000) until.tv_sec++, until.tv_nsec -= 1000000000;
+        pthread_cond_timedwait(&bg_cv, &bg_m, &until);
+    }
+    bool still = bg_paused;
+    pthread_mutex_unlock(&bg_m);
+    if (still) {  // (a save being written)
+        static int logged;
+        if (logged++ < 5) LOG("[pace] in the background, a save being written: the game goes on until it is committed\n");
+    }
+    if (waited) {
+        kernel_blocking_end();
+        LOG("[pace] %s after %.1f s\n", still ? "the game goes on for a save" : "back in the foreground: the game goes on",
+            (plat_now_ns() - t0) / 1e9);
+    }
+}
+#endif
+
 NVN(nvnQueuePresentTexture) {
     NvnWindow *w = HOST(NvnWindow, A(1));
     int i = (int)A(2);
+#ifdef __ANDROID__
+    bg_wait();
+#endif
     {   // (which guest thread presents: LARECOMP_PROF_SVC_TID, kernel.c)
         static uint64_t last_id = ~0ull;
         KThread *kt = kernel_current_thread();
