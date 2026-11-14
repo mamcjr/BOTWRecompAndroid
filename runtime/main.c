@@ -13,6 +13,7 @@
 #include "settings.h"
 #include "hle.h"
 #include "kernel.h"
+#include "benchmark_perf.h"
 
 const char *g_romfs_dir;
 const char *g_romfs_link;
@@ -147,6 +148,7 @@ void backend_clear_window(void);      // a black frame while the game is down
 void audio_stop(void);                // services/audio.c: its threads read guest memory the renderer's reset may free
 
 static void reboot_idle(void) {  // (main thread, while guest threads stop) keep the window alive
+    if (bench_on()) { extern void benchmark_reboot_poll(void); benchmark_reboot_poll(); }
     SDL_Event e;
     while (SDL_PollEvent(&e))
         if (e.type == SDL_EVENT_QUIT) { LOG("window closed\n"); exit(0); }
