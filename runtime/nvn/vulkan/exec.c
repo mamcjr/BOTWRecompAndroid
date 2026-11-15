@@ -5,6 +5,7 @@
 #endif
 #include <SDL3/SDL_timer.h>
 #include <ctype.h>
+#include <errno.h>
 #include <float.h>
 #include <math.h>
 #include <stdarg.h>
@@ -12,6 +13,7 @@
 #include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
 #ifdef __ANDROID__
@@ -137,12 +139,21 @@ static void done_note(uint64_t v) {
 // A thread of its own waits on the GPU, submission after submission, and keeps done_cached: what the GPU finished is
 // then read without asking the driver. On Turnip over KGSL (Galaxy Tab A9+) reading the timeline's value waited in
 // the kernel until the GPU had finished what was submitted - the render thread stopped after every submission until
-// the GPU caught up, so the two never worked at the same time (half of its time; 2026-11-13). Default: on low RAM
-// (the weak phones, exec.c vk_low_ram); LARECOMP_SEQ_THREAD=1 / 0.
+// the GPU caught up, so the two never worked at the same time (half of its time; 2026-11-13). Default: on with Turnip
+// (any phone: its timeline is emulated over KGSL) and on low RAM (exec.c vk_low_ram); LARECOMP_SEQ_THREAD=1 / 0.
+// It waits on a fence per submission (SEQ_FENCES of them, reused in turn), not on the timeline: Mesa emulates the
+// timeline there (vk_sync_timeline) behind one mutex, and its waits held it - every vkQueueSubmit2 (which signals the
+// timeline) stopped on that mutex until the GPU had finished, ~13% of the render thread's time and ~15 ms of an idle
+// GPU inside each world frame (simpleperf --trace-offcpu, 2026-11-14). The others' waits (vk_wait_seq) go by what it
+// found (done_cv), so no thread but the submitting one touches the timeline. LARECOMP_SEQ_FENCES=0: the timeline, as
+// before.
+#define SEQ_FENCES 64
 static int seq_thread = -1;
-static bool seq_thread_broken;
+static bool seq_thread_broken, seq_fences_on;
+static VkFence seq_fence[SEQ_FENCES];
 static pthread_mutex_t sw_m = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t sw_cv = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t done_cv = PTHREAD_COND_INITIALIZER;  // (sw_m: done_cached grew, or the thread broke)
 static _Atomic uint64_t sw_submitted;
 static void *seq_waiter(void *arg) {
     (void)arg;
@@ -152,12 +163,23 @@ static void *seq_waiter(void *arg) {
         while ((done = atomic_load(&done_cached)) >= atomic_load(&sw_submitted)) pthread_cond_wait(&sw_cv, &sw_m);
         pthread_mutex_unlock(&sw_m);
         uint64_t want = done + 1;
-        VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
-                                  .pValues = &want};
-        VkResult r = vkWaitSemaphores(g_vk.dev, &wi, 1000000000ull);
-        if (r == VK_SUCCESS) done_note(want);
-        else if (r != VK_TIMEOUT) {  // (device lost: the callers' own waits report it)
+        VkResult r;
+        if (seq_fences_on) r = vkWaitForFences(g_vk.dev, 1, &seq_fence[want % SEQ_FENCES], VK_TRUE, 1000000000ull);
+        else {
+            VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1,
+                                      .pSemaphores = &g_vk.timeline, .pValues = &want};
+            r = vkWaitSemaphores(g_vk.dev, &wi, 1000000000ull);
+        }
+        if (r == VK_SUCCESS) {
+            pthread_mutex_lock(&sw_m);
+            done_note(want);
+            pthread_cond_broadcast(&done_cv);
+            pthread_mutex_unlock(&sw_m);
+        } else if (r != VK_TIMEOUT) {  // (device lost: the callers' own waits report it)
+            pthread_mutex_lock(&sw_m);
             seq_thread_broken = true;
+            pthread_cond_broadcast(&done_cv);
+            pthread_mutex_unlock(&sw_m);
             return NULL;
         }
     }
@@ -166,12 +188,20 @@ static bool seq_thread_on(void) {
     if (seq_thread < 0) {
         extern bool vk_low_ram(void);
         const char *e = getenv("LARECOMP_SEQ_THREAD");
-        seq_thread = e ? atoi(e) != 0 : vk_low_ram();
+        extern bool vk_driver_is_turnip(void);  // (device.c: Mesa's emulated timeline, KGSL - every Turnip phone)
+        seq_thread = e ? atoi(e) != 0 : vk_low_ram() || vk_driver_is_turnip();
         if (seq_thread) {
+            const char *f = getenv("LARECOMP_SEQ_FENCES");
+            seq_fences_on = !f || atoi(f) != 0;
+            VkFenceCreateInfo fi = {.sType = VK_STRUCTURE_TYPE_FENCE_CREATE_INFO};
+            for (int i = 0; i < SEQ_FENCES && seq_fences_on; i++)
+                if (vkCreateFence(g_vk.dev, &fi, NULL, &seq_fence[i]) != VK_SUCCESS) seq_fences_on = false;
             pthread_t th;
             if (pthread_create(&th, NULL, seq_waiter, NULL)) seq_thread = 0;
             else pthread_detach(th);
-            LOG("[vk] GPU progress: %s\n", seq_thread ? "a thread of its own waits on it" : "asked of the driver");
+            LOG("[vk] GPU progress: %s\n", !seq_thread ? "asked of the driver"
+                                           : seq_fences_on ? "a thread of its own waits on a fence per submission"
+                                                           : "a thread of its own waits on the timeline");
         }
     }
     return seq_thread && !seq_thread_broken;
@@ -182,6 +212,26 @@ static void seq_submitted(uint64_t s) {
     atomic_store(&sw_submitted, s);
     pthread_cond_signal(&sw_cv);
     pthread_mutex_unlock(&sw_m);
+}
+// The waiter thread has seen submission seq finish (false: it broke - device lost - or 10 s went by)
+static bool seq_wait_done(uint64_t seq) {
+    struct timespec until;
+    clock_gettime(CLOCK_REALTIME, &until);
+    until.tv_sec += 10;
+    pthread_mutex_lock(&sw_m);
+    int r = 0;
+    while (atomic_load(&done_cached) < seq && !seq_thread_broken && r != ETIMEDOUT) r = pthread_cond_timedwait(&done_cv, &sw_m, &until);
+    bool ok = atomic_load(&done_cached) >= seq;
+    pthread_mutex_unlock(&sw_m);
+    return ok;
+}
+// The fence for submission seq, unsignalled: its slot's last user (seq - SEQ_FENCES) finished first
+static VkFence seq_fence_for(uint64_t seq) {
+    if (!seq_thread_on() || !seq_fences_on) return VK_NULL_HANDLE;
+    if (seq > SEQ_FENCES && !seq_wait_done(seq - SEQ_FENCES)) return VK_NULL_HANDLE;
+    VkFence f = seq_fence[seq % SEQ_FENCES];
+    vkResetFences(g_vk.dev, 1, &f);
+    return f;
 }
 
 uint64_t vk_completed_seq(void) {
@@ -244,6 +294,8 @@ void vk_wait_seq(uint64_t seq) {
                               .pValues = &seq};
     uint64_t t0 = SDL_GetTicksNS();
     VkResult r = seq_thread_on() && atomic_load(&done_cached) >= seq ? VK_SUCCESS  // (finished already: no driver call)
+                 : seq_thread_on() && seq_fences_on ? (seq_wait_done(seq) ? VK_SUCCESS  // (the waiter thread's word)
+                                                       : seq_thread_broken ? VK_ERROR_DEVICE_LOST : VK_TIMEOUT)
                  : vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
     stat_wait_ns += SDL_GetTicksNS() - t0;
     cum_wait += SDL_GetTicksNS() - t0;
@@ -971,13 +1023,23 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
     VkSubmitInfo2 si = {.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO_2, .commandBufferInfoCount = (uint32_t)n, .pCommandBufferInfos = cbs,
                         .signalSemaphoreInfoCount = signal ? 2 : 1, .pSignalSemaphoreInfos = sig,
                         .waitSemaphoreInfoCount = wait ? 1 : 0, .pWaitSemaphoreInfos = &wt};
+    {   // With the waiter thread on fences nothing reads the timeline, so it isn't signalled: each signal of Mesa's
+        // emulated one (Turnip over KGSL) waited in the kernel for the GPU - Galaxy Tab A9+ 14.8 / 15.7 -> 19.7 fps in
+        // the world, the GPU's idle inside a frame ~14 -> ~7.5 ms (2026-11-14). LARECOMP_SEQ_NO_TIMELINE=0: signalled.
+        static int no_tl = -1;
+        if (no_tl < 0) no_tl = !getenv("LARECOMP_SEQ_NO_TIMELINE") || atoi(getenv("LARECOMP_SEQ_NO_TIMELINE")) != 0;
+        if (no_tl && seq_thread_on() && seq_fences_on) {
+            si.signalSemaphoreInfoCount = signal ? 1 : 0;
+            si.pSignalSemaphoreInfos = signal ? &sig[1] : NULL;
+        }
+    }
     {
         PROF_T0();
         dl_note("submit %llu", (unsigned long long)submit_seq + 1);
 #ifdef __ANDROID__
         uint64_t trace_start = vk_timing_trace_on() ? SDL_GetTicksNS() : 0;
 #endif
-        VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, VK_NULL_HANDLE);
+        VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, seq_fence_for(submit_seq + 1));  // (the waiter thread's)
 #ifdef __ANDROID__
         tl_add((int64_t)plat_now_ns(), wait || signal ? "render: submitted (present)" : "render: submitted", submit_seq + 1, 0);
         if (trace_start) vk_timing_trace_wait(VK_TIMING_SUBMIT, SDL_GetTicksNS() - trace_start);
