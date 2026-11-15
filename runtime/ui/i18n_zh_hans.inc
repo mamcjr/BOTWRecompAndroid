@@ -719,3 +719,5 @@
  "适用于 RAM 不超过 4 GB、内存耗尽时 Android 会关闭游戏的设备:更小的 GPU 缓冲区,纹理上传到 GPU 后释放其副本,压缩纹理使用一半尺寸,绘制线程运行在快速核心上。在这类设备上占用更少内存、运行更快;纹理可能略显模糊。 自动:此设备上开启。 重启 BOTWRecompAndroid 后生效。"},
 {"For devices with 4 GB of RAM or less, where Android closes the game when memory runs out: smaller GPU buffers, textures' copies given back once on the GPU, compressed textures at half size, and the drawing thread on a fast core. Uses less memory and is faster on such devices; textures can look a little softer. Automatic: off for this device (more than 4 GB). Applies when BOTWRecompAndroid restarts.",
  "适用于 RAM 不超过 4 GB、内存耗尽时 Android 会关闭游戏的设备:更小的 GPU 缓冲区,纹理上传到 GPU 后释放其副本,压缩纹理使用一半尺寸,绘制线程运行在快速核心上。在这类设备上占用更少内存、运行更快;纹理可能略显模糊。 自动:此设备上关闭(超过 4 GB)。 重启 BOTWRecompAndroid 后生效。"},
+{"Auto: 720p at most, with RAM saving on - on these devices the GPU is the limit, and the last passes at more lines cost it frames.",
+ "自动:开启节省内存时最高 720p - 在这类设备上 GPU 是瓶颈,行数更多的最后几道处理会降低帧率。"},

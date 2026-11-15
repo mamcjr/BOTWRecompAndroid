@@ -738,8 +738,11 @@ static void tab_display(void) {
                                    "(Internal resolution) follows it.\n\nThe final image is %.0f x %.0f."),
                  1920.0 * ox, 1080.0 * oy);
         if (on > 0 && on < (int)sizeof od)
-            snprintf(od + on, sizeof od - on, "\n\n%s", tr("Auto: 1080p on screens with more lines than that, where it costs the "
-                                                           "GPU the most; the screen's own on the others."));
+            snprintf(od + on, sizeof od - on, "\n\n%s", vk_low_ram()
+                         ? tr("Auto: 720p at most, with RAM saving on - on these devices the GPU is the limit, and the "
+                              "last passes at more lines cost it frames.")
+                         : tr("Auto: 1080p on screens with more lines than that, where it costs the GPU the most; the "
+                              "screen's own on the others."));
 #ifdef __ANDROID__
         enum { OUT_DEFAULT = 0 };  // (Auto: settings.c)
 #else

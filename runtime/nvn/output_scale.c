@@ -103,7 +103,12 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
         static double env_lines = -1;
         if (env_lines < 0) env_lines = getenv("LARECOMP_OUT_LINES") ? atof(getenv("LARECOMP_OUT_LINES")) : 0;
         out_auto = env_lines <= 0 && g_settings.out_lines == OUT_AUTO;  // (Auto: 1080 lines at most)
-        double out_lines = env_lines > 0 ? env_lines : out_auto ? 1080 : g_settings.out_lines;
+        // Auto with RAM saving on (vulkan/exec.c vk_low_ram - the weak devices): 720. On a Galaxy Tab A9+ (Adreno 619,
+        // 1920x1200) the scene's upscale and the final image's passes at 1080 lines took ~23 of the frame's ~74 ms of
+        // GPU; 720 lines: 13.2 -> 14.7 fps in the world (2026-11-14)
+        extern bool vk_low_ram(void);
+        double auto_lines = vk_low_ram() ? 720 : 1080;
+        double out_lines = env_lines > 0 ? env_lines : out_auto ? auto_lines : g_settings.out_lines;
         if (out_lines > 0 && sy * 1080.0 > out_lines) { double k = out_lines / (sy * 1080.0); sx *= k; sy *= k; }
     }
     h = sy;  // (Match display below: the final image's size, which is the screen's unless Output resolution is lower)

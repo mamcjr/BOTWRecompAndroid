@@ -719,3 +719,5 @@
  "RAM が 4 GB 以下で、メモリ不足になると Android がゲームを閉じてしまう端末向けです: GPU バッファを小さくし、GPU に送ったテクスチャのコピーを解放し、圧縮テクスチャを半分のサイズにし、描画スレッドを高速なコアで動かします。こうした端末ではメモリが減り、速くなります。テクスチャが少しぼやけることがあります。 自動: この端末ではオン。 BOTWRecompAndroid の再起動後に反映されます。"},
 {"For devices with 4 GB of RAM or less, where Android closes the game when memory runs out: smaller GPU buffers, textures' copies given back once on the GPU, compressed textures at half size, and the drawing thread on a fast core. Uses less memory and is faster on such devices; textures can look a little softer. Automatic: off for this device (more than 4 GB). Applies when BOTWRecompAndroid restarts.",
  "RAM が 4 GB 以下で、メモリ不足になると Android がゲームを閉じてしまう端末向けです: GPU バッファを小さくし、GPU に送ったテクスチャのコピーを解放し、圧縮テクスチャを半分のサイズにし、描画スレッドを高速なコアで動かします。こうした端末ではメモリが減り、速くなります。テクスチャが少しぼやけることがあります。 自動: この端末ではオフ (4 GB 超)。 BOTWRecompAndroid の再起動後に反映されます。"},
+{"Auto: 720p at most, with RAM saving on - on these devices the GPU is the limit, and the last passes at more lines cost it frames.",
+ "自動: RAM 節約がオンのときは最大 720p - こうした端末では GPU が限界で、行数の多い最後のパスはフレームを削ります。"},
