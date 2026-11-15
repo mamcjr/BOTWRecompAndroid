@@ -631,7 +631,7 @@ static const char *alayer(Ctx *c, const char *r, int slot, char *buf) {
 static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, const char *layer, const char *dref,
                         int lod_kind, const char *lod, const char *off) {
     if (c->fail) { strcpy(out, "vec4(0.0f)"); return; }  // e.g. a type conflict: tex[slot] is not this lookup's type
-    const ShaderTexture *t = &c->info->tex[slot];
+    ShaderTexture *t = &c->info->tex[slot];
     int type = t->type;
     bool cube = type == TEXTYPE_CUBE || type == TEXTYPE_CUBE_ARRAY;
     int n = (type == TEXTYPE_1D || type == TEXTYPE_1D_ARRAY) ? 1 : (type == TEXTYPE_2D || type == TEXTYPE_2D_ARRAY) ? 2 : 3;
@@ -645,6 +645,9 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
         strcpy(out, "vec4(0.0f)");
         return;
     }
+    t->sampled = true;
+    bool soft_lin = c->key && slot >= 0 && slot < 64 && (c->key->soft_linear & (1ULL << slot)) &&
+                    !t->shadow && (type == TEXTYPE_2D || type == TEXTYPE_2D_ARRAY);
     char L[600], xs[1600], P[2000];
     if (lod_kind == 1) snprintf(L, sizeof L, "int(%s)", lod); else strcpy(L, "0");
     if (n == 1) {
@@ -662,8 +665,8 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
         static int snap = -1, fs_snap = -1;
         if (snap < 0) snap = getenv("LARECOMP_NO_VS_SNAP") == NULL;
         if (fs_snap < 0) fs_snap = getenv("LARECOMP_FS_SNAP") != NULL;  // (diagnosis: fragment lookups too, at level 0's texels)
-        if ((snap && c->stage == STAGE_VERTEX && !t->shadow && lod_kind == 1) ||
-            (fs_snap && c->stage == STAGE_FRAGMENT && !t->shadow)) {
+        if (!soft_lin && ((snap && c->stage == STAGE_VERTEX && !t->shadow && lod_kind == 1) ||
+                          (fs_snap && c->stage == STAGE_FRAGMENT && !t->shadow))) {
             char raw[1600];
             snprintf(raw, sizeof raw, "%s", xs);
             snprintf(xs, sizeof xs, "(floor((%s) * vec2(tsize%d(%s).xy) * 256.0f + 0.5f) / (vec2(tsize%d(%s).xy) * 256.0f))",
@@ -672,6 +675,15 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
     } else {
         if (off && !cube) snprintf(xs, sizeof xs, "vec3(vec2(%s, %s) + vec2(%s)%s / vec2(tsize%d(%s).xy), %s)", co[0], co[1], off, off_scale(c, slot, 2), slot, L, co[2]);
         else snprintf(xs, sizeof xs, "vec3(%s, %s, %s)", co[0], co[1], co[2]);  // cube lookups take no offset
+    }
+    if (soft_lin) {
+        char la[256] = "", e[2000];
+        if (type == TEXTYPE_2D_ARRAY) snprintf(la, sizeof la, ", int(%s)", layer ? layer : "0u");
+        if (lod_kind == 0) snprintf(e, sizeof e, "slin%d_i(%s%s)", slot, xs, la);
+        else if (lod_kind == 1) snprintf(e, sizeof e, "slin%d(%s%s, %s)", slot, xs, la, lod);
+        else snprintf(e, sizeof e, "slin%d_b(%s%s, %s)", slot, xs, la, lod);
+        strcpy(out, e);
+        return;
     }
     const char *extra = NULL;  // separate compare argument (cube array shadow)
     if (!t->shadow) {
@@ -2941,6 +2953,84 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
         case TEXTYPE_3D: case TEXTYPE_2D_ARRAY: case TEXTYPE_CUBE_ARRAY:
             sp(&s, "ivec3 tsize%d(int l) { return textureSize(t%d, l); }\n", i, i); break;
         default: sp(&s, "ivec3 tsize%d(int l) { return ivec3(textureSize(t%d, l), 1); }\n", i, i);
+        }
+        if (key && i < 64 && (key->soft_linear & (1ULL << i)) && !t->shadow && !t->is_image &&
+            (t->type == TEXTYPE_2D || t->type == TEXTYPE_2D_ARRAY)) {
+            bool arr = t->type == TEXTYPE_2D_ARRAY;
+            bool mip = (key->soft_linear_mip & (1ULL << i)) != 0;
+            bool rep_u = (key->soft_linear_rep_u & (1ULL << i)) != 0;
+            bool rep_v = (key->soft_linear_rep_v & (1ULL << i)) != 0;
+            const char *la = arr ? ", int lyr" : "";
+            const char *lp = arr ? ", lyr" : "";
+            sp(&s, "vec4 slin%d(vec2 uv%s, float lod) {\n", i, la);
+            if (mip) {
+                sp(&s,
+                   "    int ml = max(textureQueryLevels(t%d) - 1, 0);\n"
+                   "    int il = int(clamp(floor(clamp(lod, 0.0f, float(ml)) + 0.5f), 0.0f, float(ml)));\n",
+                   i);
+            } else {
+                sp(&s, "    int il = 0;\n");
+            }
+            const char *wuv_expr = (rep_u && rep_v) ? "fract(uv)"
+                                 : rep_u           ? "vec2(fract(uv.x), uv.y)"
+                                 : rep_v           ? "vec2(uv.x, fract(uv.y))"
+                                                   : "uv";
+            sp(&s,
+               "    ivec3 tsz = tsize%d(il);\n"
+               "    vec2 sz = max(vec2(tsz.xy), vec2(1.0f));\n"
+               "    ivec2 isz = ivec2(sz);\n"
+               "    vec2 wuv = %s;\n"
+               "    vec2 tc = floor((wuv * sz - 0.5f) * 256.0f + 0.5f) / 256.0f;\n"
+               "    ivec2 p0 = ivec2(floor(tc));\n"
+               "    vec2 f = tc - vec2(p0);\n",
+               i, wuv_expr);
+            if (rep_u && rep_v) {
+                sp(&s,
+                   "    ivec2 p1 = clamp((p0 + 1) %% isz, ivec2(0), isz - 1);\n"
+                   "    p0 = clamp((p0 + isz) %% isz, ivec2(0), isz - 1);\n");
+            } else if (rep_u) {
+                sp(&s,
+                   "    ivec2 p1 = clamp(ivec2((p0.x + 1) %% isz.x, p0.y + 1), ivec2(0), isz - 1);\n"
+                   "    p0 = clamp(ivec2((p0.x + isz.x) %% isz.x, p0.y), ivec2(0), isz - 1);\n");
+            } else if (rep_v) {
+                sp(&s,
+                   "    ivec2 p1 = clamp(ivec2(p0.x + 1, (p0.y + 1) %% isz.y), ivec2(0), isz - 1);\n"
+                   "    p0 = clamp(ivec2(p0.x, (p0.y + isz.y) %% isz.y), ivec2(0), isz - 1);\n");
+            } else {
+                sp(&s,
+                   "    ivec2 p1 = clamp(p0 + 1, ivec2(0), isz - 1);\n"
+                   "    p0 = clamp(p0, ivec2(0), isz - 1);\n");
+            }
+            if (arr) {
+                sp(&s,
+                   "    int cl = clamp(lyr, 0, max(tsz.z - 1, 0));\n"
+                   "    vec4 s00 = texelFetch(t%d, ivec3(p0, cl), il);\n"
+                   "    vec4 s10 = texelFetch(t%d, ivec3(p1.x, p0.y, cl), il);\n"
+                   "    vec4 s01 = texelFetch(t%d, ivec3(p0.x, p1.y, cl), il);\n"
+                   "    vec4 s11 = texelFetch(t%d, ivec3(p1, cl), il);\n",
+                   i, i, i, i);
+            } else {
+                sp(&s,
+                   "    vec4 s00 = texelFetch(t%d, p0, il);\n"
+                   "    vec4 s10 = texelFetch(t%d, ivec2(p1.x, p0.y), il);\n"
+                   "    vec4 s01 = texelFetch(t%d, ivec2(p0.x, p1.y), il);\n"
+                   "    vec4 s11 = texelFetch(t%d, p1, il);\n",
+                   i, i, i, i);
+            }
+            sp(&s,
+               "    return mix(mix(s00, s10, f.x), mix(s01, s11, f.x), f.y);\n"
+               "}\n");
+            if (stage == STAGE_FRAGMENT) {
+                if (mip) {
+                    sp(&s, "vec4 slin%d_i(vec2 uv%s) { return slin%d(uv%s, textureQueryLod(t%d, uv).x); }\n",
+                       i, la, i, lp, i);
+                    sp(&s, "vec4 slin%d_b(vec2 uv%s, float bias) { return slin%d(uv%s, textureQueryLod(t%d, uv).x + bias); }\n",
+                       i, la, i, lp, i);
+                } else {
+                    sp(&s, "vec4 slin%d_i(vec2 uv%s) { return slin%d(uv%s, 0.0f); }\n", i, la, i, lp);
+                    sp(&s, "vec4 slin%d_b(vec2 uv%s, float bias) { return slin%d(uv%s, 0.0f); }\n", i, la, i, lp);
+                }
+            }
         }
     }
     if (stage == STAGE_VERTEX) {

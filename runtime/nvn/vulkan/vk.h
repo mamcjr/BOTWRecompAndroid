@@ -159,8 +159,13 @@ VkImageView vk_dummy_view(int textype);
 VkImageView vk_bc_shadow_view(NvnTexture *t, const NvnTextureView *v, VkFormat *fmt, uint32_t *w, uint32_t *h);
 void vk_bc_shadows_resolve(NvnTexture *const *targets, const NvnTextureView *views, const uint8_t *has_view, int ntargets);
 #endif
+VkFormat vk_sampled_format(NvnTexture *t, const NvnTextureView *v, bool has_view);
+bool vk_format_filters_linear(VkFormat f);
+bool vk_format_is_int(VkFormat f);
+bool vk_any_format_no_linear(void);
 VkSampler vk_sampler(NvnSamplerDesc *d);
 VkSampler vk_sampler_plain(NvnSamplerDesc *d);  // (the same without depth comparison: for non-shadow lookups)
+VkSampler vk_sampler_nearest(NvnSamplerDesc *d, bool compare);
 VkSampler vk_default_sampler(bool linear);
 void vk_image_init_layout(VkCommandBuffer cb, VkImage img, VkImageAspectFlags aspect);
 // Destruction once every submission that may use the object has completed.
