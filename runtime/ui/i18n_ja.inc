@@ -721,3 +721,5 @@
  "RAM が 4 GB 以下で、メモリ不足になると Android がゲームを閉じてしまう端末向けです: GPU バッファを小さくし、GPU に送ったテクスチャのコピーを解放し、圧縮テクスチャを半分のサイズにし、描画スレッドを高速なコアで動かします。こうした端末ではメモリが減り、速くなります。テクスチャが少しぼやけることがあります。 自動: この端末ではオフ (4 GB 超)。 BOTWRecompAndroid の再起動後に反映されます。"},
 {"Auto: 720p at most, with RAM saving on - on these devices the GPU is the limit, and the last passes at more lines cost it frames.",
  "自動: RAM 節約がオンのときは最大 720p - こうした端末では GPU が限界で、行数の多い最後のパスはフレームを削ります。"},
+{"on, but none fit: the screen refreshes too few times between the game's frames - a higher refresh rate in the phone's display (or game) settings, or a lower Frame rate here, makes room",
+ "オンですが入りません: ゲームのフレームの間に画面の更新が少なすぎます - 端末の画面 (またはゲーム) 設定でリフレッシュレートを上げるか、ここでフレームレートを下げると入るようになります"},

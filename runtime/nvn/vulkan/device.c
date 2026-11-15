@@ -1162,6 +1162,20 @@ static void android_frame_rate(struct ANativeWindow *aw) {
     static struct ANativeWindow *asked_aw;
     static float asked = -1;
     float want = fps_mode_now() == 4 && vk_between_fps() != 30 ? (float)vk_between_fps() : 0.0f;
+    bool fg = false;
+    {   // Frame generation on: room on the screen for the frames it makes - the chosen frame rate times its multiplier
+        // (60 fps x 2: 120 Hz). Android leaves a game at 60 Hz unless asked, and then a 40-50 fps game left no refresh
+        // between its frames, nothing was generated (ROG Phone 8, 165 Hz screen; lsfg_present.c's refresh cap). The
+        // system picks the nearest mode the screen has.
+        extern int vk_fg_status(const char **why);
+        int st = vk_fg_status(NULL);  // (1 generating, 2 waiting, 3 no room; 0 off, -1 unavailable)
+        if (st > 0) {
+            int m = fps_mode_now();
+            int base = m == 1 ? 30 : m == 3 ? 20 : m == 4 ? vk_between_fps() : 60;
+            int mult = g_settings.lsfg_mult < 2 ? 2 : g_settings.lsfg_mult > 4 ? 4 : g_settings.lsfg_mult;
+            want = (float)(base * mult), fg = true;
+        }
+    }
     if (aw == asked_aw && want == asked) return;
     // (libnativewindow's, looked up, not linked. Android 12+: with the change strategy ALWAYS - the plain call changes
     // the refresh only when it's seamless, and 120 -> 90 Hz isn't on the POCO F7 Ultra: it stayed at 120)
@@ -1174,7 +1188,8 @@ static void android_frame_rate(struct ANativeWindow *aw) {
         set_rate = lib ? (int (*)(struct ANativeWindow *, float, int8_t))dlsym(lib, "ANativeWindow_setFrameRate") : NULL;
         set_rate2 = lib ? (int (*)(struct ANativeWindow *, float, int8_t, int8_t))dlsym(lib, "ANativeWindow_setFrameRateWithChangeStrategy") : NULL;
     }
-    int8_t compat = want > 0 ? ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE : ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT;
+    int8_t compat = want > 0 && !fg ? ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_FIXED_SOURCE  // (generated: at least that rate)
+                                    : ANATIVEWINDOW_FRAME_RATE_COMPATIBILITY_DEFAULT;
     int r = set_rate2 ? set_rate2(aw, want, compat, 1 /* ANATIVEWINDOW_CHANGE_FRAME_RATE_ALWAYS */)
           : set_rate ? set_rate(aw, want, compat) : -1;
     if (want != asked) LOG("[vk] the window asks for %.0f fps content (%d)\n", want, r);

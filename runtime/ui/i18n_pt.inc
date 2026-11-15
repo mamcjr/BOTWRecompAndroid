@@ -738,3 +738,5 @@
  "Para aparelhos com 4 GB de RAM ou menos, em que o Android fecha o jogo quando a memória acaba: buffers de GPU menores, as cópias das texturas devolvidas depois de irem para a GPU, texturas comprimidas pela metade e a thread de desenho num núcleo rápido. Usa menos memória e é mais rápido nesses aparelhos; as texturas podem ficar um pouco menos nítidas. Automático: desligado neste aparelho (mais de 4 GB). Vale quando o BOTWRecompAndroid reiniciar."},
 {"Auto: 720p at most, with RAM saving on - on these devices the GPU is the limit, and the last passes at more lines cost it frames.",
  "Automático: no máximo 720p, com a economia de RAM ligada - nesses aparelhos o limite é a GPU, e as últimas passagens com mais linhas custam quadros."},
+{"on, but none fit: the screen refreshes too few times between the game's frames - a higher refresh rate in the phone's display (or game) settings, or a lower Frame rate here, makes room",
+ "ligado, mas nenhum cabe: a tela atualiza poucas vezes entre os quadros do jogo - uma taxa de atualização maior nas configurações de tela (ou de jogos) do celular, ou uma Taxa de quadros menor aqui, abre espaço"},

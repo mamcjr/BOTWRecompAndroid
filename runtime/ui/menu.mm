@@ -641,7 +641,10 @@ static void tab_display(void) {
                  "GPU works more. Needs your own Lossless.dll from Lossless Scaling for Windows (not included): put it "
                  "in Download/, LSFG/, Documents/Emulation/bios/ or the app's files."),
                  tr("Lossless.dll"), dll ? dll : tr("not found"), tr("State"),
-                 st == 1 ? tr("generating") : st == 0 ? tr("off") : st == 2 ? tr("on, waiting for a steady frame rate") : why);
+                 st == 1 ? tr("generating") : st == 0 ? tr("off") : st == 2 ? tr("on, waiting for a steady frame rate")
+                 : st == 3 ? tr("on, but none fit: the screen refreshes too few times between the game's frames - a higher "
+                                "refresh rate in the phone's display (or game) settings, or a lower Frame rate here, makes room")
+                 : why);
         opt_toggle("Frame generation (LSFG)", &g_settings.lsfg, false, d);
         if (g_settings.lsfg) {
             opt_indent(1);

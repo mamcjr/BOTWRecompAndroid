@@ -721,3 +721,5 @@
  "适用于 RAM 不超过 4 GB、内存耗尽时 Android 会关闭游戏的设备:更小的 GPU 缓冲区,纹理上传到 GPU 后释放其副本,压缩纹理使用一半尺寸,绘制线程运行在快速核心上。在这类设备上占用更少内存、运行更快;纹理可能略显模糊。 自动:此设备上关闭(超过 4 GB)。 重启 BOTWRecompAndroid 后生效。"},
 {"Auto: 720p at most, with RAM saving on - on these devices the GPU is the limit, and the last passes at more lines cost it frames.",
  "自动:开启节省内存时最高 720p - 在这类设备上 GPU 是瓶颈,行数更多的最后几道处理会降低帧率。"},
+{"on, but none fit: the screen refreshes too few times between the game's frames - a higher refresh rate in the phone's display (or game) settings, or a lower Frame rate here, makes room",
+ "已开启,但放不下:游戏帧之间屏幕刷新次数太少 - 在手机的显示(或游戏)设置中提高刷新率,或在这里降低帧率,即可腾出空间"},

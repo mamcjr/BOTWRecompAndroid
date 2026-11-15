@@ -721,3 +721,5 @@
  "適用於 RAM 不超過 4 GB、記憶體用完時 Android 會關閉遊戲的裝置:更小的 GPU 緩衝區,紋理上傳到 GPU 後釋放其副本,壓縮紋理使用一半尺寸,繪製執行緒在快速核心上執行。在這類裝置上占用更少記憶體、執行更快;紋理可能略顯模糊。 自動:此裝置上關閉(超過 4 GB)。 重新啟動 BOTWRecompAndroid 後生效。"},
 {"Auto: 720p at most, with RAM saving on - on these devices the GPU is the limit, and the last passes at more lines cost it frames.",
  "自動:開啟節省記憶體時最高 720p - 在這類裝置上 GPU 是瓶頸,行數更多的最後幾道處理會降低幀率。"},
+{"on, but none fit: the screen refreshes too few times between the game's frames - a higher refresh rate in the phone's display (or game) settings, or a lower Frame rate here, makes room",
+ "已開啟,但放不下:遊戲幀之間螢幕更新次數太少 - 在手機的顯示(或遊戲)設定中提高更新率,或在這裡降低幀率,即可騰出空間"},

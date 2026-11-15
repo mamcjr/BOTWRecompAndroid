@@ -32,6 +32,7 @@ static struct {
     uint64_t count;
     uint32_t warm_streak;
     int generating;  // the last frame's: 1 generated, 0 not
+    int no_room;     // the last frame's: none, as the screen's refresh left no room for them (vk_fg_status 3)
 } F;
 
 static double mono_s(void) {
@@ -168,8 +169,9 @@ static int rebuild(VkExtent2D e, int flow) {
 // The present's state, for the menu: 1 generating, 0 off, 2 on and not generating now, -1 unavailable (reason in *why)
 int vk_fg_status(const char **why) {
     bool on = env_int("LARECOMP_LSFG", g_settings.lsfg) != 0;
-    if (why) *why = F.state < 0 ? F.reason : !on ? "off" : F.generating ? "generating" : "on, waiting for a steady frame rate";
-    return F.state < 0 ? -1 : !on ? 0 : F.generating ? 1 : 2;
+    if (why) *why = F.state < 0 ? F.reason : !on ? "off" : F.generating ? "generating" : F.no_room ? "no room"
+                                                                                         : "on, waiting for a steady frame rate";
+    return F.state < 0 ? -1 : !on ? 0 : F.generating ? 1 : F.no_room ? 3 : 2;
 }
 
 // For the game frame in `game` (its present, before the window image is taken): the frames to show before it (gen[],
@@ -217,7 +219,8 @@ int vk_fg_frame(TexBackend *game, TexBackend **gen, uint64_t *hold_ns, uint64_t 
         double n = interval * 1e9 / (double)vsync_ns;
         size_t fit = n < 1.9 ? 0 : (size_t)(n + 0.1) - 1;
         if (ng > fit) ng = fit, F.pacer.issued = ng;
-    }
+        F.no_room = !ng;  // (a 45 fps game on a 60 Hz screen: the menu says so - device.c asks for a faster refresh)
+    } else F.no_room = 0;
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);  // (the game's writes to its image; the presents still reading the outputs)
     VkImageBlit b = {{VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, {{0, 0, 0}, {(int32_t)e.width, (int32_t)e.height, 1}},

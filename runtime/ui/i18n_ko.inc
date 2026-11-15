@@ -721,3 +721,5 @@
  "RAM이 4GB 이하라서 메모리가 부족하면 Android가 게임을 닫는 기기용입니다: 더 작은 GPU 버퍼, GPU로 올린 텍스처의 사본 해제, 압축 텍스처를 절반 크기로, 그리기 스레드를 빠른 코어에서 실행합니다. 이런 기기에서 메모리를 덜 쓰고 더 빠릅니다. 텍스처가 조금 덜 선명해 보일 수 있습니다. 자동: 이 기기에서는 꺼짐(4GB 초과). BOTWRecompAndroid를 다시 시작하면 적용됩니다."},
 {"Auto: 720p at most, with RAM saving on - on these devices the GPU is the limit, and the last passes at more lines cost it frames.",
  "자동: RAM 절약이 켜져 있으면 최대 720p - 이런 기기에서는 GPU가 한계이며, 줄 수가 많은 마지막 패스는 프레임을 잡아먹습니다."},
+{"on, but none fit: the screen refreshes too few times between the game's frames - a higher refresh rate in the phone's display (or game) settings, or a lower Frame rate here, makes room",
+ "켜짐, 하지만 들어갈 자리가 없음: 게임 프레임 사이에 화면 갱신이 너무 적습니다 - 휴대폰 화면(또는 게임) 설정에서 주사율을 높이거나 여기서 프레임 속도를 낮추면 자리가 생깁니다"},

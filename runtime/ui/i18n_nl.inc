@@ -721,3 +721,5 @@
  "Voor apparaten met 4 GB RAM of minder, waar Android het spel sluit als het geheugen op is: kleinere GPU-buffers, de kopieën van texturen vrijgegeven zodra ze op de GPU staan, gecomprimeerde texturen op halve grootte en de tekenthread op een snelle kern. Gebruikt minder geheugen en is sneller op zulke apparaten; texturen kunnen iets zachter ogen. Automatisch: uit op dit apparaat (meer dan 4 GB). Geldt na het herstarten van BOTWRecompAndroid."},
 {"Auto: 720p at most, with RAM saving on - on these devices the GPU is the limit, and the last passes at more lines cost it frames.",
  "Automatisch: hoogstens 720p, met RAM besparen aan - op deze apparaten is de GPU de grens, en de laatste passes met meer lijnen kosten hem beelden."},
+{"on, but none fit: the screen refreshes too few times between the game's frames - a higher refresh rate in the phone's display (or game) settings, or a lower Frame rate here, makes room",
+ "aan, maar er past er geen: het scherm ververst te weinig tussen de beelden van het spel - een hogere verversingssnelheid in de scherm- (of game-)instellingen van de telefoon, of een lagere framerate hier, maakt ruimte"},
