@@ -12,7 +12,7 @@
 #include <stdint.h>
 
 // ---------- The DLL (lsfg_dll.c) ----------
-enum { LSFG_OK, LSFG_NOT_INSTALLED, LSFG_UNREADABLE, LSFG_NOT_PE, LSFG_MISSING_SHADERS, LSFG_TRANSLATION_FAILED };
+enum { LSFG_OK, LSFG_NOT_INSTALLED, LSFG_UNREADABLE, LSFG_NOT_PE, LSFG_MISSING_SHADERS, LSFG_TRANSLATION_FAILED, LSFG_NO_PERMISSION };
 enum { LSFG_SH_MIPMAPS = 255, LSFG_SH_GENERATE = 256, LSFG_NATIVE_FP16_OFFSET = 49, LSFG_NMODULES = 25 };
 // The performance shader set (the only one Eden uses): alpha 290..293, beta 298..302, gamma 280, 282..285, delta 280, 286..289, 281, 294..297
 typedef struct { uint32_t id, nwords; uint32_t *words; } lsfg_module;

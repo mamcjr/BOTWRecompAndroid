@@ -19,7 +19,7 @@
 
 static struct {
     int state;  // 0 not tried, 1 ready (modules loaded), -1 unavailable
-    char reason[256], dll[512];
+    char reason[640], dll[512];
     lsfg_modules mods;
     lsfg_chain *chain;
     VkExtent2D ext;
@@ -52,10 +52,15 @@ static void unavailable(const char *why) {
     LOG("[lsfg] frame generation unavailable: %s\n", why);
 }
 
-// Where the user's Lossless.dll may be: LARECOMP_LSFG_DLL, the app's own files, then the places Swap2-Native looks
+// Where the user's Lossless.dll may be: LARECOMP_LSFG_DLL, the app's own files, then the places Swap2-Native looks.
+// The first one the app can open; else the first one it sees but can't (Android shows a file in Download/ to an app
+// without All files access and then refuses to open it: the menu said "no Lossless.dll" beside the file's own path,
+// #437 #385 #428), so the state says why.
+static int g_dll_relook, g_dll_reload;  // (an import: look again, and load again if it had failed)
 const char *vk_fg_dll_path(void) {
     static char found[512];
     static int looked;
+    if (__atomic_exchange_n(&g_dll_relook, 0, __ATOMIC_ACQ_REL)) looked = 0, found[0] = 0;
     if (looked) return found[0] ? found : NULL;
     looked = 1;
     const char *e = getenv("LARECOMP_LSFG_DLL");
@@ -69,16 +74,29 @@ const char *vk_fg_dll_path(void) {
         "/storage/emulated/0/Lossless.dll",
     };
     struct stat sb;
-    for (size_t i = 0; i < sizeof places / sizeof *places; i++)
-        if (stat(places[i], &sb) == 0 && sb.st_size > 0) { snprintf(found, sizeof found, "%s", places[i]); return found; }
+    const char *seen = NULL;
+    for (size_t i = 0; i < sizeof places / sizeof *places; i++) {
+        if (stat(places[i], &sb) != 0 || sb.st_size <= 0) continue;
+        FILE *f = fopen(places[i], "rb");
+        if (f) { fclose(f); snprintf(found, sizeof found, "%s", places[i]); return found; }
+        if (!seen) seen = places[i];
+    }
+    if (seen) { snprintf(found, sizeof found, "%s", seen); return found; }
     return NULL;
 }
 
-// The device must have what the shaders use (Float16, storage images of any format, unformatted writes), null
-// descriptors, and storage images of the chain's formats, linearly filterable
+// After Video > Frame generation > Import Lossless.dll put a copy in the app's files (ui/launcher.mm)
+void vk_fg_dll_imported(void) {
+    __atomic_store_n(&g_dll_relook, 1, __ATOMIC_RELEASE);
+    __atomic_store_n(&g_dll_reload, 1, __ATOMIC_RELEASE);
+}
+
+// The device must have what the shaders use (Float16, storage images of any format, unformatted writes) and storage
+// images of the chain's formats, linearly filterable
 static int device_ok(void) {
     if (!g_vk.lsfg_features) { unavailable("the GPU lacks shaderFloat16 or storage images of any format (Vulkan 1.2 features)"); return 0; }
-    if (!g_vk.null_descriptors) { unavailable("the GPU lacks null descriptors (VK_EXT_robustness2)"); return 0; }
+    // (no null descriptors - VK_EXT_robustness2, missing on Mali r44 (#402): the chain binds a blank image instead)
+    if (!g_vk.null_descriptors) LOG("[lsfg] no null descriptors on this GPU: a blank image in the unbound slots\n");
     VkFormat fmts[3] = {VK_FORMAT_R8G8B8A8_UNORM, VK_FORMAT_R8_UNORM, VK_FORMAT_R16G16B16A16_SFLOAT};
     for (int i = 0; i < 3; i++) {
         VkFormatProperties fp;
@@ -93,6 +111,7 @@ static int device_ok(void) {
 }
 
 static int load(void) {
+    if (__atomic_exchange_n(&g_dll_reload, 0, __ATOMIC_ACQ_REL) && F.state < 0) F.state = 0, F.reason[0] = 0;
     if (F.state) return F.state > 0;
     if (!device_ok()) return 0;
     const char *path = vk_fg_dll_path();

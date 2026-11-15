@@ -663,6 +663,16 @@ static void tab_display(void) {
                            "The resolution the motion between frames is measured at, as a share of the game's image: lower "
                            "is lighter for the GPU, higher follows small details better.", false))
                 g_settings.lsfg_flow = flow_v[fl];
+            {   // (a copy in the app's own files: read without Android's All files access, #437 #385)
+                void launcher_pick_lsfg_dll(void);
+                std::string launcher_lsfg_import_msg(void);
+                std::string m = launcher_lsfg_import_msg();
+                char id[900];
+                snprintf(id, sizeof id, "%s%s%s", tr("Picks your Lossless.dll with Android's file picker and keeps a copy "
+                         "in the app's own files, which the app can always read - for when it says it can't open the "
+                         "file where you put it."), m.empty() ? "" : "\n\n", m.c_str());
+                if (opt_button("Import Lossless.dll", id)) launcher_pick_lsfg_dll();
+            }
             opt_indent(-1);
         }
     }

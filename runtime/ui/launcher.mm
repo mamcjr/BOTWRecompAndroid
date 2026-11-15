@@ -538,6 +538,33 @@ void launcher_restart_app(void) {
     android_call("restartApp");
 }
 
+// Video > Frame generation > Import Lossless.dll: the system's file picker, a copy into the app's files
+// (BOTWRecompAndroidActivity importLsfgDll), then nativeLsfgImported - the result for the menu
+extern "C" void vk_fg_dll_imported(void);  // (vulkan/lsfg/lsfg_present.c)
+static std::string g_lsfg_msg;  // (g_lock)
+void launcher_pick_lsfg_dll(void) { android_call("pickLsfgDll"); }
+std::string launcher_lsfg_import_msg(void) {
+    pthread_mutex_lock(&g_lock);
+    std::string m = g_lsfg_msg;
+    pthread_mutex_unlock(&g_lock);
+    return m;
+}
+extern "C" JNIEXPORT void JNICALL Java_com_botwrecompandroid_BOTWRecompAndroidActivity_nativeLsfgImported(JNIEnv *env, jclass,
+                                                                                                        jint result, jstring detail) {
+    const char *t = env->GetStringUTFChars(detail, NULL);
+    std::string d = t ? t : "";
+    if (t) env->ReleaseStringUTFChars(detail, t);
+    char msg[700];
+    if (result == 0) snprintf(msg, sizeof msg, tr("Lossless.dll imported: %s"), d.c_str());
+    else if (result == 1) msg[0] = 0;
+    else snprintf(msg, sizeof msg, tr("That didn't work: %s"), d.c_str());
+    fprintf(stderr, "[lsfg] import: %s\n", result == 0 ? d.c_str() : result == 1 ? "cancelled" : msg);
+    if (result == 0) vk_fg_dll_imported();
+    pthread_mutex_lock(&g_lock);
+    g_lsfg_msg = msg;
+    pthread_mutex_unlock(&g_lock);
+}
+
 static void android_call_int(const char *method, int v) {  // (one int argument)
     JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
     jobject act = (jobject)SDL_GetAndroidActivity();

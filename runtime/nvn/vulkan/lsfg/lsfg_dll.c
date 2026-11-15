@@ -8,6 +8,7 @@
 // whose RCDATA resources hold the frame generation shaders as SPIR-V. The performance set's modules (255, 256, 280..302) are taken from their native-FP16 twins
 // (resource ID + 49) and their bindings renumbered in (set, binding) order, as the descriptor set layouts of lsfg_chain.c expect. Unlike Eden there is no translated-module
 // cache: reading and renumbering the image takes a few milliseconds. Nothing of the DLL is ever part of this repository or the APK
+#include <errno.h>
 #include "lsfg.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -117,7 +118,7 @@ static void renumber(uint32_t *w, size_t nw) {
 
 static int read_file(const char *path, uint8_t **out, size_t *n) {
     FILE *f = fopen(path, "rb");
-    if (!f) return LSFG_NOT_INSTALLED;
+    if (!f) return errno == EACCES || errno == EPERM ? LSFG_NO_PERMISSION : LSFG_NOT_INSTALLED;
     fseek(f, 0, SEEK_END); long sz = ftell(f); fseek(f, 0, SEEK_SET);
     if (sz <= 0) { fclose(f); return LSFG_UNREADABLE; }
     uint8_t *b = malloc((size_t)sz);
@@ -193,6 +194,7 @@ const char *lsfg_status_name(int s) {
     case LSFG_OK: return "ok";
     case LSFG_NOT_INSTALLED: return "no Lossless.dll";
     case LSFG_UNREADABLE: return "Lossless.dll cannot be read";
+    case LSFG_NO_PERMISSION: return "Android doesn't let the app open it (no All files access): import it with the button below, or allow BOTWRecompAndroid All files access in Android's settings";
     case LSFG_NOT_PE: return "not a Windows DLL (PE image)";
     case LSFG_MISSING_SHADERS: return "the DLL lacks the frame generation shaders (another Lossless Scaling version?)";
     case LSFG_TRANSLATION_FAILED: return "a shader could not be taken over";

@@ -88,7 +88,8 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     private static native void nativeSaveDone(int result, String detail);
     private static final int REQ_GAME = 0x4c41, REQ_DRIVER = 0x4c42, REQ_MOD = 0x4c46, REQ_LOG = 0x4c47,
             REQ_DRIVER_RECOVER = 0x4c48, REQ_SAVE_IN = 0x4c49, REQ_SAVE_OUT = 0x4c4a, REQ_SAVE_IN_TREE = 0x4c4c,
-            REQ_DLC = 0x4c4d;
+            REQ_DLC = 0x4c4d, REQ_LSFG = 0x4c4e;
+    private static native void nativeLsfgImported(int result, String detail);  // (0 imported, 1 cancelled, 2 failed)
     private native String nativeBuildDlc(String[] paths, long[] sizes);
     private static native void nativeDlcDone(int result, String detail);
     private static BOTWRecompAndroidActivity self;
@@ -405,6 +406,12 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             }, "saves").start();
             return;
         }
+        if (req == REQ_LSFG) {
+            Uri f = result == Activity.RESULT_OK && data != null ? data.getData() : null;
+            if (f == null) nativeLsfgImported(1, "");
+            else new Thread(() -> importLsfgDll(f), "lsfg-dll").start();
+            return;
+        }
         if (req == REQ_LOG) {
             Uri tree = result == Activity.RESULT_OK && data != null ? data.getData() : null;
             if (tree != null) {
@@ -567,6 +574,42 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             i.setType("*/*");  // (zip types vary by provider: application/zip, application/x-zip-compressed...)
             return i;
         });
+    }
+
+    // ---- frame generation's Lossless.dll (Video > Frame generation > Import Lossless.dll): a copy in the app's own
+    // files, which the runtime reads without All files access (vulkan/lsfg/lsfg_present.c vk_fg_dll_path, #437 #385)
+    public static void pickLsfgDll() {
+        self.runOnUiThread(() -> {
+            try {
+                Intent i = new Intent(Intent.ACTION_OPEN_DOCUMENT);
+                i.addCategory(Intent.CATEGORY_OPENABLE);
+                i.setType("*/*");
+                self.startActivityForResult(i, REQ_LSFG);
+            } catch (Exception e) {
+                Log.e(TAG, "Lossless.dll picker", e);
+                nativeLsfgImported(2, e.toString());
+            }
+        });
+    }
+
+    private void importLsfgDll(Uri u) {
+        File dir = getExternalFilesDir(null), tmp = new File(dir, "Lossless.dll.tmp"), dst = new File(dir, "Lossless.dll");
+        try (InputStream in = getContentResolver().openInputStream(u)) {
+            if (in == null) throw new IOException("can't open the file");
+            copy(in, tmp);
+            byte[] head = new byte[2];
+            try (InputStream h = new java.io.FileInputStream(tmp)) {
+                if (h.read(head) != 2 || head[0] != 'M' || head[1] != 'Z') throw new IOException("not a Windows DLL - pick Lossless.dll");
+            }
+            if (dst.exists() && !dst.delete()) throw new IOException("can't replace the copy before");
+            if (!tmp.renameTo(dst)) throw new IOException("can't put the copy in place");
+            Log.i(TAG, "Lossless.dll imported into " + dst + " (" + dst.length() + " bytes)");
+            nativeLsfgImported(0, dst.getAbsolutePath());
+        } catch (Exception e) {
+            tmp.delete();
+            Log.w(TAG, "Lossless.dll import", e);
+            nativeLsfgImported(2, e.getMessage() != null ? e.getMessage() : e.toString());
+        }
     }
 
     public static void pickSaveImportFolder() { pick(REQ_SAVE_IN_TREE, () -> new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE)); }
