@@ -14,7 +14,7 @@ It is built on the engine of **[LAS Recomp](https://github.com/peiikai/LASRecomp
 > [!WARNING]
 > **Beta.** Tested primarily on one phone (POCO F7 Ultra, Adreno 830, Mesa Turnip driver). Performance and compatibility
 > vary by device; expect bugs, especially on GPUs that have not been tested on physical hardware. See the
-> [0.4.2-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.2-beta) and the
+> [0.4.3-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.3-beta) and the
 > [development notes](docs/BOTW-PORT.md) (in Portuguese).
 
 ## Supported platform
@@ -61,6 +61,8 @@ Windows, Linux or macOS may still be used as development hosts with the Android 
   image.
 - **0.4.2:** faster on Turnip phones where the GPU waited on the CPU (Galaxy Tab A9+: ~15 to ~19 fps in the world),
   RAM saving chosen in Video (Automatic / On / Off), and Auto output at 720p when RAM saving is on.
+- **0.4.3:** frame generation asks Android for the refresh rate its frames need (60 fps x 2: 120 Hz), so it works
+  on fast screens Android kept at 60 Hz; the menu says when no generated frame fits.
 - **Known issues:** short grass appears only up close; water reflections can move with the camera; the pause menu
   background can be black on Qualcomm's stock driver; Link may flicker on the first hit in Native Mode; rain falls
   slower than on the console.
@@ -115,7 +117,7 @@ icons read from your game files. The game's menus keep the classic buttons.
    Files > Vulkan driver**. If the app reports that the Vulkan driver is too old at startup, long-press the app icon
    and choose **Choose driver** before launching the game.
 
-Updating from 0.2.x to 0.4.2-beta does not require rebuilding game code. Shaders compile again once, so the first
+Updating from 0.2.x to 0.4.3-beta does not require rebuilding game code. Shaders compile again once, so the first
 minutes may stutter. To report a problem, open an [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) with
 your phone, GPU, driver, game version and a log from **Settings > Files > Save a log file**.
 
