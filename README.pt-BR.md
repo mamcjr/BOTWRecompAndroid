@@ -14,7 +14,7 @@ O projeto parte do motor do **[LAS Recomp](https://github.com/peiikai/LASRecomp)
 > [!WARNING]
 > **Beta.** Testado principalmente em um celular (POCO F7 Ultra, Adreno 830, driver Mesa Turnip). O desempenho e a
 > compatibilidade variam entre aparelhos; espere bugs, sobretudo em GPUs ainda não testadas fisicamente. Veja as
-> [notas da 0.4.4-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.4-beta) e as
+> [notas da 0.4.5-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.5-beta) e as
 > [notas de desenvolvimento](docs/BOTW-PORT.md).
 
 ## Plataforma suportada
@@ -68,6 +68,9 @@ Windows, Linux e macOS podem continuar sendo usados como ambientes de desenvolvi
 - **0.4.4:** velocidade normal logo depois de um menu (antes ficava ~12 s mais lento depois de cada um), sem ficar
   muito tempo a 20 fps depois de um engasgo, geração de quadros em GPUs sem descritores nulos (Mali) e um botão
   para importar o Lossless.dll.
+- **0.4.5:** shaders liberados ao reiniciar o jogo e, na Mali e nas outras GPUs não Adreno, depois de minutos sem
+  uso (#450); FXAA e FSR 1 mais leves; relógio do modo Nativo certo nos MediaTek; o áudio auxiliar e a reverberação
+  3D do jogo (vindos do TOTKDroid).
 - **Problemas conhecidos:** a grama baixa só aparece de perto; reflexos da água podem acompanhar a câmera; o fundo
   do menu de pausa pode ficar preto no driver padrão da Qualcomm; Link pode piscar no primeiro golpe no modo nativo;
   a chuva cai mais devagar que no console.
@@ -123,7 +126,7 @@ Desde a **0.2.12-beta**, enquanto você joga no mundo, os controles de toque mos
    **Configurações > Arquivos > Driver Vulkan**. Se o app informar que o driver Vulkan é antigo ao abrir, toque e
    segure o ícone do app e escolha **Escolher driver** antes de iniciar o jogo.
 
-Atualizar da 0.2.x para a 0.4.4-beta não exige recompilar o código do jogo. Os shaders são compilados novamente uma
+Atualizar da 0.2.x para a 0.4.5-beta não exige recompilar o código do jogo. Os shaders são compilados novamente uma
 vez, então os primeiros minutos podem ter travadinhas. Para relatar um problema, abra uma
 [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) com celular, GPU, driver, versão do jogo e um log de
 **Configurações > Arquivos > Salvar um arquivo de log**.
