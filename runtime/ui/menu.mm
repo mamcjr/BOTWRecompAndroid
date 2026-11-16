@@ -630,6 +630,10 @@ static void tab_display(void) {
                        "and may run shorter or out of step with their sound (at 60 fps the new game's opening gave Link "
                        "control 2 s early). Videos and menus stay at 30. Applies at once.");
     }
+    opt_toggle("Shadows", &g_settings.shadows, true,
+               "The game's shadows: of the sun, of Link and of everything around. Off: none are drawn - the picture is "
+               "flatter and evenly lit, for a little less GPU work each frame; only worth it on a phone at its limit. "
+               "Applies at once.");
     {   // Frame generation (vulkan/lsfg/lsfg_present.c): Lossless Scaling's LSFG with the player's own Lossless.dll
         const char *why = "";
         int st = vk_fg_status(&why);

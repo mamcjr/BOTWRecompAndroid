@@ -735,3 +735,7 @@
  "管線預熱 (實驗性)"},
 {"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
  "記錄在世界中使用的圖形管線,並在讀取存檔時於背景提前建置,減少初次進入時的繪製等待或跳過。預設關閉。下次讀取存檔時生效。"},
+{"Shadows",
+ "陰影"},
+{"The game's shadows: of the sun, of Link and of everything around. Off: none are drawn - the picture is flatter and evenly lit, for a little less GPU work each frame; only worth it on a phone at its limit. Applies at once.",
+ "遊戲的陰影：太陽、林克以及周圍一切的陰影。關閉：不繪製任何陰影 - 畫面更平、光照均勻，每幀 GPU 的工作稍少；只適合效能已到極限的手機。立即生效。"},

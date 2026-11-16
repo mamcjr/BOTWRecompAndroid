@@ -735,3 +735,7 @@
  "Pipelines voorverwarmen (experimenteel)"},
 {"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
  "Slaat in de wereld gebruikte grafische pipelines op en bouwt ze op de achtergrond terwijl een save laadt, zodat minder tekenopdrachten bij binnenkomst hoeven te wachten of worden overgeslagen. Standaard uit. Geldt de volgende keer dat een save laadt."},
+{"Shadows",
+ "Schaduwen"},
+{"The game's shadows: of the sun, of Link and of everything around. Off: none are drawn - the picture is flatter and evenly lit, for a little less GPU work each frame; only worth it on a phone at its limit. Applies at once.",
+ "De schaduwen van het spel: van de zon, van Link en van alles eromheen. Uit: er wordt er geen getekend - het beeld is vlakker en gelijkmatig belicht, en de GPU werkt per beeld iets minder; alleen de moeite waard op een telefoon die op zijn limiet zit. Geldt meteen."},

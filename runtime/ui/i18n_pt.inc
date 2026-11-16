@@ -752,3 +752,7 @@
  "Pré-aquecimento de pipelines (experimental)"},
 {"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
  "Registra os pipelines gráficos usados no mundo e os compila em segundo plano enquanto o save carrega, para que menos desenhos esperem ou sejam pulados ao entrar. Desligado por padrão. Vale da próxima vez que um save carregar."},
+{"Shadows",
+ "Sombras"},
+{"The game's shadows: of the sun, of Link and of everything around. Off: none are drawn - the picture is flatter and evenly lit, for a little less GPU work each frame; only worth it on a phone at its limit. Applies at once.",
+ "As sombras do jogo: do sol, do Link e de tudo ao redor. Desligado: nenhuma é desenhada - a imagem fica mais chapada e iluminada por igual, e a GPU trabalha um pouco menos a cada quadro; só compensa num celular no limite. Vale na hora."},

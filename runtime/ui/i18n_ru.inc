@@ -735,3 +735,7 @@
  "Предварительная сборка конвейеров (экспериментально)"},
 {"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
  "Записывает графические конвейеры, используемые в мире, и собирает их в фоновом режиме во время загрузки сохранения, чтобы при входе меньше вызовов отрисовки ждали или пропускались. По умолчанию выключено. Применяется при следующей загрузке сохранения."},
+{"Shadows",
+ "Тени"},
+{"The game's shadows: of the sun, of Link and of everything around. Off: none are drawn - the picture is flatter and evenly lit, for a little less GPU work each frame; only worth it on a phone at its limit. Applies at once.",
+ "Тени в игре: от солнца, от Линка и от всего вокруг. Выкл.: тени не рисуются - картинка становится более плоской и равномерно освещённой, а GPU работает в каждом кадре немного меньше; имеет смысл только на телефоне, работающем на пределе. Применяется сразу."},
