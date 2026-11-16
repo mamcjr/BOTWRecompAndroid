@@ -12,7 +12,7 @@ Fields:
 | Field | |
 |---|---|
 | `enabled` | `true` / `false` |
-| `image` | a PNG in this folder (`"thank-you-800-stars.png"`) or a full `https://` URL. Letters, digits, `.`, `-`, `_` only. The app keeps it under this name and downloads it again only when the name changes, so **a new picture needs a new file name**. At most 4 MB; ~1120 px wide is plenty (16:9 looks best). |
+| `image` | a PNG in this folder (`"thank-you-900-stars.png"`) or a full `https://` URL. Letters, digits, `.`, `-`, `_` only. The app keeps it under this name and downloads it again only when the name changes, so **a new picture needs a new file name**. At most 4 MB; ~1120 px wide is plenty (16:9 looks best). |
 | `link` | optional: `https://` page opened when the banner is tapped |
 | `start`, `end` | optional: `"YYYY-MM-DD"`, the first and last day it shows (the phone's local date) |
 
