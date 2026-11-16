@@ -49,6 +49,9 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size);
 const GameLibTables *gamelib_tables(void);
 // True when a library usable with this build is in one of those places (without loading it).
 bool gamelib_present(const char *game_dir);
+// The loaded library was built fast (-O0, its id "<GAMELIB_ID>-fast"): the start screen upgrades it in the
+// background from the played session's own hot list (runtime/ui/launcher.mm). false until one loads.
+bool gamelib_is_fast(void);
 
 #ifdef __cplusplus
 }

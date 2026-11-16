@@ -318,6 +318,14 @@ static void add_cflags(Args *a, const Tools *t) {
     }
 }
 
+// The fast (-O0, Android-only) build's two bits of state, at file scope: the mode flag (opts->fast, read by
+// start_compile and the memory check) and the marker a fast library carries. A fast library is marked, not silent:
+// its .id file is "<GAMELIB_ID>-fast" and its own GameLibTables->id says the same (gamelib.c gamelib_is_fast /
+// id_matches). A distinct marker is what makes the scheme safe - with the same id as a full one it would look
+// complete and never be rebuilt.
+static bool g_fast_build;  // (opts->fast: everything at -O0, no marking - the quick first build a phone set up with)
+#define GAMELIB_ID_FAST GAMELIB_ID "-fast"
+
 #ifdef __ANDROID__
 // Hot / cold (LASRecompAndroid's): compiling the generated C at -O1 is most of the setup's time on a phone, and most of
 // the game's functions never run in a play session. gamelib-src/hot_functions_<version>.txt (tools/hot_functions.py:
@@ -463,11 +471,14 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     Args a = {0};
     compiler(&a, t);
     add_cflags(&a, t);
-    if (u->o0) add(&a, "-O0");  // (after GAMELIB_CFLAGS' -O1: the last one counts)
+    if (u->o0 || g_fast_build) add(&a, "-O0");  // (after GAMELIB_CFLAGS' -O1: the last one counts)
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
-    add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID "\"");
+    // (a fast library's own id says fast: a marker to upgrade, not a finished library - gamelib.c id_matches. The
+    // id is part of GAMELIB_ID's hash in a full build's C too: a fast one isn't that library)
+    if (g_fast_build) add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID_FAST "\"");
+    else add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID "\"");
     add(&a, "-c");
     add(&a, u->src);
     add(&a, "-o");
@@ -530,6 +541,9 @@ static void mark_done(const Unit *u) {
 // one, and on a hot phone no more than half of them run - Android's thermal status moderate or worse, its headroom
 // near throttling, or the battery past 42 degrees (the activity's, once a second; a CPU zone read 70 degrees on the
 // POCO F7 Ultra from the build's first second, so it doesn't count). One always runs.
+// A fast (-O0) build needs a fraction of a -O1 compiler's memory (its codegen is linear: no analyses, no giant graphs -
+// the graph of a 1500-function file at -O1 is the gigabytes), so a fast one starts with 512 MB available (768 to come
+// back: the same 256 MB hysteresis, lighter floors) - the memory check itself stays, whatever the mode.
 static bool may_start_another(int nrun, int jobs) {
     static uint64_t last_start;
     static int last_cap = -1;  // (0: waiting for memory)
@@ -538,8 +552,9 @@ static bool may_start_another(int nrun, int jobs) {
     if (now - last_start < 1000000000ull) return false;
     PlatDeviceStats s;
     plat_device_stats(&s);
-    bool low = s.avail_mb && s.avail_mb < (last_cap == 0 ? 1792u : 1536u);  // (on again with 256 MB more: no flapping)
-    bool hot = s.thermal >= 2 || s.headroom >= 0.95f || s.batt_temp_c > 42;
+    int floor_mb = g_fast_build ? 512 : 1536, back_mb = g_fast_build ? 768 : 1792;
+    bool low = s.avail_mb && s.avail_mb < (last_cap == 0 ? (unsigned)back_mb : (unsigned)floor_mb);  // (on again with
+    bool hot = s.thermal >= 2 || s.headroom >= 0.95f || s.batt_temp_c > 42;                          //  256 MB more: no flapping)
     int cap = low ? 0 : hot ? (jobs + 1) / 2 : jobs;
     if (cap != last_cap) {
         LOG("[gamebuild] %s %d compilers (%u MB available, thermal status %d, headroom %.2f, battery %.0f degrees)\n",
@@ -557,6 +572,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     uint64_t t0 = plat_now_ns();
     static bool registered;
     if (!registered) registered = true, atexit(end_all);
+    g_fast_build = o->fast;
     Tools t;
     if (!find_tools(&t)) {
         snprintf(why, why_size, "the game code builder is missing from this copy of BOTWRecompAndroid");
@@ -593,8 +609,13 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     snprintf(stamp_path, sizeof stamp_path, "%s" SEP "stamp.txt", work);
     bool resume = same_text(stamp_path, stamp);
     if (!resume) rt_remove_game_file(game_dir, ".gamebuild");
-    rt_remove_game_file(game_dir, GAMELIB_NAME);
-    rt_remove_game_file(game_dir, GAMELIB_NAME ".id");
+    if (!o->keep_current) {
+        // The old library and its .id go only when they are to be replaced by this build's result: a build that keeps
+        // the current one (the fast library's -O1 upgrade) leaves them in place until the new library is whole - a
+        // failed upgrade then changes nothing, and Play during one keeps the library that loaded.
+        rt_remove_game_file(game_dir, GAMELIB_NAME);
+        rt_remove_game_file(game_dir, GAMELIB_NAME ".id");
+    }
     mkdir(work, 0755);
     {
         FILE *sf = fopen(stamp_path, "wb");
@@ -603,11 +624,13 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     int resumed = 0;
 #ifdef __ANDROID__
     android_env(work);
-    load_hot_for(game_dir);
+    if (!o->fast) load_hot_for(game_dir);
     {   // (the previous one in internal storage: a failed build must not leave it looking current)
-        char idp[1200];
-        snprintf(idp, sizeof idp, "%s.id", lib);
-        remove(lib), remove(idp);
+        if (!o->keep_current) {
+            char idp[1200];
+            snprintf(idp, sizeof idp, "%s.id", lib);
+            remove(lib), remove(idp);
+        }
     }
 #endif
     if (t.zig) {  // its caches in the work folder too (deleted below), not ~/.cache: hundreds of MB, used once
@@ -727,7 +750,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
 #endif
 #ifdef __ANDROID__  // (unit 0 is the shipped entry file; a file that can't be marked just stays at -O1)
             Unit *nu = &units.u[next];
-            if (next > 0 && !nu->marked) {
+            if (next > 0 && !nu->marked && !g_fast_build) {  // (fast: no scan, no marking - everything -O0 anyway)
                 nu->marked = true;
                 if (!mark_cold(nu->src, &nu->o0, &nu->alone))
                     LOG("[gamebuild] couldn't mark cold functions in %s\n", nu->src);
@@ -839,11 +862,15 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         }
     }
     if (ok) {
+        // A keep-current build (the fast library's -O1 upgrade) swaps the new library in only here, whole: until then
+        // the one that loaded is what runs - a failed build, or the app closed mid-way, changes nothing. The rename
+        // is atomic; the .id lands after it, of the build that just finished (fast: "<id>-fast", the marker again).
         remove(lib);
         char idp[1100];
         snprintf(idp, sizeof idp, "%s.id", lib);
         FILE *f = NULL;
-        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", GAMELIB_ID) < 0) {
+        const char *id = o->fast ? GAMELIB_ID_FAST : GAMELIB_ID;
+        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", id) < 0) {
             snprintf(why, why_size, "the game code couldn't be saved");
             ok = false;
         }
@@ -854,8 +881,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     // the C, the objects, the logs - kept after a failure, for the next build to go on from
     if (ok) rt_remove_game_file(game_dir, ".gamebuild");
 #ifdef __ANDROID__
-    LOG("[gamebuild] %llu of %llu functions cold (optnone, or %llu files all cold at -O0), %llu giant (their files at "
-        "-O0)\n", g_cold_fns, g_all_fns, g_cold_files, g_heavy_fns);
+    LOG("[gamebuild] %s build: %llu of %llu functions cold (optnone, or %llu files all cold at -O0), %llu giant (their "
+        "files at -O0)\n", g_fast_build ? "fast -O0" : "full", g_cold_fns, g_all_fns, g_cold_files, g_heavy_fns);
 #endif
     LOG("[gamebuild] %s in %.0fs\n", ok ? "done" : "failed", (double)(plat_now_ns() - t0) / 1e9);
     if (ok && o->progress) o->progress(1, "Finishing...");

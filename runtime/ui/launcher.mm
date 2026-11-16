@@ -226,7 +226,13 @@ extern "C" bool native_wanted(void);  // (Native game code: nothing to build - r
 // "" = ready to play, else what is wrong
 extern "C" void gamelib_absent_reason(const char *game_dir, char *out, size_t cap);  // (gamelib.c; not in gamelib.h:
                                                                                         //  it is in GAMELIB_ID)
+#ifdef __ANDROID__
+extern std::atomic<bool> g_upgrade_busy;  // (defined below build_game_code: the -O1 rebuild is running)
+#endif
 static std::string check_game_files(const std::string &root) {
+#ifdef __ANDROID__
+    if (g_upgrade_busy) return "Upgrading the game code";  // (PLAY waits: the loaded library is still in use)
+#endif
     std::string why = check_copied_files(root);
     if (why.empty() && !native_wanted() && !gamelib_present(root.c_str())) {
         static std::string logged;  // (the reason, once per change: #299)
@@ -384,11 +390,14 @@ static float extract_progress(void) {
     return f < 0 ? 0 : f > 0.99f ? 0.99f : f;
 }
 
-// Builds the game code from the copied files in dir (a few minutes); false = failed (the job line says so)
-static bool build_game_code(const std::string &dir) {
+// Builds the game code from the copied files in dir (a few minutes); false = failed (the job line says so).
+// fast (Android): everything at -O0, no cold scan - minutes to first play instead of the best part of an hour on a
+// mid-range phone. The library it leaves is marked (gamelib.c gamelib_is_fast) and upgraded to -O1 from the played
+// session's own hot list on the next start screen (upgrade_after_session, below).
+static bool build_game_code(const std::string &dir, bool fast = false) {
     if (native_wanted()) return true;  // (the game's own code runs as it is)
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
-    GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};
+    GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1, fast, false};
     char why[256] = "";
     g_build_frac = 0;
 #ifdef __ANDROID__
@@ -416,6 +425,112 @@ static bool build_game_code(const std::string &dir) {
     return ok;
 }
 
+#ifdef __ANDROID__
+// ------------------------------------------------------- the fast library's -O1 upgrade
+// The first setup on a phone builds the game code at -O0 (minutes, playable at once). What follows makes it whole
+// without the player ever waiting on a progress bar: the first session records which functions their own game
+// entered (fnprof, the project's function-entry profiler - the same machinery the shipped hot lists are made
+// with), and the next time the start screen is up the game code is rebuilt at -O1 with those functions hot and
+// the rest optnone, in the background. The old library is kept until the new one is whole (GameBuildOpts
+// keep_current), a failed upgrade changes nothing, PLAY stays off while it goes (the one that loaded is still in
+// use), and the "-fast" marker is the state: it is on disk, so an app closed at any point - mid-session,
+// mid-upgrade - picks the scheme up again exactly where it was (record again, or rebuild again).
+// LARECOMP_NO_UPGRADE=1 keeps the fast library as it is.
+
+// The session's counts as the hot list this game version's build reads (gamebuild.c load_hot: one hex address a
+// line, as the generated code names its functions - main at 0x7000000000, sdk at 0x7004000000). fnprof's own file
+// holds the session's guest-window addresses: rebased against its "# main_base" line, as tools/hot_functions.py
+// does (the window moves between runs, the names don't). Every function with at least one entry is hot - the play
+// session's own idea of what "hot" is.
+static bool session_hot_list(char *path, size_t n) {
+    const char *out = getenv("LARECOMP_FNPROF_OUT");
+    if (!out || !*out) return false;
+    FILE *f = fopen(out, "rb");
+    if (!f) return false;
+    char line[256];
+    int version = 0;
+    unsigned long long main_base = 0;
+    bool any = false;
+    FILE *o = NULL;
+    while (fgets(line, sizeof line, f)) {
+        if (!strncmp(line, "# game_version ", 15)) { version = atoi(line + 15); continue; }
+        if (!strncmp(line, "# main_base ", 12)) { main_base = strtoull(line + 12, NULL, 16); continue; }
+        if (line[0] == '#' || line[0] == '\n') continue;
+        unsigned long long addr, count;
+        if (sscanf(line, "%llx %llu", &addr, &count) != 2 || !count) continue;
+        unsigned long long named = addr - main_base + 0x7000000000ull;  // (as the generated code names it)
+        if (named < 0x7000000000ull || named >= 0x7000000000ull + 0x8000000ull) continue;  // (not generated code)
+        if (!o) {  // (the path needs the version, known only from the file's header: opened on the first entry)
+            snprintf(path, n, "%s/hot_functions_session_%d.txt",
+                     getenv("LARECOMP_GEN_DIR") ? getenv("LARECOMP_GEN_DIR") : ".", version ? version : 100);
+            o = fopen(path, "wb");
+            if (!o) break;
+        }
+        fprintf(o, "%llx\n", named);
+        any = true;
+    }
+    fclose(f);
+    if (o) fclose(o);
+    if (!any) remove(path);
+    return any;
+}
+
+// The upgrade state, shown and saved: PLAY off and a line under the menu while it goes.
+static std::atomic<bool> g_upgrade_busy;  // (the rebuild is running: PLAY waits for it - the library is in use)
+static void upgrade_progress(double f, const char *step) {  // (the job line, a percent at a time)
+    static int pct = -1;
+    static const char *last;
+    int p = (int)(f * 100);
+    if (p != pct || step != last) {
+        pct = p, last = step;
+        set_job(step && *step ? std::string("Upgrading the game code (") + step + ")" :
+               std::string("Upgrading the game code to -O1 (") + std::to_string(p) + "%)");
+    }
+}
+// The background rebuild. Runs once: while it goes PLAY stays off (check_game_files says busy), and the library the
+// game had is left in place until the new one is whole (keep_current) - a failed upgrade or the app closed mid-way
+// changes nothing but the ".gamebuild" work folder, which the next build goes on from.
+static void upgrade_after_session(void) {
+    static std::atomic<bool> started;
+    if (started.exchange(true)) return;  // (one attempt per process: it picks itself up again on a restart)
+    if (getenv("LARECOMP_NO_UPGRADE") || native_wanted() || !gamelib_is_fast()) return;
+    static double wait_since;  // (the list isn't there the first moment: give it a minute, then keep the library)
+    char list[1200];
+    if (!session_hot_list(list, sizeof list)) {  // (no counts yet: the session still playing, or too short to say)
+        double now = ImGui::GetTime();
+        if (!wait_since) wait_since = now;
+        if (now - wait_since < 60.0) return;
+        fprintf(stderr, "[launcher] no session list for the upgrade: keeping the fast library\n");
+        return;
+    }
+    setenv("LARECOMP_GAMEBUILD_HOT", list, 1);  // (gamebuild.c load_hot: this build's hot list)
+    struct Args { std::string dir, list; };
+    static Args a;  // (the thread's: outlives the call)
+    a.dir = setup_dest(), a.list = list;
+    g_upgrade_busy = true;
+    android_call("buildServiceStart");  // (BuildService: the screen can go off while it runs)
+    pthread_t th;
+    if (pthread_create(&th, NULL, [](void *p) -> void * {
+        Args *a = (Args *)p;
+        fprintf(stderr, "[launcher] upgrading the game code to -O1 (hot list: %s)\n", a->list.c_str());
+        GameBuildOpts o = {upgrade_progress, SDL_GetNumLogicalCPUCores() / 2, false, true};  // (keep_current)
+        char why[256] = "";
+        bool ok = gamebuild_run(a->dir.c_str(), &o, why, sizeof why);
+        android_call("buildServiceStop");
+        g_upgrade_busy = false;
+        fprintf(stderr, "[launcher] upgrade %s%s%s\n", ok ? "done" : "failed", ok ? "" : ": ", ok ? "" : why);
+        if (ok) set_job("Game files ready.");
+        else set_job("The game code upgrade didn't finish; the game still runs.", true);
+        return NULL;
+    }, &a) == 0) {
+        pthread_detach(th);
+    } else {  // (couldn't start: as if it had gone and failed - the fast library stays, usable)
+        g_upgrade_busy = false;
+        android_call("buildServiceStop");
+    }
+}
+#endif
+
 // The setup's folder: the picked files' version's extracted/ (g_dest), else this run's
 static std::string setup_dest(void) {
     pthread_mutex_lock(&g_lock);
@@ -438,13 +553,13 @@ static void *extract_thread(void *) {
     if (g_android_imported.exchange(false)) {  // (the activity copied exefs/ and built romfs.bin: below) the code -
         // unless the picked folder brought it built already for this app (its id: runtime/gamelib.c)
         if (gamelib_present(dest.c_str())) fprintf(stderr, "[launcher] game code from the picked folder\n");
-        else if (!build_game_code(dest)) goto done;
-        goto check;
+        else if (!build_game_code(dest, true)) goto done;  // (fast: -O0, playable at once; upgraded after the first
+        goto check;                                         //  session - the hot list from the player's own game)
     }
 #endif
     if (src.empty() && check_copied_files(dest).empty()) {  // copied already (an update needs new game code)
         g_copy_skipped = true;
-        if (!build_game_code(dest)) goto done;
+        if (!build_game_code(dest)) goto done;  // (an update's full build: the old library's id isn't this one's)
         goto check;
     }
     set_job("Looking for the game files...");
@@ -488,7 +603,10 @@ static void *extract_thread(void *) {
             set_job_detail(why);
             goto done;
         }
-        if (!build_game_code(dest)) goto done;
+        // First setup on this phone: the fast build (-O0, minutes). A re-setup over the same game files with this
+        // app's library already there (the files re-copied, the library's id unchanged): the full one, as before.
+        bool fast = !gamelib_present(dest.c_str());
+        if (!build_game_code(dest, fast)) goto done;
     }
 check:
     {
@@ -2187,6 +2305,7 @@ extern "C" void launcher_run(const char *root) {
             settings_save();
             android_call("restartApp");
         }
+        upgrade_after_session();  // (a played session behind us and a fast library in place: rebuild it at -O1, quietly)
 #endif
         SDL_Event e;
         while (SDL_PollEvent(&e)) {
@@ -2820,6 +2939,25 @@ extern "C" void launcher_run(const char *root) {
         }
     }
     // play: hand the window to the game
+#ifdef __ANDROID__
+    {   // The fast library's upgrade, part 1: this session records the functions the player's own game runs (fnprof
+        // counts every generated function entry - a predictable branch when off, an atomic bump when on: the frame
+        // cost is a rounding error). The next start screen turns the list into the -O1 rebuild (upgrade_after_session).
+        // Only while a fast library is the one about to run (gamelib_is_fast: the marker says an upgrade is pending)
+        // and only the first such session - later ones would add nothing, and the counts before it are already there.
+        static bool recorded;
+        if (!recorded && !getenv("LARECOMP_NO_UPGRADE") && gamelib_is_fast() && !getenv("LARECOMP_FNPROF")) {
+            char out[1200];
+            const char *gen = getenv("LARECOMP_GEN_DIR");
+            snprintf(out, sizeof out, "%s/fnprof_session.txt", gen && *gen ? gen : ".");
+            setenv("LARECOMP_FNPROF", "0:999999999", 1);  // (from process start: threads before the first frame count)
+            setenv("LARECOMP_FNPROF_EVERY", "1800", 1);   // (rewritten every 1800 frames: a stopped session keeps its counts)
+            setenv("LARECOMP_FNPROF_OUT", out, 1);
+            recorded = true;
+            fprintf(stderr, "[launcher] recording this session's functions (the upgrade's hot list): %s\n", out);
+        }
+    }
+#endif
     settings_save();
 #ifdef __APPLE__
     ImGui_ImplMetal_Shutdown();

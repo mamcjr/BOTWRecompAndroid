@@ -16,8 +16,13 @@
 
 static const GameLibTables *g_tables;
 static char g_error[256];
+static bool g_fast;  // (the loaded library was built fast: everything -O0, an upgrade pending - launcher.mm)
 
 // The library's id file (<library>.id, written next to it by the build): its GAMELIB_ID, read without loading it.
+// A fast (-O0) library is marked "<GAMELIB_ID>-fast" (gamebuild.c): it loads like any other - the game runs, a
+// little slower - and the start screen upgrades it from the played session's own hot list. With the same id as a
+// full one it would look finished and never be rebuilt, so the marker is the scheme's one bit of state that
+// survives restarts.
 static bool id_matches(const char *lib) {
     char path[1100], id[128] = {0};
     snprintf(path, sizeof path, "%s.id", lib);
@@ -26,7 +31,7 @@ static bool id_matches(const char *lib) {
     size_t n = fread(id, 1, sizeof id - 1, f);
     fclose(f);
     while (n && (id[n - 1] == '\n' || id[n - 1] == '\r')) id[--n] = 0;
-    return !strcmp(id, GAMELIB_ID);
+    return !strcmp(id, GAMELIB_ID) || !strcmp(id, GAMELIB_ID "-fast");
 }
 
 static bool exists(const char *p) {
@@ -161,10 +166,11 @@ static const GameLibTables *open_lib(const char *path) {
 #endif
     if (!entry) { snprintf(g_error, sizeof g_error, "%s: not game code", path); return NULL; }
     const GameLibTables *t = entry();
-    if (!t || t->abi != GAMELIB_ABI || !t->id || strcmp(t->id, GAMELIB_ID)) {
+    if (!t || t->abi != GAMELIB_ABI || !t->id || (strcmp(t->id, GAMELIB_ID) && strcmp(t->id, GAMELIB_ID "-fast"))) {
         snprintf(g_error, sizeof g_error, "%s was built for another version", path);
         return NULL;  // (left loaded: nothing of it runs)
     }
+    g_fast = !strcmp(t->id, GAMELIB_ID "-fast");
 #ifdef __ANDROID__
     // its addresses follow the guest window wherever it is (gen.py --dyn-base: botwgame_gb)
     void (*set_base)(uint64_t) = (void (*)(uint64_t))dlsym(h, "botwgame_set_guest_base");
@@ -202,3 +208,7 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
 }
 
 const GameLibTables *gamelib_tables(void) { return g_tables; }
+
+// The loaded library was built fast (-O0): the start screen upgrades it in the background (launcher.mm), and the
+// first session after it records what the player's game runs (fnprof) for that rebuild's hot list.
+bool gamelib_is_fast(void) { return g_tables && g_fast; }
