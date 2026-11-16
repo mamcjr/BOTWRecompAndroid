@@ -4798,6 +4798,24 @@ static bool cbwin_bind(int stage, int k, uint64_t addr, uint64_t size, VkDescrip
     cbw_patch[stage].m[1] = (uint32_t)((first - addr) >> 4);
     cbw_patch[stage].m[2] = (uint32_t)n;
     stat_cbwin++;
+    // The rest of the buffer from one copy per submission (LARECOMP_CBWIN_SNAPSHOT=0: read in place, as before). Read in
+    // place, the GPU saw the rows the CPU already wrote for the next frame (the sync lag): white water, terrain
+    // "curtains". The updates only write the window's rows, which the shaders take from the patch, so the copy outlives
+    // them (guest_copy's own entry is dropped by each update: a 64 KB copy a draw, ~14 MB a frame).
+    static int snap = -1;
+    if (snap < 0) snap = !getenv("LARECOMP_CBWIN_SNAPSHOT") || atoi(getenv("LARECOMP_CBWIN_SNAPSHOT"));
+    if (snap && AB("cbsnap") != 1) {
+        static struct { uint64_t addr, size, seq; VkSpan span; } base[8];
+        uint64_t seq = vk_pending_seq() + (gcopy_gen << 40);
+        uint32_t i = (uint32_t)((addr >> 8) ^ size) & 7;
+        if (base[i].seq != seq || base[i].addr != addr || base[i].size != size) {
+            base[i].span = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
+            base[i].addr = addr, base[i].size = size, base[i].seq = seq;
+            stat_cb_copied += size;
+        }
+        *out = ubo_span(base[i].span, size);
+        return true;
+    }
     *out = (VkDescriptorBufferInfo){gmem_buf, off, size};
     return true;
 }
