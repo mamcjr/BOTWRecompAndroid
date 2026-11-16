@@ -142,13 +142,22 @@ static void done_note(uint64_t v) {
 // then read without asking the driver. On Turnip over KGSL (Galaxy Tab A9+) reading the timeline's value waited in
 // the kernel until the GPU had finished what was submitted - the render thread stopped after every submission until
 // the GPU caught up, so the two never worked at the same time (half of its time; 2026-11-13). Default: on with Turnip
-// (any phone: its timeline is emulated over KGSL) and on low RAM (exec.c vk_low_ram); LARECOMP_SEQ_THREAD=1 / 0.
+// (any phone: its timeline is emulated over KGSL), on low RAM (exec.c vk_low_ram) and on Mali (device.c
+// vk_driver_is_mali: the same stall there, below); LARECOMP_SEQ_THREAD=1 / 0.
 // It waits on a fence per submission (SEQ_FENCES of them, reused in turn), not on the timeline: Mesa emulates the
 // timeline there (vk_sync_timeline) behind one mutex, and its waits held it - every vkQueueSubmit2 (which signals the
 // timeline) stopped on that mutex until the GPU had finished, ~13% of the render thread's time and ~15 ms of an idle
 // GPU inside each world frame (simpleperf --trace-offcpu, 2026-11-14). The others' waits (vk_wait_seq) go by what it
 // found (done_cv), so no thread but the submitting one touches the timeline. LARECOMP_SEQ_FENCES=0: the timeline, as
 // before.
+// Mali (ARM's own driver, not Mesa): the timeline is the driver's, but reading its value blocks in the kernel until
+// the GPU has caught up with everything submitted - the same stall the Turnip-on-KGSL case above was made for, and
+// the waiter thread with its per-submission fences is the same fix. Without it, on a Helio G95's Mali-G76 (Redmi Note
+// 9 Pro, 8 GB) every read of vk_completed_seq - vk_collect_dead, the ring, the caches, once a submission or more -
+// stopped the render thread until the GPU finished: the render thread spent half of each world frame waiting
+// (simpleperf --trace-offcpu, 2026-11-15), where it is a few percent on Turnip with the fences. On with the fences:
+// nothing else reads the timeline, so it isn't signalled (LARECOMP_SEQ_NO_TIMELINE, above), and the others' waits go
+// by what the waiter saw.
 #define SEQ_FENCES 64
 static int seq_thread = -1;
 static bool seq_thread_broken, seq_fences_on;
@@ -191,7 +200,8 @@ static bool seq_thread_on(void) {
         extern bool vk_low_ram(void);
         const char *e = getenv("LARECOMP_SEQ_THREAD");
         extern bool vk_driver_is_turnip(void);  // (device.c: Mesa's emulated timeline, KGSL - every Turnip phone)
-        seq_thread = e ? atoi(e) != 0 : vk_low_ram() || vk_driver_is_turnip();
+        extern bool vk_driver_is_mali(void);    // (device.c: its timeline value read blocks in the kernel - same stall)
+        seq_thread = e ? atoi(e) != 0 : vk_low_ram() || vk_driver_is_turnip() || vk_driver_is_mali();
         if (seq_thread) {
             const char *f = getenv("LARECOMP_SEQ_FENCES");
             seq_fences_on = !f || atoi(f) != 0;

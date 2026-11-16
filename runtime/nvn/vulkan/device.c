@@ -2211,6 +2211,19 @@ bool vk_driver_is_turnip(void) {
     return t > 0;
 }
 
+// ARM's Mali driver: its binary timeline's value read waits in the kernel until the GPU has caught up with what was
+// submitted (exec.c seq_thread - the waiter thread, on by default on Mali since)
+bool vk_driver_is_mali(void) {
+    static int m = -1;
+    if (m < 0 && g_vk.phys) {
+        VkPhysicalDeviceDriverProperties d = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        VkPhysicalDeviceProperties2 p = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &d};
+        vkGetPhysicalDeviceProperties2(g_vk.phys, &p);
+        m = d.driverID == VK_DRIVER_ID_ARM_PROPRIETARY || g_vk.props.vendorID == 0x13B5;  // (the vendor id too:
+    }                                                                                    //   a driverID of 0 on an old one)
+    return m > 0;
+}
+
 // Mesa's RADV (the Xclipse builds players load: radv-xclipse): the game's memory through its exported file broke the
 // game's first access to it (exec.c vk_heap_file_asked)
 bool vk_driver_is_radv(void) {
