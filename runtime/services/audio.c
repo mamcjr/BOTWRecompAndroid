@@ -16,8 +16,8 @@
 // Voices decode PCM16 / ADPCM wave buffers, resample to 48 kHz, and mix into their destination mix's
 // buffers; sub mixes route into their destination; the final mix feeds the device sink, which we
 // downmix to stereo and push to an SDL audio stream. Voices and sub mixes can go through a splitter instead (to
-// several mixes, each with its own volumes: TOTK's voices and much of its sound). Effects other than reverb and the
-// limiter are not implemented.
+// several mixes, each with its own volumes). Effects other than reverb, the limiter, the 3D reverb and the auxiliary
+// buffer are not implemented.
 #define WB_COUNT 4
 #define MIXBUF_MAX 24
 #define HIST 4
@@ -621,22 +621,44 @@ static void limiter_process(Limiter *lm, float *const *in, float *const *out, ui
     }
 }
 
+#include "../platform.h"
+#include "audio_reverb3d.inc"
+
 struct Effect {
     uint8_t type, enabled;
     int32_t mix_id;
     uint32_t order;
     Reverb rv;
     Limiter lm;
+    Reverb3d *r3;  // type 5 (made on its first use)
+    Reverb3dParam r3p;
+    uint8_t r3pending;
+    AuxParam aux;  // type 2
 };
 
 // Effect slot update from EffectInParameterVersion1 (0xC0 bytes: type, is_new, enabled, mix, buffers, order, data).
 static void effect_update(Effect *fx, const uint8_t *e) {
     if (fx->type != e[0]) memset(&fx->rv.p, 0, sizeof fx->rv.p), fx->rv.ready = 0, fx->lm.ready = 0;
+    if (fx->r3 && (e[0] != 5 || e[1])) r3_free(fx->r3), fx->r3 = NULL, memset(&fx->r3p, 0, sizeof fx->r3p);
     fx->type = e[0];
     fx->enabled = e[2];
     memcpy(&fx->mix_id, e + 4, 4);
     memcpy(&fx->order, e + 0x18, 4);
     if (fx->type == 7) { limiter_update(&fx->lm, e + 0x20, e[1]); return; }
+    if (fx->type == 2) { memcpy(&fx->aux, e + 0x20, sizeof fx->aux); return; }
+    if (fx->type == 5) {
+        Reverb3dParam p;
+        memcpy(&p, e + 0x20, sizeof p);
+        if (fx->r3 && p.sample_rate != fx->r3p.sample_rate) r3_free(fx->r3), fx->r3 = NULL;
+        if (memcmp(&p, &fx->r3p, 72)) fx->r3pending = 1;  // (the status byte at 72 left out)
+        if (getenv("LARECOMP_AUDIO_LOG") && fx->r3pending)
+            LOG("[audren] reverb3d: ch %u rate %u room %.0f/%.0f hf ref %.0f decay %.2f s (hf %.2f) reflections %.0f "
+                "reverb %.0f diffusion %.0f delays %.3f/%.3f density %.0f dry %.2f\n", p.channels, p.sample_rate,
+                p.room_gain, p.room_hf, p.hf_reference, p.decay_time, p.hf_decay_ratio, p.reflections_gain,
+                p.reverb_gain, p.diffusion, p.reflection_delay, p.reverb_delay, p.density, p.dry_gain);
+        fx->r3p = p;
+        return;
+    }
     if (fx->type != 4) return;
     const uint8_t *d = e + 0x20;
     uint16_t ch_max, ch;
@@ -660,12 +682,68 @@ static void effect_update(Effect *fx, const uint8_t *e) {
     }
 }
 
+// The 3D reverb and the auxiliary buffer (audio_reverb3d.inc); LARECOMP_NO_REVERB3D=1 / LARECOMP_NO_AUX=1 pass their
+// mixes through as before (the reverb also with the menu's reverb option off).
+static void apply_effect_r3_aux(Renderer *r, Effect *fx, Mix *m, uint32_t N) {
+    float *in[24], *out[24];
+    if (fx->type == 2) {
+        static int no_aux = -1;
+        if (no_aux < 0) no_aux = getenv("LARECOMP_NO_AUX") && atoi(getenv("LARECOMP_NO_AUX"));
+        uint32_t ch = fx->aux.channels;
+        if (no_aux || !ch || ch > 24) return;
+        for (uint32_t c = 0; c < ch; c++) {
+            if (fx->aux.input[c] >= m->bufs || fx->aux.output[c] >= m->bufs) return;
+            in[c] = m->buf + (fx->aux.input[c] % MIXBUF_MAX) * N;
+            out[c] = m->buf + (fx->aux.output[c] % MIXBUF_MAX) * N;
+        }
+        aux_process(&fx->aux, fx->enabled, in, out, N);
+        static int logged;
+        if (fx->enabled && !logged++)
+            LOG("[audren] auxiliary buffer: %u channels, ring of %u samples, send %llx return %llx\n", ch,
+                fx->aux.capacity, (unsigned long long)fx->aux.send_info, (unsigned long long)fx->aux.return_info);
+        return;
+    }
+    const Reverb3dParam *p = &fx->r3p;
+    int ch = p->channels;
+    if (ch != 1 && ch != 2 && ch != 4 && ch != 6) return;
+    for (int c = 0; c < ch; c++) {
+        // (REV11 on, 6 channels come as L, R, C, LFE, BL, BR; the network uses the legacy order)
+        static const int map[6] = {0, 1, 4, 5, 2, 3};
+        int idx = ch == 6 && (int)((r->revision >> 24) - '0') >= 11 ? map[c] : c;
+        if (p->input[idx] >= m->bufs || p->output[idx] >= m->bufs) return;
+        in[c] = m->buf + (p->input[idx] % MIXBUF_MAX) * N;
+        out[c] = m->buf + (p->output[idx] % MIXBUF_MAX) * N;
+    }
+    static int no_r3 = -1;
+    if (no_r3 < 0) no_r3 = getenv("LARECOMP_NO_REVERB3D") && atoi(getenv("LARECOMP_NO_REVERB3D"));
+    if (fx->enabled && !no_r3 && g_settings.reverb) {
+        if (!fx->r3) {
+            fx->r3 = r3_create(p);
+            fx->r3pending = 0;
+            static int logged;
+            if (!logged++) LOG("[audren] reverb3d: %s (%d channels, %u Hz)\n", fx->r3 ? "on" : "parameters refused", ch, p->sample_rate);
+        } else if (fx->r3pending) {
+            fx->r3pending = 0;
+            if (!r3_update(fx->r3, p)) r3_free(fx->r3), fx->r3 = NULL;
+        }
+        if (fx->r3) {
+            r3_process(fx->r3, in, out, (int)N);
+            return;
+        }
+    }
+    for (int c = 0; c < ch; c++) if (in[c] != out[c]) memmove(out[c], in[c], N * sizeof(float));
+}
+
 static void apply_effects(Renderer *r, int32_t mix_id, Mix *m) {
     uint32_t N = r->sample_count;
     for (uint32_t order = 0; order < r->effects; order++) {
         for (uint32_t i = 0; i < r->effects; i++) {
             Effect *fx = &r->fx[i];
             if (fx->mix_id != mix_id || fx->order != order) continue;
+            if (fx->type == 2 || fx->type == 5) {
+                apply_effect_r3_aux(r, fx, m, N);
+                continue;
+            }
             bool lim = fx->type == 7;
             if (lim ? !fx->lm.ready : fx->type != 4 || !fx->rv.ready) continue;
             int ch = lim ? fx->lm.p.ch : fx->rv.p.ch;
@@ -1210,7 +1288,7 @@ static void request_update(Renderer *r, IpcReq *req, IpcResp *resp) {
         static uint32_t seen_types;
         if (e[0] && e[0] < 32 && !(seen_types & (1u << e[0]))) {
             seen_types |= 1u << e[0];
-            LOG("[audren] effect type %u used%s: slot %u mix %d enabled %u\n", e[0], e[0] == 4 || e[0] == 7 ? "" : " (not implemented)", i,
+            LOG("[audren] effect type %u used%s: slot %u mix %d enabled %u\n", e[0], e[0] == 2 || e[0] == 4 || e[0] == 5 || e[0] == 7 ? "" : " (not implemented)", i,
                 *(const int32_t *)(e + 4), e[2]);
         }
         if (e[0] && getenv("LARECOMP_AUDIO_LOG")) {
@@ -1476,7 +1554,7 @@ void audio_stop(void) {
             if (r->wav) { wav_header(r->wav, r->wav_bytes); fclose(r->wav); }
             for (uint32_t m = 0; m < r->nmix; m++) free(r->mix[m].buf);
             for (uint32_t k = 0; k < r->splitters; k++) free(r->spl[k].ids);
-            for (uint32_t k = 0; k < r->effects; k++) free(r->fx[k].lm.delay);
+            for (uint32_t k = 0; k < r->effects; k++) free(r->fx[k].lm.delay), r3_free(r->fx[k].r3);
             free(r->voice), free(r->chres), free(r->chst), free(r->mix), free(r->fx);  // (reverb delay lines leak)
             free(r->spl), free(r->dest);
             free(r);

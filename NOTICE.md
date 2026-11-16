@@ -13,3 +13,8 @@ To build an APK without it: CMake `-DBOTW_LSFG=OFF` (the app then reports frame 
 
 `Lossless.dll` (Lossless Scaling for Windows, proprietary) is never in this repository or in any APK: the player supplies
 their own copy, and the app reads its shaders at run time.
+
+**Ideas and layouts from [totk-android](https://github.com/AurelioB/totk-android)** (AurelioB, MIT): the 3D reverb and the
+auxiliary buffer in `runtime/services/audio_reverb3d.inc` are adapted from its `games/totk/runtime/audio_reverb.c` and
+`audio_mixer.c` (Copyright (c) 2026 MacNativeGames contributors, MIT), whose reverb network is based on Ryujinx.Audio's
+Reverb3d (Copyright (c) Ryujinx Team and Contributors, MIT).
