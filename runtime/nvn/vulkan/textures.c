@@ -1008,11 +1008,18 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // ~2.4 MB a frame in the overworld). The periodic full hash stays as a safety net. LARECOMP_VK_TEX_WATCH=0: off.
     static int watch = -1;
     if (watch < 0) { const char *e = getenv("LARECOMP_VK_TEX_WATCH"); watch = !e || atoi(e) != 0; }
+    // Pages the CPU wrote are hashed whole, never only sampled: this check takes the written-since mark, so a change the
+    // sample missed was then never seen until the periodic full hash, which a large texture waits long for (its budget).
+    // In TOTK the font's glyph cache (R8 2048x4096, written a few letters at a time) kept new letters missing.
+    // LARECOMP_TEX_WATCH_FULL=0: sampled, as before.
+    static int watch_full = -1;
+    if (watch_full < 0) { const char *e = getenv("LARECOMP_TEX_WATCH_FULL"); watch_full = !e || atoi(e) != 0; }
     bool tracked = false;
     if (watch && !always_full) {
         extern int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
         uint32_t now = 0;
         int ch = vk_pages_changed(t->addr, total, b->wgen, &now);
+        if (ch > 0 && watch_full) full = true;
         if (ch >= 0) {
             tracked = true;
             b->wgen = now;
