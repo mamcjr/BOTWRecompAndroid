@@ -20,10 +20,9 @@ static bool g_fast;  // (the loaded library was built fast: everything -O0, an u
 
 // The library's id file (<library>.id, written next to it by the build): its GAMELIB_ID, read without loading it.
 // A fast (-O0) library is marked "<GAMELIB_ID>-fast" (gamebuild.c): it loads like any other - the game runs, a
-// little slower - and the start screen upgrades it from the played session's own hot list. With the same id as a
-// full one it would look finished and never be rebuilt, so the marker is the scheme's one bit of state that
-// survives restarts.
-static bool id_matches(const char *lib) {
+// little slower - and the start screen upgrades it in the background. With the same id as a full one it would look
+// finished and never be rebuilt, so the marker is the scheme's one bit of state that survives restarts.
+static bool id_is(const char *lib, const char *want) {
     char path[1100], id[128] = {0};
     snprintf(path, sizeof path, "%s.id", lib);
     FILE *f = fopen(path, "rb");
@@ -31,7 +30,10 @@ static bool id_matches(const char *lib) {
     size_t n = fread(id, 1, sizeof id - 1, f);
     fclose(f);
     while (n && (id[n - 1] == '\n' || id[n - 1] == '\r')) id[--n] = 0;
-    return !strcmp(id, GAMELIB_ID) || !strcmp(id, GAMELIB_ID "-fast");
+    return !strcmp(id, want);
+}
+static bool id_matches(const char *lib) {
+    return id_is(lib, GAMELIB_ID) || id_is(lib, GAMELIB_ID "-fast");
 }
 
 static bool exists(const char *p) {
@@ -123,6 +125,18 @@ bool gamelib_present(const char *game_dir) {
     return false;
 }
 
+// The library in place is a fast one, without loading it (its .id says "-fast"): what the start screen's background
+// upgrade keys on (runtime/ui/launcher.mm). boot() loads the library only after the start screen, so the marker on
+// disk - not the loaded library - is what says an upgrade is pending. True of the loaded one too, once it is.
+bool gamelib_fast_present(const char *game_dir) {
+    if (g_tables) return g_fast;
+    char c[3][1100];
+    int n = candidates(game_dir, c);
+    for (int i = 0; i < n; i++)
+        if (exists(c[i]) && id_is(c[i], GAMELIB_ID "-fast")) return true;
+    return false;
+}
+
 // Why gamelib_present says no, for the log (#299: the start screen asked for the game code to be built again, and
 // nothing said why): none built, or one built by another app (its .id, this app's GAMELIB_ID), or its .id missing
 void gamelib_absent_reason(const char *game_dir, char *out, size_t cap) {
@@ -208,7 +222,3 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
 }
 
 const GameLibTables *gamelib_tables(void) { return g_tables; }
-
-// The loaded library was built fast (-O0): the start screen upgrades it in the background (launcher.mm), and the
-// first session after it records what the player's game runs (fnprof) for that rebuild's hot list.
-bool gamelib_is_fast(void) { return g_tables && g_fast; }

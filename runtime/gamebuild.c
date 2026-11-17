@@ -319,11 +319,11 @@ static void add_cflags(Args *a, const Tools *t) {
 }
 
 // The fast (-O0, Android-only) build's two bits of state, at file scope: the mode flag (opts->fast, read by
-// start_compile and the memory check) and the marker a fast library carries. A fast library is marked, not silent:
-// its .id file is "<GAMELIB_ID>-fast" and its own GameLibTables->id says the same (gamelib.c gamelib_is_fast /
-// id_matches). A distinct marker is what makes the scheme safe - with the same id as a full one it would look
-// complete and never be rebuilt.
-static bool g_fast_build;  // (opts->fast: everything at -O0, no marking - the quick first build a phone set up with)
+// start_compile) and the marker a fast library carries. A fast library is marked, not silent: its .id file is
+// "<GAMELIB_ID>-fast" and its own GameLibTables->id says the same (gamelib.c id_matches / gamelib_fast_present).
+// A distinct marker is what makes the scheme safe - with the same id as a full one it would look complete and never
+// be rebuilt.
+static bool g_fast_build;  // (opts->fast: everything at -O0 - the quick first build a phone set up with)
 #define GAMELIB_ID_FAST GAMELIB_ID "-fast"
 
 #ifdef __ANDROID__
@@ -491,11 +491,13 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
 // ------------------------------------------------------------------ going on after the app closed
 // What the objects in .gamebuild were compiled from: this builder (GAMELIB_ID), its compile flags and the game code's
 // build ids. The flags too: 0.2.1 took them from zig's Debug mode (UBSan at -O0) without a new GAMELIB_ID, so a build
-// 0.2.0 had begun went on with its objects and the library wanted __ubsan_* symbols (issues #56, #60)
-static void build_stamp(const char *game_dir, char *out, size_t n) {
+// 0.2.0 had begun went on with its objects and the library wanted __ubsan_* symbols (issues #56, #60). The mode too:
+// a fast build's objects are -O0 with the fast id - a full build must not go on from them (it would leave a mixed
+// library whose .id says complete), and a fast one not from a full build's.
+static void build_stamp(const char *game_dir, bool fast, char *out, size_t n) {
     uint32_t h = 2166136261u;  // (FNV-1a)
     for (const char *s = GAMELIB_CFLAGS; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
-    int k = snprintf(out, n, "%s %08x", GAMELIB_ID, h);
+    int k = snprintf(out, n, "%s%s %08x", GAMELIB_ID, fast ? "-fast" : "", h);
     static const char *const mods[2] = {"main", "sdk"};
     for (int m = 0; m < 2 && k > 0 && (size_t)k < n; m++) {
         char p[1100];
@@ -540,10 +542,9 @@ static void mark_done(const Unit *u) {
 // phone until it overheated (issue #25): one more starts only with 1.5 GB of memory available, a second after the last
 // one, and on a hot phone no more than half of them run - Android's thermal status moderate or worse, its headroom
 // near throttling, or the battery past 42 degrees (the activity's, once a second; a CPU zone read 70 degrees on the
-// POCO F7 Ultra from the build's first second, so it doesn't count). One always runs.
-// A fast (-O0) build needs a fraction of a -O1 compiler's memory (its codegen is linear: no analyses, no giant graphs -
-// the graph of a 1500-function file at -O1 is the gigabytes), so a fast one starts with 512 MB available (768 to come
-// back: the same 256 MB hysteresis, lighter floors) - the memory check itself stays, whatever the mode.
+// POCO F7 Ultra from the build's first second, so it doesn't count). One always runs. The same floors in a fast
+// (-O0) build: its compilers are lighter, but the giant files' peak is what killed the 4 GB phones (#25/#47/#51),
+// whatever the mode.
 static bool may_start_another(int nrun, int jobs) {
     static uint64_t last_start;
     static int last_cap = -1;  // (0: waiting for memory)
@@ -552,9 +553,8 @@ static bool may_start_another(int nrun, int jobs) {
     if (now - last_start < 1000000000ull) return false;
     PlatDeviceStats s;
     plat_device_stats(&s);
-    int floor_mb = g_fast_build ? 512 : 1536, back_mb = g_fast_build ? 768 : 1792;
-    bool low = s.avail_mb && s.avail_mb < (last_cap == 0 ? (unsigned)back_mb : (unsigned)floor_mb);  // (on again with
-    bool hot = s.thermal >= 2 || s.headroom >= 0.95f || s.batt_temp_c > 42;                          //  256 MB more: no flapping)
+    bool low = s.avail_mb && s.avail_mb < (last_cap == 0 ? 1792u : 1536u);  // (on again with 256 MB more: no flapping)
+    bool hot = s.thermal >= 2 || s.headroom >= 0.95f || s.batt_temp_c > 42;
     int cap = low ? 0 : hot ? (jobs + 1) / 2 : jobs;
     if (cap != last_cap) {
         LOG("[gamebuild] %s %d compilers (%u MB available, thermal status %d, headroom %.2f, battery %.0f degrees)\n",
@@ -603,9 +603,11 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     }
 #endif
     // A build the system stopped (the app closed: issues #18, #25) goes on where it was: the objects compiled for the same
-    // game code by the same builder stay in .gamebuild (each with a .ok beside it once whole); only the rest is compiled
+    // game code by the same builder stay in .gamebuild (each with a .ok beside it once whole); only the rest is compiled.
+    // The mode is part of the stamp: a fast build's -O0 objects are never gone on from by a full one (a mixed library,
+    // its .id saying complete), nor a full one's by a fast.
     char stamp[256], stamp_path[1200];
-    build_stamp(game_dir, stamp, sizeof stamp);
+    build_stamp(game_dir, o->fast, stamp, sizeof stamp);
     snprintf(stamp_path, sizeof stamp_path, "%s" SEP "stamp.txt", work);
     bool resume = same_text(stamp_path, stamp);
     if (!resume) rt_remove_game_file(game_dir, ".gamebuild");
@@ -687,6 +689,13 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         add_unit(&units, t.entry, work, "gamelib_entry");
     }
     while (ok) {
+        // asked from outside (PLAY / Later / a setup needs the builders): stop where this is - the compilers end,
+        // the work folder stays, the next build goes on from it
+        if (o->stopped && o->stopped()) {
+            snprintf(why, why_size, "postponed");
+            ok = false;
+            break;
+        }
         // generator progress, newly finished files
         bool gens_done = true;
         double gen_frac = 0;
@@ -750,8 +759,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
 #endif
 #ifdef __ANDROID__  // (unit 0 is the shipped entry file; a file that can't be marked just stays at -O1)
             Unit *nu = &units.u[next];
-            if (next > 0 && !nu->marked && !g_fast_build) {  // (fast: no scan, no marking - everything -O0 anyway)
-                nu->marked = true;
+            if (next > 0 && !nu->marked) {  // (fast too: no hot list is loaded, so nothing is marked cold - but the
+                nu->marked = true;       //  giant files are still found, and they build alone: Unit.alone, the floors)
                 if (!mark_cold(nu->src, &nu->o0, &nu->alone))
                     LOG("[gamebuild] couldn't mark cold functions in %s\n", nu->src);
                 if (nu->alone) LOG("[gamebuild] %s has a giant function: at -O0, no other compiler beside it\n", nu->src);
@@ -803,6 +812,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         if (gens[i].p && gens[i].exit < 0) stop(gens[i].p);
 
     // 2. link
+    if (ok && o->stopped && o->stopped()) ok = false;  // (the link is minutes of its own: not worth it when stopped)
     if (ok) {
         if (o->progress) o->progress(shown > 0.95 ? shown : 0.95, "Finishing...");
         char rsp[1100], log[1100];
@@ -864,8 +874,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     if (ok) {
         // A keep-current build (the fast library's -O1 upgrade) swaps the new library in only here, whole: until then
         // the one that loaded is what runs - a failed build, or the app closed mid-way, changes nothing. The rename
-        // is atomic; the .id lands after it, of the build that just finished (fast: "<id>-fast", the marker again).
-        remove(lib);
+        // replaces the old file in one step (nothing is removed first: a kill between a remove and a rename would
+        // leave no library at all); the .id lands after it, of the build that just finished (fast: "<id>-fast").
         char idp[1100];
         snprintf(idp, sizeof idp, "%s.id", lib);
         FILE *f = NULL;
