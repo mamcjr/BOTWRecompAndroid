@@ -17,6 +17,7 @@
 #include "../../settings.h"
 #include "../../ui/menu.h"
 #include "vk.h"
+#include "dyn_vi.h"
 #include "timing_trace.h"
 #include "device_compat.h"
 #include "../output_scale.h"
@@ -490,6 +491,8 @@ static void create_device(void) {
     VkPhysicalDeviceMaintenance5FeaturesKHR maintenance5_have = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_5_FEATURES_KHR};
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR executable_have = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vids_have = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
     VkPhysicalDeviceFeatures2 optional = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 #define QUERY_OPTIONAL(name, feature) do { if (has_ext(ep, ne, name)) { \
         feature.pNext = optional.pNext; optional.pNext = &feature; } } while (0)
@@ -498,10 +501,11 @@ static void create_device(void) {
     QUERY_OPTIONAL(VK_EXT_DEVICE_FAULT_EXTENSION_NAME, fault_have);
     QUERY_OPTIONAL(VK_KHR_MAINTENANCE_5_EXTENSION_NAME, maintenance5_have);
     QUERY_OPTIONAL(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME, executable_have);
+    QUERY_OPTIONAL(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME, vids_have);
 #undef QUERY_OPTIONAL
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &optional);
 #endif
-    const char *ext[32];
+    const char *ext[48];
     uint32_t n_ext = 0;
     ext[n_ext++] = VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 #ifdef __ANDROID__
@@ -613,6 +617,7 @@ static void create_device(void) {
     if (display_timing) ext[n_ext++] = VK_GOOGLE_DISPLAY_TIMING_EXTENSION_NAME;
     // (frame generation, lsfg/: its shaders read unbound slots - null descriptors)
     bool robustness2 = has_ext(ep, ne, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME) && !env_on("LARECOMP_NO_ROBUSTNESS2");
+    bool have_dyn_vi = has_ext(ep, ne, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
 #endif
     free(ep);
 
@@ -882,6 +887,30 @@ static void create_device(void) {
     VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR pex = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR, .pipelineExecutableInfo = VK_TRUE};
     if (g_vk.exec_stats) { pex.pNext = f.pNext; f.pNext = &pex; }
+    // Move vertex attribute/binding layout from PipeKey to vkCmdSetVertexInputEXT to cut permutation churn.
+    // Enabled by default on Turnip and ARM proprietary Mali r49+ (LARECOMP_DYN_VI=1/0 overrides, LARECOMP_NO_DYN_VI=1: off).
+    const char *dvi = getenv("LARECOMP_DYN_VI");
+    bool no_dvi = env_on("LARECOMP_NO_DYN_VI");
+    bool want_dvi = vk_dyn_vi_want((uint32_t)driver.driverID, driver.driverInfo, driver_props, dvi, no_dvi);
+    g_vk.dyn_vi = want_dvi && g_vk.eds && have_dyn_vi && vids_have.vertexInputDynamicState &&
+                  g_vk.props.limits.maxVertexInputBindings > 16;  // ZERO_BINDING = 16
+    const char *dvi_why = no_dvi ? "LARECOMP_NO_DYN_VI"
+        : (dvi && *dvi && !want_dvi) ? "LARECOMP_DYN_VI=0"
+        : !want_dvi ? (driver_props ? "driver excluded by default" : "no driver properties")
+        : !g_vk.eds ? "no extendedDynamicState"
+        : !have_dyn_vi ? "missing extension"
+        : !vids_have.vertexInputDynamicState ? "feature disabled"
+        : g_vk.props.limits.maxVertexInputBindings <= 16 ? "maxVertexInputBindings <= 16"
+        : (dvi && *dvi) ? "LARECOMP_DYN_VI" : "driver default";
+    LOG("[vk-cap] dynamic vertex input: %s (%s)\n", g_vk.dyn_vi ? "on" : "off", dvi_why);
+    VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vids = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT,
+        .vertexInputDynamicState = VK_TRUE};
+    if (g_vk.dyn_vi) {
+        ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
+        vids.pNext = f.pNext;
+        f.pNext = &vids;
+    }
 #endif
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
@@ -892,6 +921,10 @@ static void create_device(void) {
 #ifdef __ANDROID__
     volkLoadDevice(g_vk.dev);
     compat_aliases();
+    if (g_vk.dyn_vi && !vkCmdSetVertexInputEXT) {
+        g_vk.dyn_vi = false;
+        LOG("[vk-cap] dynamic vertex input disabled: vkCmdSetVertexInputEXT missing from driver\n");
+    }
     LOG("[vk] Vulkan %u.%u device, %u extensions\n", VK_API_VERSION_MAJOR(g_vk.api), VK_API_VERSION_MINOR(g_vk.api), n_ext);
 #endif
     vkGetDeviceQueue(g_vk.dev, g_vk.qfam, 0, &g_vk.queue);

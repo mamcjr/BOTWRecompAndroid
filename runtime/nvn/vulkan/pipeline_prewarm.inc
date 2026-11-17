@@ -76,7 +76,8 @@ static uint32_t prewarm_vk_flags(void) {
     return (uint32_t)((g_vk.dyn_render ? 1u : 0u) |
                       (g_vk.eds ? 2u : 0u) |
                       (g_vk.eds2 ? 4u : 0u) |
-                      (g_vk.divisor ? 8u : 0u));
+                      (g_vk.divisor ? 8u : 0u) |
+                      (g_vk.dyn_vi ? 16u : 0u));
 }
 
 static bool prewarm_supported(void) {
@@ -171,6 +172,13 @@ static bool prewarm_valid_record(const PwRecord *r) {
     if (k.blend_on & ~c_mask) return false;
     for (int i = 0; i < 32; i++) {
         if ((k.attr_mask & (1u << i)) && k.attr_bind[i] > ZERO_BINDING) return false;
+    }
+    if (g_vk.dyn_vi) {
+        if (k.attr_mask || k.used_streams) return false;
+        for (int i = 0; i < 32; i++)
+            if (k.attr_fmt[i] || k.attr_off[i] || k.attr_bind[i]) return false;
+        for (int i = 0; i < 17; i++)
+            if (k.stride[i] || k.divisor[i]) return false;
     }
     if (k.topo_class > 2 || k.poly_fill > 1 || k.depth_clamp > 1 ||
         k.prim_restart > 1 || k.a2c > 1 || k.fx.on > 1) return false;
