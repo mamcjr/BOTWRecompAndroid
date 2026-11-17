@@ -67,7 +67,7 @@ static _Atomic int stat_compiles;
 static _Atomic int live_programs, live_gpipes, live_cpipes;  // (made so far: the memory mappings log, vk_live_counts)
 static void pipe_evict(void);  // (graphics pipelines: below)
 static void prog_evict(void);  // (their programs: below)
-static uint32_t g_exec_s;  // seconds, updated at each submission (Prog.used_s: no clock read per draw)
+static uint32_t g_exec_s;  // seconds, updated at each submission (Prog.used_s, Pipe.used_s: no clock read per draw)
 
 // What the process's malloc grew by during each kind of Vulkan object creation (the memory mappings log): on a Mali
 // malloc kept growing ~37 MB a minute with the pipelines capped and the textures flat, its large blocks one memory
@@ -3377,7 +3377,8 @@ typedef struct {
     uint64_t hash;
     VkPipeline pipe;
     _Atomic int state;   // 0 building, 1 ready, 2 failed
-    uint64_t used, seq;  // when it was last bound (ns), and that submission (pipe_evict)
+    uint32_t used_s;     // when it was last bound (g_exec_s: no clock read per draw)
+    uint64_t seq;        // and that submission (pipe_evict)
     bool evicted;        // its VkPipeline destroyed by pipe_evict: built again at its next use
 #ifdef __ANDROID__
     bool prewarmed;
@@ -3406,11 +3407,10 @@ static int pipe_keep(void) {
 }
 
 static void pipe_evict(void) {
-    static uint64_t next;
-    uint64_t now = SDL_GetTicksNS();
+    static uint32_t next;
     int keep = pipe_keep();
-    if (keep <= 0 || now < next) return;
-    next = now + 10000000000ull;  // (every 10 s)
+    if (keep <= 0 || g_exec_s < next) return;
+    next = g_exec_s + 10;  // (every 10 s)
     uint64_t evict_start = bench_clock();
     int live = 0;
     for (size_t i = 0; i < pipe_cache.capacity; i++) {
@@ -3421,13 +3421,13 @@ static void pipe_evict(void) {
     uint64_t done = vk_completed_seq();
     int target = keep * 4 / 5, gone = 0;
     // oldest first: two passes, the unused for 2 minutes, then for 30 s
-    static const uint64_t ages[2] = {120000000000ull, 30000000000ull};
+    static const uint32_t ages[2] = {120, 30};  // (s)
     for (int pass = 0; pass < 2 && live > target; pass++) {
-        uint64_t age = ages[pass];
+        uint32_t age = ages[pass];
         for (size_t i = 0; i < pipe_cache.capacity && live > target; i++) {
             Pipe *p = pipe_cache.entries[i].object;
             if (!p || p->evicted || p == last_pipeline || atomic_load(&p->state) != 1) continue;
-            if (p->used + age > now || p->seq > done) continue;
+            if (g_exec_s - p->used_s < age || p->seq > done) continue;
             long long mg0 = vk_mnow();
             vkDestroyPipeline(g_vk.dev, p->pipe, NULL);
             vk_mgrow_add(MG_GPIPE, mg0);  // (given back)
@@ -7555,7 +7555,7 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     ss_enabled();
     if (ss_need(SS_PIPE, ss.pipe == pp->pipe)) { ss.pipe = pp->pipe; stat_pipe_binds++; vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pipe); }
-    pp->used = SDL_GetTicksNS(), pp->seq = vk_pending_seq();  // (pipe_evict)
+    pp->used_s = g_exec_s, pp->seq = vk_pending_seq();  // (pipe_evict)
     uint64_t prof_td_ = prof ? SDL_GetTicksNS() : 0;
     if (prof) prof_key += prof_td_ - prof_tk_;
 
