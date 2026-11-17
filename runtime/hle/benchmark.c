@@ -28,6 +28,7 @@
 #include <sys/system_properties.h>
 #include <unistd.h>
 
+#include "../benchmark_perf.h"
 #include "../hle.h"
 #include "../framepace.h"
 #include "../rt.h"
@@ -90,6 +91,9 @@ typedef struct {
     char step[24], why[120];
     double load_s, camera_s, warmup_s, fps, low1, low01, hz_start, hz_end, cam_err, moved;
     Pct frame, gpu, cpu, game, render;
+    BenchStats trace;
+    double cooling_s;
+    int thermal_before, thermal_after;
     int frames, over50;
     uint64_t skipped, compiles, skipped_building;
     Power start, end;
@@ -97,6 +101,11 @@ typedef struct {
 
 static Scene scenes[MAX_SCENES];
 static int nscenes, repeats = 1, warmup_s = 20, calm_s = 20, warmup_max_s = 180, window_s = 45;
+static int thermal_max = -1, thermal_wait_s = 300;
+static double cooling_s;
+static uint64_t cool_poll;
+static int thermal_before = -1, thermal_after = -1;
+static bool previous_long;
 static char out_dir[1024], source[1024];
 static Result results[MAX_SCENES * MAX_REPEATS];
 static int nresults;
@@ -193,19 +202,21 @@ static void write_report(const char *status) {
     snprintf(tmp, sizeof tmp, "%s/report.json.tmp", out_dir);
     FILE *f = fopen(tmp, "w");
     if (!f) { LOG("[benchmark] can't write %s (errno %d)\n", tmp, errno); return; }
-    fprintf(f, "{\"report_format\":1,\"scene_format\":1,");
+    fprintf(f, "{\"report_format\":2,\"scene_format\":1,");
     json_str(f, "status", status, ",");
     if (nscenes && !strcmp(status, "running")) {
         fprintf(f, "\"at\":{\"scene\":\"%s\",\"repeat\":%d,", scenes[cur_scene].name, cur_repeat);
         json_str(f, "step", cur_step, "},");
     }
     fprintf(f, "\"repeats\":%d,\"warmup_s\":%d,\"calm_s\":%d,\"warmup_max_s\":%d,\"window_s\":%d,\n", repeats, warmup_s, calm_s, warmup_max_s, window_s);
+    fprintf(f, "\"thermal_max\":%d,\"thermal_wait_s\":%d,", thermal_max, thermal_wait_s);
     if (g_game_version == 190) json_passport(f);
     fprintf(f, "\"results\":[\n");
     for (int i = 0; i < nresults; i++) {
         const Result *r = &results[i];
         fprintf(f, "{\"scene\":\"%s\",\"repeat\":%d,", scenes[r->scene].name, r->repeat);
         json_str(f, "status", r->ok ? "ok" : "harness_error", ",");
+        fprintf(f, "\"cooling_s\":%.3f,\"thermal_before\":%d,\"thermal_after\":%d,", r->cooling_s, r->thermal_before, r->thermal_after);
         if (!r->ok) {
             json_str(f, "step", r->step, ",");
             json_str(f, "reason", r->why, r->frames ? "," : i + 1 < nresults ? "},\n" : "}\n");
@@ -213,6 +224,8 @@ static void write_report(const char *status) {
         }
         fprintf(f, "\"load_s\":%.1f,\"camera_s\":%.1f,\"warmup_s\":%.1f,\"frames\":%d,\"fps\":%.2f,\"low_1pct_fps\":%.2f,\"low_01pct_fps\":%.2f,\"over_50ms\":%d,",
                 r->load_s, r->camera_s, r->warmup_s, r->frames, r->fps, r->low1, r->low01, r->over50);
+        bench_trace_json(f, &r->trace);
+        json_pct(f, "game_period_ms", &r->frame);
         json_pct(f, "frame_ms", &r->frame);
         json_pct(f, "gpu_ms", &r->gpu);
         json_pct(f, "cpu_ms", &r->cpu);
@@ -293,6 +306,12 @@ static bool parse_scenes(const char *path, char *err, size_t nerr) {
             else if (!strcmp(key, "warmup_s")) warmup_s = atoi(val);
             else if (!strcmp(key, "calm_s")) calm_s = atoi(val);
             else if (!strcmp(key, "warmup_max_s")) warmup_max_s = atoi(val);
+            else if (!strcmp(key, "thermal_max") || !strcmp(key, "thermal_wait_s")) {
+                char *end; errno = 0; long value = strtol(val, &end, 10);
+                if (errno || *end || value < -1 || value > 3600) { snprintf(err, nerr, "line %d: bad %s", n, key); ok = false; }
+                else if (!strcmp(key, "thermal_max")) thermal_max = (int)value;
+                else thermal_wait_s = (int)value;
+            }
             else if (!strcmp(key, "window_s")) window_s = atoi(val);
             else { snprintf(err, nerr, "line %d: unknown key %s", n, key); ok = false; }
             continue;
@@ -332,6 +351,9 @@ static bool parse_scenes(const char *path, char *err, size_t nerr) {
         warmup_max_s > 1800 || window_s < 5 || window_s > 600) {
         snprintf(err, nerr, "repeats 1-%d, warmup_s and calm_s 0-600, warmup_max_s up to 1800 and not under warmup_s, window_s 5-600", MAX_REPEATS);
         return false;
+    }
+    if (thermal_max < -1 || thermal_max > 6 || thermal_wait_s < 1 || thermal_wait_s > 3600) {
+        snprintf(err, nerr, "thermal_max -1 (disabled) or 0-6; thermal_wait_s 1-3600"); return false;
     }
     return true;
 }
@@ -459,7 +481,7 @@ void benchmark_init(void) {
 static uint64_t time_mgr;
 static volatile bool hold_time, hold_weather;
 static volatile bool time_written;
-static enum { S_TITLE, S_ARRIVE, S_SETTLE, S_CAMERA, S_WARMUP, S_WINDOW, S_MEASURED, S_DONE } state;
+static enum { S_COOL, S_TITLE, S_ARRIVE, S_SETTLE, S_CAMERA, S_WARMUP, S_WINDOW, S_MEASURED, S_DONE } state;
 static uint64_t boot_t, phase_t, press_t, event_t, warm_t, calm_t, warm_dirty;
 static int good;
 static uint64_t skipped_t0, compiles_t0, building_t0;
@@ -473,10 +495,26 @@ static void set_step(const char *step) {
 }
 
 static void next_or_exit(void);
+static _Atomic uint64_t reboot_deadline;
+
+// Called by the main thread while guest threads unwind; frame hooks no longer run here.
+void benchmark_reboot_poll(void) {
+    uint64_t deadline = atomic_load(&reboot_deadline);
+    if (!deadline || plat_now_ns() < deadline) return;
+    Result *r = &results[nresults++];
+    *r = (Result){.scene = cur_scene, .repeat = cur_repeat};
+    snprintf(r->step, sizeof r->step, "reboot");
+    snprintf(r->why, sizeof r->why, "guest threads did not stop within 60 s");
+    LOG("[benchmark] harness_error at reboot: %s\n", r->why);
+    write_report("harness_error");
+    // A live guest thread still owns old game memory: do not reset it or boot another scene.
+    exit(EXIT_FAILURE);
+}
 
 // In boot(), the game's code loaded, none of it running: the scene's save goes in place
 void benchmark_boot(void) {
     if (!g_benchmark) return;
+    atomic_store(&reboot_deadline, 0);
     if (g_game_version != 190) {
         char m[100];
         snprintf(m, sizeof m, "unsupported version %d.%d.%d: it runs on game version 1.9.0 only", g_game_version / 100, g_game_version / 10 % 10, g_game_version % 10);
@@ -485,7 +523,7 @@ void benchmark_boot(void) {
     for (;;) {
         char why[120] = "";
         hold_time = hold_weather = win_on = false;
-        time_mgr = 0, state = S_TITLE, boot_t = phase_t = press_t = event_t = 0, good = 0;
+        time_mgr = 0, state = thermal_max < 0 ? S_TITLE : S_COOL, boot_t = phase_t = press_t = event_t = 0, good = 0;
         if (prepare_save(&scenes[cur_scene], why, sizeof why)) break;
         Result *r = &results[nresults++];
         *r = (Result){.scene = cur_scene, .repeat = cur_repeat};
@@ -495,7 +533,10 @@ void benchmark_boot(void) {
         next_or_exit();
     }
     LOG("[benchmark] scene %s, repeat %d: from a scratch copy of %s\n", scenes[cur_scene].name, cur_repeat, source);
-    set_step("title");
+    bench_trace_begin();
+    previous_long = false;
+    cooling_s = 0; cool_poll = 0; thermal_before = thermal_after = -1;
+    set_step(thermal_max < 0 ? "title" : "cooling");
 }
 
 // ------------------------------------------------------------------ reads
@@ -544,10 +585,15 @@ void benchmark_vfr(void) {
 
 // (vulkan/exec.c) each presented frame
 void benchmark_frame(double period, double busy, double game, double render, double gpu) {
+    // The GPU accumulator spans the hitch and the next frame; neither is a per-frame sample.
+    bool long_frame = period > 100;
+    if (previous_long) gpu = -1;
+    previous_long = long_frame;
+    if (long_frame || gpu <= 0) gpu = -1;
+    bench_trace_frame(cur_step, win_on, period, busy, game, render, gpu);
     if (!win_on || win_n >= win_cap) return;
     float *r = win[win_n];
-    // (the frame after a long one: vk_pace_frame's GPU time has both in it)
-    r[0] = (float)period, r[1] = (float)busy, r[2] = (float)game, r[3] = (float)render, r[4] = win_n && win[win_n - 1][4] < 0 ? -1 : (float)gpu;
+    r[0] = (float)period, r[1] = (float)busy, r[2] = (float)game, r[3] = (float)render, r[4] = (float)gpu;
     win_n = win_n + 1;
 }
 
@@ -576,18 +622,6 @@ static double low_fps(double share) {
     return sum > 0 ? 1000.0 * k / sum : 0;
 }
 
-static void write_frames(void) {
-    char path[1200];
-    snprintf(path, sizeof path, "%s/frames.csv", out_dir);
-    bool fresh = access(path, F_OK) != 0;
-    FILE *f = fopen(path, "a");
-    if (!f) return;
-    if (fresh) fprintf(f, "scene,repeat,frame,period_ms,cpu_ms,game_ms,render_ms,gpu_ms\n");
-    for (int i = 0; i < win_n; i++)
-        fprintf(f, "%s,%d,%d,%.3f,%.3f,%.3f,%.3f,%.3f\n", scenes[cur_scene].name, cur_repeat, i, win[i][0], win[i][1], win[i][2], win[i][3], win[i][4]);
-    fclose(f);
-}
-
 static void next_or_exit(void) {
     if (++cur_scene == nscenes) cur_scene = 0, cur_repeat++;
     if (cur_repeat < repeats) return;
@@ -603,6 +637,8 @@ static void end_scene(Result *r, bool ok, const char *step, const char *why) {
         r = &results[nresults];
         *r = (Result){.scene = cur_scene, .repeat = cur_repeat};
     }
+    if (!r->frames) bench_trace_finish(out_dir, scenes[cur_scene].name, cur_repeat, &r->trace);
+    r->cooling_s = cooling_s; r->thermal_before = thermal_before; r->thermal_after = thermal_after;
     nresults++;
     r->ok = ok;
     if (!ok) {
@@ -615,6 +651,8 @@ static void end_scene(Result *r, bool ok, const char *step, const char *why) {
     }
     state = S_DONE;
     next_or_exit();  // (the last one ends here)
+    atomic_store(&reboot_deadline, plat_now_ns() + 60000000000ull);
+    cur_step = "reboot";
     write_report("running");
     rt_request_reboot(RT_REBOOT_GAME);
 }
@@ -643,7 +681,7 @@ static Result *measure(void) {
     r->skipped_building = vk_skipped_building_total() - building_t0;
     r->hz_end = vk_display_hz();
     read_power(&r->end);
-    write_frames();
+    bench_trace_finish(out_dir, scenes[cur_scene].name, cur_repeat, &r->trace);
     return r;
 }
 
@@ -665,6 +703,23 @@ void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t
     if (angles) ey = wrap180(s->yaw - yaw), ep = s->pitch - pitch;
 
     switch (state) {
+    case S_COOL: {
+        if (!phase_t) phase_t = t;
+        cooling_s = (t - phase_t) / 1e9;
+        if (title && t >= cool_poll) {
+            Power power; read_power(&power);
+            cool_poll = t + 1000000000ull;
+            if (thermal_before < 0) thermal_before = power.thermal;
+            thermal_after = power.thermal;
+            int decision = bench_cooling_check(thermal_max, power.thermal, cooling_s, thermal_wait_s);
+            if (decision == -1) { end_scene(NULL, false, "cooling", "thermal status unavailable"); break; }
+            if (decision == 1) {
+                state = S_TITLE; boot_t = t; phase_t = t; set_step("title"); break;
+            }
+        }
+        if ((t - phase_t) / 1e9 >= thermal_wait_s) end_scene(NULL, false, "cooling", "thermal wait timed out");
+        break;
+    }
     case S_TITLE:  // A on the title screen (Continue) until the game has loaded; the count starts at the first in-world frame
         if (title && t - press_t > 2000000000ull) press_t = t;
         if (title && t - press_t < 330000000ull) *b = 1;
@@ -736,6 +791,7 @@ void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t
                 free(win), free(g_sort);
                 win = malloc(sizeof(float[5]) * (size_t)cap);
                 g_sort = malloc(sizeof(float) * (size_t)cap);
+                if (!win || !g_sort) stop_run("out_of_memory", "cannot allocate the measurement window");
                 win_cap = cap;
             }
             memcpy(pos0, pos, sizeof pos0);
@@ -753,10 +809,11 @@ void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t
     case S_WINDOW: {
         const char *bad = event ? "an event started" : !world ? "left the world" : framepace_target() != TARGET_FPS ? "the frame rate target isn't 30" : NULL;
         if (bad) end_scene(NULL, false, "window", bad);
-        else if (since >= window_s) win_on = false, state = S_MEASURED;
+        else if (since >= window_s) { win_on = false; state = S_MEASURED; phase_t = t; set_step("drain"); }
         break;
     }
-    case S_MEASURED: {  // (a frame later: the window's last frame is written)
+    case S_MEASURED: {
+        if (since < 1) break;  // drain delayed display-timing feedback for the window
         if (!win_n) { end_scene(NULL, false, "window", "no frames recorded"); break; }
         Result *r = measure();
         r->cam_err = hypot(ey, ep);

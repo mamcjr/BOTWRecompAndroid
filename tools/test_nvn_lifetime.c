@@ -7,6 +7,13 @@ static int destroyed, drains;
 uint64_t renderer_present_count(void) { return test_frame; }
 void backend_texture_destroyed(NvnTexture *t) { assert(t->refs == 0); destroyed++; }
 void vk_async_drain(void) { drains++; }
+// These lifetime checks exercise the synchronous texture registration path.
+bool vk_low_ram(void) { return false; }
+void vk_async_call(void (*fn)(void *), void *arg) {
+    (void)fn;
+    (void)arg;
+    abort();  // An unexpected queued registration would invalidate the synchronous assertions.
+}
 void rt_fatal_trace(void) { abort(); }
 void rt_fatal_message(const char *format, ...) { (void)format; abort(); }
 uint64_t plat_now_ns(void) { return 0; }
@@ -81,14 +88,16 @@ int main(void) {
     register_texture(&c);
     c.x[1] = 1;
     register_texture(&c);
-    register_texture(&c);  // replacing a slot with the same texture must not add a reference
-    assert(a->refs == 3);
+    register_texture(&c);  // same texture: old slot reference is released through deferred retirement
+    assert(a->refs == 4 && slot_nold == 1 && entries[1].tex == a);
+    slot_retire_pending();
     finalize(&ah);
     finalize(&ah_copy);  // a shallow guest copy must not release ownership twice
-    assert(!ah.host && !ah_copy.host && a->refs == 3 && a->owners == 0 && a->finalized);
+    assert(!ah.host && !ah_copy.host && a->refs == 4 && a->owners == 0 && a->finalized);
     test_frame = 10;
     c.x[0] = (uintptr_t)&dh; c.x[1] = 0; c.x[2] = (uintptr_t)&bh;
     register_texture(&c);
+    slot_retire_pending();
     assert(a->refs == 2 && destroyed == 0 && entries[1].tex == a);
     test_frame = 20;
     hle_nvnTexturePoolFinalize(&c);
