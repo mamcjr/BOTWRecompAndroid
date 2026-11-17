@@ -218,6 +218,9 @@ static void seq_submitted(uint64_t s) {
 }
 // The waiter thread has seen submission seq finish (false: it broke - device lost - or 10 s went by)
 static bool seq_wait_done(uint64_t seq) {
+#ifdef __ANDROID__
+    WdMark wm = vk_wd_enter(WD_R_SEQ_WAIT, seq);  // (freeze watchdog)
+#endif
     struct timespec until;
     clock_gettime(CLOCK_REALTIME, &until);
     until.tv_sec += 10;
@@ -226,6 +229,9 @@ static bool seq_wait_done(uint64_t seq) {
     while (atomic_load(&done_cached) < seq && !seq_thread_broken && r != ETIMEDOUT) r = pthread_cond_timedwait(&done_cv, &sw_m, &until);
     bool ok = atomic_load(&done_cached) >= seq;
     pthread_mutex_unlock(&sw_m);
+#ifdef __ANDROID__
+    vk_wd_leave(wm);
+#endif
     return ok;
 }
 // The fence for submission seq, unsignalled: its slot's last user (seq - SEQ_FENCES) finished first
@@ -293,6 +299,9 @@ static void ga_invalidate(const void *p, uint64_t len);
 
 void vk_wait_seq(uint64_t seq) {
     if (!seq) { wait_why = NULL; return; }
+#ifdef __ANDROID__
+    WdMark wd_mark = vk_wd_enter(WD_GPU_WAIT, seq);  // (freeze watchdog)
+#endif
     VkSemaphoreWaitInfo wi = {.sType = VK_STRUCTURE_TYPE_SEMAPHORE_WAIT_INFO, .semaphoreCount = 1, .pSemaphores = &g_vk.timeline,
                               .pValues = &seq};
     uint64_t t0 = SDL_GetTicksNS();
@@ -301,6 +310,9 @@ void vk_wait_seq(uint64_t seq) {
                  : seq_thread_on() && seq_fences_on ? (seq_wait_done(seq) ? VK_SUCCESS  // (the waiter thread's word)
                                                        : seq_thread_broken ? VK_ERROR_DEVICE_LOST : VK_TIMEOUT)
                  : vkWaitSemaphores(g_vk.dev, &wi, 10ull * 1000000000ull);
+#ifdef __ANDROID__
+    vk_wd_leave(wd_mark);
+#endif
     uint64_t elapsed = SDL_GetTicksNS() - t0;
     if (bench_on() && !already_done) bench_record(BP_GPU_WAIT_NS, elapsed);
     stat_wait_ns += elapsed;
@@ -323,6 +335,25 @@ void vk_wait_seq(uint64_t seq) {
 }
 
 uint64_t vk_pending_seq(void) { return submit_seq + 1; }
+#ifdef __ANDROID__
+// The freeze watchdog's look at the GPU's numbers: plain reads, no lock (the render thread may be stuck holding
+// seq_lock). submit_age_ns: since the last submission was made.
+void vk_wd_gpu_info(uint64_t *submitted, uint64_t *done, uint64_t *submit_age_ns, bool *waiter) {
+    *submitted = __atomic_load_n(&submit_seq, __ATOMIC_RELAXED);
+    *done = atomic_load_explicit(&done_cached, memory_order_relaxed);
+    uint64_t t = __atomic_load_n(&last_submit_ns, __ATOMIC_RELAXED), now = SDL_GetTicksNS();
+    *submit_age_ns = t && now > t ? now - t : 0;
+    *waiter = seq_thread > 0 && !seq_thread_broken;
+}
+// What the driver says the timeline is at - asked from the watchdog's own helper thread only (it may not return);
+// not with the waiter thread on fences: that signals no timeline, and on Turnip the read waits in the kernel.
+uint64_t vk_wd_timeline_value(void) {
+    uint64_t v = 0;
+    if (seq_thread > 0 && seq_fences_on) return 0;
+    vkGetSemaphoreCounterValue(g_vk.dev, g_vk.timeline, &v);
+    return v;
+}
+#endif
 // The submission holding the last draw or dispatch that stores to global memory - the game's own memory on the GPU
 // (vk_heap_place): what the CPU may read after a fence (nvnSyncWait's sync lag waits for it). Render thread writes.
 static _Atomic uint64_t g_gmem_store_seq;
@@ -1045,8 +1076,12 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
 #ifdef __ANDROID__
         uint64_t trace_start = vk_timing_trace_on() ? SDL_GetTicksNS() : 0;
 #endif
+#ifdef __ANDROID__
+        WdMark wd_mark = vk_wd_enter(WD_R_SUBMIT, submit_seq + 1);  // (freeze watchdog; seq_fence_for may wait inside it)
+#endif
         VkResult sr = vkQueueSubmit2(g_vk.queue, 1, &si, seq_fence_for(submit_seq + 1));  // (the waiter thread's)
 #ifdef __ANDROID__
+        vk_wd_leave(wd_mark);
         tl_add((int64_t)plat_now_ns(), wait || signal ? "render: submitted (present)" : "render: submitted", submit_seq + 1, 0);
         if (trace_start) vk_timing_trace_wait(VK_TIMING_SUBMIT, SDL_GetTicksNS() - trace_start);
 #endif

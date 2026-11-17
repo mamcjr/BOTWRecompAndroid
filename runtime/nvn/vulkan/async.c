@@ -24,6 +24,7 @@
 #include "../../platform.h"
 #include "../../benchmark_perf.h"
 #include "../../rt.h"
+#include "vk.h"
 
 enum { REQ_EXEC, REQ_PRESENT, REQ_FENCE, REQ_CALL };
 typedef struct { int type; uint64_t a; void *p; uint64_t id; } Req;
@@ -90,9 +91,11 @@ static void *render_main(void *arg) {
     bool cpu_timing = timing && atoi(timing) != 0;
     pthread_mutex_lock(&q_lock);
     for (;;) {
+        if (q_head == q_tail) vk_wd_set(WD_R_WAIT_GAME, 0);  // (freeze watchdog: where this thread is)
         while (q_head == q_tail) pthread_cond_wait(&q_more, &q_lock);
         Req r = q[q_head % QN];
         pthread_mutex_unlock(&q_lock);
+        vk_wd_set(r.type == REQ_EXEC ? WD_R_TRANSLATE : r.type == REQ_PRESENT ? WD_R_PRESENT_REQ : r.type == REQ_FENCE ? WD_R_FENCE_REQ : WD_R_CALL_REQ, r.id);
         uint64_t t0 = plat_now_ns(), cpu0 = cpu_timing ? render_cpu_ns() : 0;
         extern void vk_tl(const char *what, uint64_t a, uint64_t b);  // (exec.c: LARECOMP_FRAME_TIMELINE)
         vk_tl(r.type == REQ_EXEC ? "render: list start" : r.type == REQ_PRESENT ? "render: present start" : "render: fence", r.id, 0);
@@ -128,11 +131,13 @@ static uint64_t push(int type, uint64_t a, void *p) {
     }
     if (q_tail - q_head >= QN || (type == REQ_PRESENT && q_presents >= ahead)) {
         pthread_mutex_unlock(&q_lock);
+        WdMark wm = vk_wd_enter(WD_G_QUEUE_FULL, q_tail - q_head);
         kernel_blocking_begin();
         pthread_mutex_lock(&q_lock);
         while (q_tail - q_head >= QN || (type == REQ_PRESENT && q_presents >= ahead)) pthread_cond_wait(&q_less, &q_lock);
         pthread_mutex_unlock(&q_lock);
         kernel_blocking_end();
+        vk_wd_leave(wm);
         pthread_mutex_lock(&q_lock);
     }
     uint64_t id = ++q_tail;  // (ids 1, 2, ...: the request at index id - 1)
@@ -150,18 +155,30 @@ static uint64_t push(int type, uint64_t a, void *p) {
 // Until the render thread has finished request `id` (0: nothing to wait for).
 void vk_async_wait_id(uint64_t id) {
     if (!id || !g_vk_render_started || vk_async_is_render_thread()) return;
+    WdMark wm = vk_wd_enter(WD_G_WAIT_ID, id);
     pthread_mutex_lock(&q_lock);
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
     pthread_mutex_unlock(&q_lock);
+    vk_wd_leave(wm);
 }
 
 // Until every request queued so far has run (the render thread is idle after it).
 void vk_async_drain(void) {
     if (!g_vk_render_started || vk_async_is_render_thread()) return;
+    WdMark wm = vk_wd_enter(WD_G_DRAIN, q_tail);
     pthread_mutex_lock(&q_lock);
     uint64_t id = q_tail;
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
     pthread_mutex_unlock(&q_lock);
+    vk_wd_leave(wm);
+}
+
+// The freeze watchdog's look at the queue: no lock (the render thread may be stuck holding it), plain reads - a stale
+// number is fine there. queued: requests ever queued, done: the last the render thread finished.
+void vk_async_wd_info(uint64_t *queued, uint64_t *done, int *presents) {
+    *queued = __atomic_load_n(&q_tail, __ATOMIC_RELAXED);
+    *done = __atomic_load_n(&q_done, __ATOMIC_RELAXED);
+    *presents = __atomic_load_n(&q_presents, __ATOMIC_RELAXED);
 }
 
 // The fences a command list signals (CMD_FENCE_SYNC, in it or in the lists it calls) get the list's request: a wait
