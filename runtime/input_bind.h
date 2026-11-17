@@ -33,6 +33,12 @@ const char *bind_input_name(int slot);         // "A", "D-pad Up", "Left stick U
 const char *bind_pad_label(int host, int fam); // controller button in the pad family's own words (fam: input_pad_family)
 const char *bind_key_label(int scancode);
 int bind_label_family(void);                   // the connected controller's family (also on the start screen)
+
+// A controller to play with (runtime/hle/input.c): an SDL gamepad with at least one axis - a phone's fingerprint sensor
+// can register itself as one (#477). Use these instead of SDL_HasGamepad / the first of SDL_GetGamepads.
+bool input_pad_usable(uint32_t id);  // id: an SDL_JoystickID
+bool input_pad_present(void);
+uint32_t input_pad_first(void);      // the first usable one's id, 0: none
 void bind_reset(int dev);
 bool bind_is_default(int dev);
 bool bind_is_default_slot(int dev, int slot);

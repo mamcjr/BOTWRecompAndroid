@@ -85,10 +85,8 @@ int bind_label_family(void) {
     extern int input_pad_family(void);  // runtime/hle/input.c (the game's open pad, or LARECOMP_PAD_TYPE)
     int f = input_pad_family();
     if (f) return f;
-    int n = 0, t = 0;  // start screen: input.c hasn't opened a pad yet
-    SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    if (ids && n > 0) t = SDL_GetGamepadTypeForID(ids[0]);
-    SDL_free(ids);
+    SDL_JoystickID first = input_pad_first();  // start screen: input.c hasn't opened a pad yet
+    int t = first ? SDL_GetGamepadTypeForID(first) : 0;
     return t == SDL_GAMEPAD_TYPE_XBOX360 || t == SDL_GAMEPAD_TYPE_XBOXONE ? 1 :
            t == SDL_GAMEPAD_TYPE_PS3 || t == SDL_GAMEPAD_TYPE_PS4 || t == SDL_GAMEPAD_TYPE_PS5 ? 2 : 0;
 }

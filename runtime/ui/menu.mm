@@ -293,7 +293,7 @@ void menu_apply_window_requests(void *win) {
 #ifdef __ANDROID__
     // With a controller, the in-app keyboard only: Android's own keyboard would open over it, and while it is up it
     // takes the controller's stick and d-pad (after naming Link the stick no longer moved him; buttons still worked)
-    if (want_text && SDL_HasGamepad()) want_text = false;
+    if (want_text && input_pad_present()) want_text = false;
     // ... and otherwise only while a text field is being typed in, without the in-app keyboard (the name entry has
     // it): with the menu merely open, Android's keyboard came up over it every time
     extern bool osk_is_open(void);

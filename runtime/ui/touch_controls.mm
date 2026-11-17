@@ -36,6 +36,8 @@ uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);
 bool menu_input_captured(void);  // ui/menu.mm
 void menu_test_open(void);       // ui/menu.mm: opens the in-game menu
 void menu_request_close(void);   // ui/menu.mm
+bool input_pad_present(void);    // hle/input.c: a controller with axes (not a fingerprint sensor, #477)
+bool input_pad_usable(uint32_t id);
 _Atomic uint64_t g_touch_buttons;  // (runtime/hle/input.c) Switch button bits held on the screen
 _Atomic int32_t g_touch_lx, g_touch_ly;  // left stick, -32767..32767, y up
 _Atomic int32_t g_touch_rx, g_touch_ry;  // right stick
@@ -599,7 +601,7 @@ extern "C" bool touch_controls_visible(void) {
     uint64_t now = SDL_GetTicks();
     if (now - checked_ms > 250) {
         checked_ms = now;
-        bool pad = SDL_HasGamepad();
+        bool pad = input_pad_present();
         if (pad && !hide_auto) release_all();
         hide_auto = pad;
     }
@@ -648,8 +650,10 @@ static bool overlay_drag(const SDL_Event *e, float x, float y) {  // true: the f
 // SDL events (the UI thread): true when the event was for the on-screen controls.
 extern "C" bool touch_controls_event(const SDL_Event *e) {
     switch (e->type) {
-    case SDL_EVENT_GAMEPAD_ADDED: hide_auto = true; release_all(); return false;
-    case SDL_EVENT_GAMEPAD_REMOVED: hide_auto = SDL_HasGamepad(); return false;
+    case SDL_EVENT_GAMEPAD_ADDED:
+        if (input_pad_usable(e->gdevice.which)) hide_auto = true, release_all();
+        return false;
+    case SDL_EVENT_GAMEPAD_REMOVED: hide_auto = input_pad_present(); return false;
     case SDL_EVENT_KEY_DOWN:
         if (e->key.scancode == SDL_SCANCODE_AC_BACK && !e->key.repeat) {
             if (editing) { edit_end(C_CANCEL); return true; }

@@ -1592,7 +1592,7 @@ static ImGuiKey launcher_pad_key(Uint8 b) {
 static void launcher_pad_open_all(void) {
     int n = 0;
     SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    for (int i = 0; ids && i < n; i++) SDL_OpenGamepad(ids[i]);
+    for (int i = 0; ids && i < n; i++) if (input_pad_usable(ids[i])) SDL_OpenGamepad(ids[i]);
     SDL_free(ids);
 }
 
@@ -1601,6 +1601,7 @@ static bool launcher_pad_event(const SDL_Event &e) {
     ImGuiIO &io = ImGui::GetIO();
     switch (e.type) {
     case SDL_EVENT_GAMEPAD_ADDED:
+        if (!input_pad_usable(e.gdevice.which)) return true;  // (a fingerprint sensor, #477)
         SDL_OpenGamepad(e.gdevice.which);
         io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
         return true;
@@ -2250,7 +2251,7 @@ extern "C" void launcher_run(const char *root) {
             // the backend (manual mode, no gamepads of its own) clears HasGamepad every frame, and ImGui then drops the
             // controller presses launcher_pad_event fed in and turns gamepad navigation off: set it again while a
             // controller is connected
-            if (SDL_HasGamepad()) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
+            if (input_pad_present()) io.BackendFlags |= ImGuiBackendFlags_HasGamepad;
             ImGui::NewFrame();
 
             ImVec2 ds = io.DisplaySize;

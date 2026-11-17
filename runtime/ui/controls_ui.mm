@@ -121,20 +121,19 @@ static void touch_layout_draw(void) {
 extern "C" void controls_bindings_draw(float scale) {
     (void)scale;
 #ifdef __ANDROID__
-    if (!SDL_HasGamepad()) { touch_layout_draw(); return; }
+    if (!input_pad_present()) { touch_layout_draw(); return; }
     const bool keys = false;  // (bindings: the controller's only)
 #else
     const bool keys = true;
 #endif
     int fam = bind_label_family();
     static const char *const fam_name[] = {"Nintendo", "Xbox", "PlayStation"};
-    int n = 0;
-    SDL_JoystickID *ids = SDL_GetGamepads(&n);
-    const char *pad_name = ids && n > 0 ? SDL_GetGamepadNameForID(ids[0]) : NULL;
+    SDL_JoystickID first = input_pad_first();
+    int n = first ? 1 : 0;
+    const char *pad_name = first ? SDL_GetGamepadNameForID(first) : NULL;
     char line[200];
     if (n > 0) snprintf(line, sizeof line, tr("Controller: %s  (%s button names)"), pad_name ? pad_name : tr("connected"), fam_name[fam % 3]);
     else snprintf(line, sizeof line, tr("No controller connected  (%s button names shown)"), fam_name[fam % 3]);
-    SDL_free(ids);
     ImGui::TextUnformatted(line);
     ImGui::PushTextWrapPos(0);
     ImGui::TextDisabled("%s", tr(keys ? "Select a binding, then press the new button or key. Esc (or 5 seconds) cancels. A button "

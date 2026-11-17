@@ -168,9 +168,46 @@ int input_pad_family(void) {
     return env >= 0 ? env : pad_family;
 }
 
+// A gamepad with no axis at all isn't a controller to play with: a phone's fingerprint sensor can register one (the
+// OnePlus 7 Pro's "gf_input": navigation keys and a BTN_EAST, so Android and SDL call it a gamepad, and the touch
+// controls never showed, #477). Such a device is left out wherever the app asks whether a controller is connected (the
+// touch controls, the Controls tab, the start screen's navigation, the pads the game reads). LARECOMP_PAD_ANY=1: every
+// gamepad counts, as before. The answer is kept per id (SDL gives a reconnected device a new one).
+bool input_pad_usable(uint32_t id) {
+    static int any = -1;
+    if (any < 0) any = getenv("LARECOMP_PAD_ANY") && atoi(getenv("LARECOMP_PAD_ANY"));
+    if (any) return true;
+    static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
+    static struct { uint32_t id; bool usable; } seen[16];
+    static unsigned nseen;
+    pthread_mutex_lock(&lock);
+    for (unsigned i = 0; i < nseen && i < 16; i++)
+        if (seen[i].id == id) { bool u = seen[i].usable; pthread_mutex_unlock(&lock); return u; }
+    pthread_mutex_unlock(&lock);
+    SDL_Gamepad *g = SDL_OpenGamepad((SDL_JoystickID)id);  // (counted: closing it leaves another opener's open)
+    int axes = g ? SDL_GetNumJoystickAxes(SDL_GetGamepadJoystick(g)) : -1;
+    bool usable = axes != 0;  // (one that can't be opened: as before)
+    if (!usable) LOG("[input] gamepad %u: %s has no axes - not a controller, left out (LARECOMP_PAD_ANY=1: counted)\n",
+                     (unsigned)id, SDL_GetGamepadName(g) ? SDL_GetGamepadName(g) : "(unnamed)");
+    if (g) SDL_CloseGamepad(g);
+    pthread_mutex_lock(&lock);
+    seen[nseen++ % 16].id = id, seen[(nseen - 1) % 16].usable = usable;
+    pthread_mutex_unlock(&lock);
+    return usable;
+}
+uint32_t input_pad_first(void) {
+    int n = 0;
+    SDL_JoystickID *ids = SDL_GetGamepads(&n);
+    uint32_t first = 0;
+    for (int i = 0; ids && i < n && !first; i++) if (input_pad_usable(ids[i])) first = ids[i];
+    SDL_free(ids);
+    return first;
+}
+bool input_pad_present(void) { return input_pad_first() != 0; }
+
 static void pad_open(SDL_JoystickID id) {
     for (int p = 0; p < npads; p++) if (SDL_GetGamepadID(pads[p]) == id) return;
-    if (npads == MAX_PADS) return;
+    if (npads == MAX_PADS || !input_pad_usable(id)) return;
     SDL_Gamepad *g = SDL_OpenGamepad(id);
     if (!g) { LOG("[input] gamepad %u: %s\n", (unsigned)id, SDL_GetError()); return; }
     pads[npads++] = g;
