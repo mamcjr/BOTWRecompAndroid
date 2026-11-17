@@ -2219,8 +2219,12 @@ bool vk_driver_is_mali(void) {
         VkPhysicalDeviceDriverProperties d = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
         VkPhysicalDeviceProperties2 p = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &d};
         vkGetPhysicalDeviceProperties2(g_vk.phys, &p);
-        m = d.driverID == VK_DRIVER_ID_ARM_PROPRIETARY || g_vk.props.vendorID == 0x13B5;  // (the vendor id too:
-    }                                                                                    //   a driverID of 0 on an old one)
+        // (the vendor id too: a driverID of 0 on an old one. It also catches PanVK - Mesa on Mali, the same 0x13B5 -
+        //  harmless: the waiter is only a thread, and Mesa's timeline is the emulated one the Turnip default of
+        //  seq_thread_on already runs on. Xclipse it doesn't catch, and isn't meant to: AMD-based, 0x1002, RADV's
+        //  driverID - vk_driver_is_radv, below)
+        m = d.driverID == VK_DRIVER_ID_ARM_PROPRIETARY || g_vk.props.vendorID == 0x13B5;
+    }
     return m > 0;
 }
 
