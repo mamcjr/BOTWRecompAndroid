@@ -52,6 +52,11 @@ static uint32_t *cache_load(uint64_t h, size_t *nwords) {
 
 static pthread_once_t cache_dirs_once = PTHREAD_ONCE_INIT;
 static void cache_dirs_init(void) { mkdir("cache", 0755); mkdir("cache/spirv", 0755); }
+void vk_shader_cache_ensure_dirs(void) { pthread_once(&cache_dirs_once, cache_dirs_init); }
+uint32_t *vk_spirv_load_cached(uint64_t h, size_t *nwords) {
+    if (getenv("LARECOMP_VK_NO_SPIRV_CACHE") != NULL) return NULL;
+    return cache_load(h, nwords);
+}
 static void cache_store(uint64_t h, const uint32_t *spv, size_t nwords) {
     pthread_once(&cache_dirs_once, cache_dirs_init);
     char path[64], tmp[80];
@@ -140,7 +145,7 @@ static void strip_names(uint32_t *spv, size_t *nwords) {
     *nwords = o;
 }
 
-uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
+uint32_t *vk_glsl_to_spirv_ex(const char *src, int stage, const char *name, size_t *nwords, uint64_t *out_hash) {
     bool optimized = getenv("LARECOMP_VK_OPT") != NULL;
 #ifdef __ANDROID__
     uint64_t h = vk_shader_source_hash(src, stage, optimized);
@@ -149,6 +154,7 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
 #else
     uint64_t h = src_hash(src, stage);
 #endif
+    if (out_hash) *out_hash = h;
     bool nocache = getenv("LARECOMP_VK_NO_SPIRV_CACHE") != NULL;
     uint32_t *out = nocache ? NULL : cache_load(h, nwords);
     if (!out) spirv_misses++;
@@ -188,6 +194,10 @@ uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t 
     }
     shaderc_result_release(r);
     return out;
+}
+
+uint32_t *vk_glsl_to_spirv(const char *src, int stage, const char *name, size_t *nwords) {
+    return vk_glsl_to_spirv_ex(src, stage, name, nwords, NULL);
 }
 
 VkShaderModule vk_module(const uint32_t *spv, size_t nwords) {

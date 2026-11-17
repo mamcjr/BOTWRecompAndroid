@@ -25,7 +25,20 @@
 #include "../../hle.h"
 #include "../../kernel.h"
 #include "shaders.h"
+#include "shader_meta_cache.h"
 #include "vk.h"
+#if defined(__has_include)
+#if __has_include("benchmark_commit.h")
+#include "benchmark_commit.h"
+#endif
+#endif
+#ifndef BENCHMARK_COMMIT
+#define BENCHMARK_COMMIT "standalone"
+#endif
+#ifndef MW_TRANSLATOR_ID
+#define MW_TRANSLATOR_ID "unknown"
+#endif
+#define MW_META_BUILD_ID BENCHMARK_COMMIT ":" MW_TRANSLATOR_ID
 #include "buffer_copy.h"
 #include "timing_trace.h"
 #include "object_cache.h"
@@ -1485,6 +1498,8 @@ static bool jobs_all_idle(void) {
     return idle;
 }
 
+static _Atomic uint64_t stat_meta_hits, stat_meta_misses;
+
 static void jobs_drain(void) {
 #ifdef __ANDROID__
     WdMark wm = vk_wd_enter(WD_R_BUILD_WAIT, 0);  // (freeze watchdog)
@@ -1598,6 +1613,23 @@ static bool enqueue_job(void (*fn)(void *), void *arg, bool idle_only) {
 
 static void run_job(void (*fn)(void *), void *arg) { run_job_ex(fn, arg, false); }
 
+// Render-thread-only helper so LARECOMP_SYNC_SHADERS synchronous execution also sets WD_R_BUILD_WAIT.
+static void render_dispatch_program(void (*fn)(void *), void *arg, bool urgent, bool to_translator, uint64_t wd_arg) {
+#ifdef __ANDROID__
+    if (sync_shaders() && !g_inline_steal) {
+        WdMark wm = vk_wd_enter(WD_R_BUILD_WAIT, wd_arg);
+        if (to_translator) run_translate_ex(fn, arg, urgent);
+        else run_job_ex(fn, arg, urgent);
+        vk_wd_leave(wm);
+        return;
+    }
+#else
+    (void)wd_arg;
+#endif
+    if (to_translator) run_translate_ex(fn, arg, urgent);
+    else run_job_ex(fn, arg, urgent);
+}
+
 // A skipped draw is lost for good when its target is built once and kept: BOTW's terrain height array (1024x1024x8,
 // each layer drawn once from the one before - the first draw of that shader skipped left layer 3 and all after it
 // empty: no ground on the plateau). Draws into arrays, cubemaps, 3D textures and mipmapped targets wait for their
@@ -1623,6 +1655,11 @@ void vk_shader_build_report(const char *where) {
     LOG("[vk] shader-build (%s): wait %.2f ms (max %.2f ms, %llu waits, %llu stolen), live %d progs / %d gpipes\n",
         where ? where : "?", wns / 1e6, wmax / 1e6, (unsigned long long)waits, (unsigned long long)stolen,
         atomic_load(&live_programs), atomic_load(&live_gpipes));
+    uint64_t hits = atomic_exchange_explicit(&stat_meta_hits, 0, memory_order_relaxed);
+    uint64_t misses = atomic_exchange_explicit(&stat_meta_misses, 0, memory_order_relaxed);
+    if (hits || misses)
+        LOG("[vk] shader-meta (%s): %llu hits / %llu misses\n", where ? where : "?",
+            (unsigned long long)hits, (unsigned long long)misses);
 }
 
 static void wait_built_job(_Atomic int *state, _Atomic int *urgent_flag, void *steal_arg, uint64_t wd_arg) {
@@ -1898,6 +1935,21 @@ static void st_defaults(void) {
     for (int i = 0; i < 8; i++) { st.blend[i][1] = 2; st.blend[i][2] = 1; st.blend[i][3] = 2; st.blend[i][4] = 1; st.blend[i][5] = 1; st.blend[i][6] = 1; }
 }
 
+#ifdef __ANDROID__
+static bool structure_on(void);
+static bool qcom_no_switch(void);
+static bool cbwin_wanted(void);
+static bool gmem_miss_log_on(void) {
+    static _Atomic int off = -1;
+    int v = atomic_load_explicit(&off, memory_order_relaxed);
+    if (v < 0) {
+        v = getenv("LARECOMP_NO_GMISS") != NULL ? 1 : 0;
+        atomic_store_explicit(&off, v, memory_order_relaxed);
+    }
+    return gcopy_mode && v == 0;
+}
+#endif
+
 void vk_exec_init(void) {
     prof = getenv("LARECOMP_VK_PROF") != NULL;
 #ifdef __ANDROID__
@@ -1909,6 +1961,10 @@ void vk_exec_init(void) {
     // (nor with an exported file to map there: vk_heap_place turns it on if that fails)
     extern bool vk_heap_file_asked(void);
     if (gcopy_mode && !g_vk.map_placed && !vk_heap_file_asked()) plat_write_tracking_enable(HEAP_BASE, HEAP_BASE + HEAP_MAX);
+    structure_on();
+    qcom_no_switch();
+    cbwin_wanted();
+    gmem_miss_log_on();
 #endif
     if (prof) {
         prof_up_ns = 0;
@@ -2979,6 +3035,8 @@ typedef struct {
     uint8_t fs_gather;  // (up_fix) the fragment stage's first gathered texture: 1 none, 2 + its slot
     _Atomic int state;  // 0 building, 1 ready, 2 failed
     _Atomic int urgent; // 1: synchronous draw waiting on this program
+    uint64_t meta_h1[2], meta_h2[2];
+    bool meta_key_ok[2];
     uint8_t evict;      // (prog_evict, vk_exec_reset) 1: to be freed, 2: kept - a pipeline of its still building
     uint32_t used_s;    // when a draw last used it (g_exec_s), and that submission (prog_evict)
     uint64_t used_seq;
@@ -3039,21 +3097,84 @@ static void subst_glsl(ShaderInfo *si, uint64_t addr, const char *suffix) {
 }
 #endif
 
-static void compile_program(void *arg) {
-    Prog *p = arg;
-    if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
-        if (p->vi) { free(p->vi->msl); p->vi->msl = NULL; }
-        if (p->fi) { free(p->fi->msl); p->fi->msl = NULL; }
-        signal_build_done(&p->state, 2);
-        return;
+// Persist Maxwell translation metadata (.smeta) beside .spv so warm restarts skip maxwell_translate and shaderc (LARECOMP_META_CACHE=0: off).
+#ifdef __ANDROID__
+static pthread_once_t meta_cache_env_once = PTHREAD_ONCE_INIT;
+static bool meta_cache_env_on;
+static void init_meta_cache_env(void) {
+    const char *e = getenv("LARECOMP_META_CACHE");
+    meta_cache_env_on = !(e && atoi(e) == 0) &&
+                        !getenv("LARECOMP_VK_NO_SPIRV_CACHE") && !getenv("LARECOMP_SAVE_MSL") &&
+                        !getenv("LARECOMP_DUMP_FS") && !getenv("LARECOMP_SHADER_SUBST") &&
+                        !getenv("LARECOMP_SHADER_PATCH");
+}
+#endif
+
+static bool meta_cache_on(void) {
+#ifdef __ANDROID__
+    pthread_once(&meta_cache_env_once, init_meta_cache_env);
+    return meta_cache_env_on && !maxwell_dbg_code && !maxwell_dbg_vs;
+#else
+    return false;
+#endif
+}
+
+static pthread_once_t trans_env_once = PTHREAD_ONCE_INIT;
+static uint32_t trans_env_tf;
+#ifdef __ANDROID__
+static bool trans_qcom_local;
+static unsigned trans_gmiss_stages = ~0u;
+#endif
+static void init_trans_env(void) {
+    uint32_t tf = 0;
+    if (getenv("LARECOMP_NO_VS_SNAP") != NULL) tf |= MW_TF_NO_VS_SNAP;
+    if (getenv("LARECOMP_FS_SNAP") != NULL) tf |= MW_TF_FS_SNAP;
+    if (getenv("LARECOMP_NO_GATHER_SNAP") != NULL) tf |= MW_TF_NO_GATHER_SNAP;
+    if (getenv("LARECOMP_NO_BANK2") != NULL) tf |= MW_TF_NO_BANK2;
+    if (getenv("LARECOMP_NO_DISCARD") != NULL) tf |= MW_TF_NO_DISCARD;
+    if (getenv("LARECOMP_NO_STEP_CLAMP") != NULL) tf |= MW_TF_NO_STEP_CLAMP;
+    if (getenv("LARECOMP_NO_UNORM_ROUND") != NULL) tf |= MW_TF_NO_UNORM_ROUND;
+#ifdef __ANDROID__
+    if (getenv("LARECOMP_VK_INT32") != NULL) tf |= MW_TF_NO_INT64;
+    if (!getenv("LARECOMP_BRX_ALL_LABELS")) tf |= MW_TF_BRX_WINDOW;
+    if (!getenv("LARECOMP_DYN_STACKS")) tf |= MW_TF_STATIC_STACKS;
+    if (!getenv("LARECOMP_NO_STRUCT_SKIPS")) tf |= MW_TF_STRUCT_SKIPS;
+    trans_qcom_local = getenv("LARECOMP_QCOM_LOCAL") != NULL;
+    if (!getenv("LARECOMP_BITWISE_HALF")) tf |= MW_TF_NATIVE_HALF;
+    if (!getenv("LARECOMP_SAFE_MATH")) tf |= MW_TF_FAST_MINMAX;
+    if (getenv("LARECOMP_VK_OPT") != NULL) tf |= MW_TF_VK_OPT;
+    if (getenv("LARECOMP_GMISS_STAGES"))
+        trans_gmiss_stages = (unsigned)strtoul(getenv("LARECOMP_GMISS_STAGES"), NULL, 0);
+#else
+    if (getenv("LARECOMP_VK_OPT") != NULL) tf |= MW_TF_VK_OPT;
+#endif
+    trans_env_tf = tf;
+}
+
+static uint32_t current_trans_flags(int stage) {
+    pthread_once(&trans_env_once, init_trans_env);
+    uint32_t tf = trans_env_tf;
+#ifdef __ANDROID__
+    if (!g_vk.shader_int64 || __atomic_load_n(&g_settings.shader_int32, __ATOMIC_RELAXED)) tf |= MW_TF_NO_INT64;
+    if (gcopy_mode || gwin_mode) tf |= MW_TF_GMEM_MAP_ALL;
+    if (gmem_miss_log_on()) tf |= MW_TF_GMEM_MISS_LOG;
+    if (structure_on()) tf |= MW_TF_STRUCTURED;
+    if (qcom_no_switch()) {
+        tf |= MW_TF_NO_SWITCH;
+        if (!trans_qcom_local) tf |= MW_TF_NO_LOCAL_STRUCT;
     }
-    BENCH_BUILD();
-    size_t nv = 0, nf = 0;
-    uint32_t *sv = vk_glsl_to_spirv(p->vi->msl, STAGE_VERTEX, "vs", &nv);
-    uint32_t *sf = sv ? vk_glsl_to_spirv(p->fi->msl, STAGE_FRAGMENT, "fs", &nf) : NULL;
-    // Translation metadata and Vulkan modules remain cached, but their source is no longer needed.
-    free(p->vi->msl); p->vi->msl = NULL;
-    free(p->fi->msl); p->fi->msl = NULL;
+    if (cbwin_wanted()) tf |= MW_TF_CB_WINDOW;
+    uint32_t api = g_vk.api ? g_vk.api : VK_API_VERSION_1_3;
+    if (api < VK_API_VERSION_1_2) tf |= MW_TF_API_11;
+    else if (api < VK_API_VERSION_1_3) tf |= MW_TF_API_12;
+    if ((unsigned)stage < 32u && ((trans_gmiss_stages >> stage) & 1u)) tf |= MW_TF_GMISS_STAGE;
+#else
+    (void)stage;
+#endif
+    return tf;
+}
+
+static void compile_program_from_spirv(Prog *p, uint32_t *sv, size_t nv, uint32_t *sf, size_t nf, bool from_meta) {
     if (!sv || !sf || atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
         free(sv);
         free(sf);
@@ -3107,7 +3228,35 @@ static void compile_program(void *arg) {
     p->layout = make_layout(p, 2, VK_SHADER_STAGE_VERTEX_BIT, VK_SHADER_STAGE_FRAGMENT_BIT);
     atomic_fetch_add(&stat_compiles, 1);
     atomic_fetch_add(&live_programs, 1);
-    signal_build_done(&p->state, p->vs && p->fs ? 1 : 2);
+    bool ok = p->vs && p->fs;
+    if (from_meta && ok) atomic_fetch_add_explicit(&stat_meta_hits, 1, memory_order_relaxed);
+    signal_build_done(&p->state, ok ? 1 : 2);
+}
+
+static void compile_program(void *arg) {
+    Prog *p = arg;
+    if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
+        if (p->vi) { free(p->vi->msl); p->vi->msl = NULL; }
+        if (p->fi) { free(p->fi->msl); p->fi->msl = NULL; }
+        signal_build_done(&p->state, 2);
+        return;
+    }
+    BENCH_BUILD();
+    size_t nv = 0, nf = 0;
+    uint64_t vs_spv_h = 0, fs_spv_h = 0;
+    uint32_t *sv = vk_glsl_to_spirv_ex(p->vi->msl, STAGE_VERTEX, "vs", &nv, &vs_spv_h);
+    uint32_t *sf = sv ? vk_glsl_to_spirv_ex(p->fi->msl, STAGE_FRAGMENT, "fs", &nf, &fs_spv_h) : NULL;
+    // Translation metadata and Vulkan modules remain cached, but their source is no longer needed.
+    free(p->vi->msl); p->vi->msl = NULL;
+    free(p->fi->msl); p->fi->msl = NULL;
+    if (sv && sf && !atomic_load_explicit(&jobs_abort, memory_order_acquire) && meta_cache_on() && vs_spv_h && fs_spv_h) {
+        vk_shader_cache_ensure_dirs();
+        if (p->meta_key_ok[0])
+            mw_meta_store("cache/spirv", p->meta_h1[0], p->meta_h2[0], STAGE_VERTEX, p->vi, vs_spv_h, p->vs_uses_vid, 0);
+        if (p->meta_key_ok[1])
+            mw_meta_store("cache/spirv", p->meta_h1[1], p->meta_h2[1], STAGE_FRAGMENT, p->fi, fs_spv_h, false, p->fs_gather);
+    }
+    compile_program_from_spirv(p, sv, nv, sf, nf, false);
 }
 
 #ifdef __ANDROID__
@@ -3118,26 +3267,31 @@ static uint64_t hmix(uint64_t h, const void *p, size_t n);  // (below; LARECOMP_
 // The structured control flow (maxwell_structured) unless LARECOMP_NO_STRUCTURE - and not on Qualcomm's own driver,
 // whose shader compiler crashed on it inside vkCreateGraphicsPipelines (libllvm-qgl, 2026-10-16: the overworld) -
 // LARECOMP_STRUCTURE=1 there anyway
+static pthread_once_t structure_once = PTHREAD_ONCE_INIT;
+static bool structure_cached;
+static void init_structure_on(void) {
+    extern bool vk_driver_is_qualcomm(void);
+    structure_cached = !getenv("LARECOMP_NO_STRUCTURE") && (!vk_driver_is_qualcomm() || getenv("LARECOMP_STRUCTURE"));
+    if (!structure_cached && vk_driver_is_qualcomm())
+        LOG("[vk] Qualcomm's driver: shaders keep their branch state machine (its compiler)\n");
+}
 static bool structure_on(void) {
-    static int on = -1;
-    if (on < 0) {
-        extern bool vk_driver_is_qualcomm(void);
-        on = !getenv("LARECOMP_NO_STRUCTURE") && (!vk_driver_is_qualcomm() || getenv("LARECOMP_STRUCTURE"));
-        if (!on && vk_driver_is_qualcomm()) LOG("[vk] Qualcomm's driver: shaders keep their branch state machine (its compiler)\n");
-    }
-    return on;
+    pthread_once(&structure_once, init_structure_on);
+    return structure_cached;
 }
 #endif
 
 // Qualcomm's driver with the structured control flow (LARECOMP_STRUCTURE=1): its compiler crashed on a shader whose
 // structured form has a GLSL switch (a jump table) - those keep their state machine there. LARECOMP_QCOM_SWITCH=1: not.
+static pthread_once_t qcom_switch_once = PTHREAD_ONCE_INIT;
+static bool qcom_switch_cached;
+static void init_qcom_no_switch(void) {
+    extern bool vk_driver_is_qualcomm(void);
+    qcom_switch_cached = vk_driver_is_qualcomm() && !getenv("LARECOMP_QCOM_SWITCH");
+}
 static bool qcom_no_switch(void) {
-    static int on = -1;
-    if (on < 0) {
-        extern bool vk_driver_is_qualcomm(void);
-        on = vk_driver_is_qualcomm() && !getenv("LARECOMP_QCOM_SWITCH");
-    }
-    return on;
+    pthread_once(&qcom_switch_once, init_qcom_no_switch);
+    return qcom_switch_cached;
 }
 
 #ifdef __ANDROID__
@@ -3151,12 +3305,13 @@ static void translate_program(void *arg) {
         return;
     }
     pthread_mutex_lock(&translate_lock);
+    uint32_t vs_tf = current_trans_flags(STAGE_VERTEX), fs_tf = current_trans_flags(STAGE_FRAGMENT);
     maxwell_gmem_base = HEAP_BASE;
     maxwell_gmem_size = HEAP_MAX;
 #ifdef __ANDROID__
-    maxwell_no_int64 = !g_vk.shader_int64 || g_settings.shader_int32 || getenv("LARECOMP_VK_INT32") != NULL;
+    maxwell_no_int64 = (vs_tf & MW_TF_NO_INT64) != 0;
     maxwell_gmem_map_all = gcopy_mode || gwin_mode;
-    maxwell_gmem_miss_log = gcopy_mode && !getenv("LARECOMP_NO_GMISS");
+    maxwell_gmem_miss_log = gmem_miss_log_on();
     if (getenv("LARECOMP_GMISS_STAGES"))  // (a test: which stages log misses - 1 vertex, 2 fragment, 32 compute)
         maxwell_gmem_miss_stages = (unsigned)strtoul(getenv("LARECOMP_GMISS_STAGES"), NULL, 0);
     maxwell_brx_window = !getenv("LARECOMP_BRX_ALL_LABELS");
@@ -3254,6 +3409,14 @@ static void translate_program(void *arg) {
     p->fs_gather = gather_slot >= 0 && gather_slot < p->fi->ntex && gather_slot < 64 ? (uint8_t)(2 + gather_slot) : 1;
     save_glsl(p->vi->msl, p->code[0], "vs");
     save_glsl(p->fi->msl, p->code[1], "fs");
+    if (meta_cache_on()) {
+        p->meta_key_ok[0] = mw_stage_key((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], p->const_bytes[0],
+                                          STAGE_VERTEX, &p->vkey, vs_tf,
+                                          HEAP_BASE, HEAP_MAX, MW_META_BUILD_ID, &p->meta_h1[0], &p->meta_h2[0]);
+        p->meta_key_ok[1] = mw_stage_key((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], p->const_bytes[1],
+                                          STAGE_FRAGMENT, &p->fkey, fs_tf,
+                                          HEAP_BASE, HEAP_MAX, MW_META_BUILD_ID, &p->meta_h1[1], &p->meta_h2[1]);
+    }
     if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
         free(p->vi->msl); p->vi->msl = NULL;
         free(p->fi->msl); p->fi->msl = NULL;
@@ -3261,6 +3424,71 @@ static void translate_program(void *arg) {
         return;
     }
     run_job_ex(compile_program, p, atomic_load_explicit(&p->urgent, memory_order_relaxed) != 0);
+}
+
+static void prog_fast_or_translate(void *arg) {
+    Prog *p = arg;
+    if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
+        signal_build_done(&p->state, 2);
+        return;
+    }
+    BENCH_BUILD();
+    ShaderInfo *vi = NULL, *fi = NULL;
+    uint32_t *sv = NULL, *sf = NULL;
+    size_t nv = 0, nf = 0;
+    uint64_t vs_spv_h = 0, fs_spv_h = 0;
+    bool vs_uses_vid = false;
+    uint8_t fs_gather = 1;
+
+    if (!p->meta_key_ok[0]) {
+        p->meta_key_ok[0] = mw_stage_key((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], p->const_bytes[0],
+                                          STAGE_VERTEX, &p->vkey, current_trans_flags(STAGE_VERTEX),
+                                          HEAP_BASE, HEAP_MAX, MW_META_BUILD_ID, &p->meta_h1[0], &p->meta_h2[0]);
+    }
+    if (p->meta_key_ok[0])
+        vi = mw_meta_load("cache/spirv", p->meta_h1[0], p->meta_h2[0], STAGE_VERTEX, &vs_spv_h, &vs_uses_vid, NULL);
+    if (vi) {
+        ShaderKey fkey = p->fkey;
+        fkey.vs_out_mask = vi->out_mask;
+        if (mw_stage_key((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], p->const_bytes[1], STAGE_FRAGMENT, &fkey,
+                         current_trans_flags(STAGE_FRAGMENT), HEAP_BASE, HEAP_MAX, MW_META_BUILD_ID,
+                         &p->meta_h1[1], &p->meta_h2[1])) {
+            p->meta_key_ok[1] = true;
+            fi = mw_meta_load("cache/spirv", p->meta_h1[1], p->meta_h2[1], STAGE_FRAGMENT, &fs_spv_h, NULL, &fs_gather);
+        }
+    }
+    if (vi && fi) {
+        sv = vk_spirv_load_cached(vs_spv_h, &nv);
+        sf = sv ? vk_spirv_load_cached(fs_spv_h, &nf) : NULL;
+        if (sv && sf) {
+            if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
+                free(sv);
+                free(sf);
+                maxwell_free(vi);
+                maxwell_free(fi);
+                signal_build_done(&p->state, 2);
+                return;
+            }
+            p->vi = vi;
+            p->fi = fi;
+            p->fkey.vs_out_mask = vi->out_mask;
+            p->fs_out_mask = fi->out_mask;
+            p->vs_uses_vid = vs_uses_vid;
+            p->fs_gather = fs_gather;
+            compile_program_from_spirv(p, sv, nv, sf, nf, true);
+            return;
+        }
+    }
+    free(sv);
+    free(sf);
+    maxwell_free(vi);
+    maxwell_free(fi);
+    if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
+        signal_build_done(&p->state, 2);
+        return;
+    }
+    atomic_fetch_add_explicit(&stat_meta_misses, 1, memory_order_relaxed);
+    run_translate_ex(translate_program, p, atomic_load_explicit(&p->urgent, memory_order_relaxed) != 0);
 }
 
 static VkObjectCache prog_cache;
@@ -3315,14 +3543,17 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey, bool 
     }
     p->vkey = *vkey;
     p->fkey = *fkey;
-#ifdef __ANDROID__
-    if (sync_shaders() && !g_inline_steal) {
-        WdMark wm = vk_wd_enter(WD_R_BUILD_WAIT, p->code[1]);
-        run_translate_ex(translate_program, p, urgent);
-        vk_wd_leave(wm);
-    } else
-#endif
-    run_translate_ex(translate_program, p, urgent);
+    if (meta_cache_on()) {
+        p->meta_key_ok[0] = mw_stage_key((const uint8_t *)(uintptr_t)p->code[0], p->cmax[0], p->const_bytes[0],
+                                          STAGE_VERTEX, &p->vkey, current_trans_flags(STAGE_VERTEX),
+                                          HEAP_BASE, HEAP_MAX, MW_META_BUILD_ID, &p->meta_h1[0], &p->meta_h2[0]);
+        if (p->meta_key_ok[0] && mw_meta_exists("cache/spirv", p->meta_h1[0])) {
+            render_dispatch_program(prog_fast_or_translate, p, urgent, false, p->code[1]);
+            return p;
+        }
+        atomic_fetch_add_explicit(&stat_meta_misses, 1, memory_order_relaxed);
+    }
+    render_dispatch_program(translate_program, p, urgent, true, p->code[1]);
     return p;
 }
 
@@ -6477,8 +6708,9 @@ static VkObjectCache compute_cache;  // (compute programs below)
 static int compute_reset(void);  // (below compute_program)
 
 // In-place reboot (device.c backend_reset; GPU idle): drain build workers first (so nothing reads HEAP_BASE across
-// vkFreeMemory(gmem_mem) or orphaned guest code), then drop what is keyed by guest addresses (programs by code
-// address, their pipelines, compute programs, shared copies) and the heap import.
+// vkFreeMemory(gmem_mem), reads orphaned guest code, or writes stale .smeta entries across reset), then drop what
+// is keyed by guest addresses (programs by code address, their pipelines, compute programs, shared copies) and the
+// heap import.
 void vk_exec_reset(void) {
     jobs_drain();
 #ifdef __ANDROID__
@@ -6922,7 +7154,7 @@ static CsProg *compute_program(NvnProgram *np, const ShaderKey *slk) {
 #ifdef __ANDROID__
     maxwell_no_int64 = !g_vk.shader_int64 || g_settings.shader_int32 || getenv("LARECOMP_VK_INT32") != NULL;
     maxwell_gmem_map_all = gcopy_mode || gwin_mode;
-    maxwell_gmem_miss_log = gcopy_mode && !getenv("LARECOMP_NO_GMISS");
+    maxwell_gmem_miss_log = gmem_miss_log_on();
     if (getenv("LARECOMP_GMISS_STAGES"))  // (a test: which stages log misses - 1 vertex, 2 fragment, 32 compute)
         maxwell_gmem_miss_stages = (unsigned)strtoul(getenv("LARECOMP_GMISS_STAGES"), NULL, 0);
     maxwell_brx_window = !getenv("LARECOMP_BRX_ALL_LABELS");
@@ -7225,7 +7457,7 @@ static void draw_(CmdRec *r, bool indexed) {
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
     for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(rt_format(i));
 #ifdef __ANDROID__
-    if (maxwell_gmem_miss_log)  // (copy mode: early depth tests for the shaders that log misses - ShaderKey)
+    if (gmem_miss_log_on())  // (copy mode: early depth tests for the shaders that log misses - ShaderKey)
         fkey.no_ds_write = !st.rt.depth || !((st.ds[0] && st.ds[1]) || (st.ds[3] && ((st.stencil_mask[0] | st.stencil_mask[1]) & 0xFF)));
 #endif
     bool keep = false;  // (a target built once and kept: wait for the shader and pipeline - wait_built_job)
