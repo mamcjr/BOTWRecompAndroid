@@ -183,6 +183,12 @@ void vk_async_wd_info(uint64_t *queued, uint64_t *done, int *presents) {
 
 // The fences a command list signals (CMD_FENCE_SYNC, in it or in the lists it calls) get the list's request: a wait
 // on one first waits for the render thread to have translated it (its GPU submission is only known then).
+static void mark_fence(const CmdRec *r, uint64_t id) {
+    NvnSync *s = HOST(NvnSync, r->x[1]);
+    if (!s) { s = calloc(1, sizeof *s); SET_HOST(r->x[1], s); }
+    s->signaled = 1;
+    s->lseq = id;
+}
 static void mark_fences(uint64_t p, uint64_t id, int depth) {
     for (int guard = 0; guard < 10000000; guard++) {
         const CmdRec *r = (const CmdRec *)(uintptr_t)p;
@@ -192,10 +198,7 @@ static void mark_fences(uint64_t p, uint64_t id, int depth) {
             const uint64_t *h = (const uint64_t *)r->extra;
             for (uint64_t i = 0; i < r->x[0]; i++) mark_fences(h[i], id, depth + 1);
         } else if (r->op == CMD_FENCE_SYNC && r->x[1]) {
-            NvnSync *s = HOST(NvnSync, r->x[1]);
-            if (!s) { s = calloc(1, sizeof *s); SET_HOST(r->x[1], s); }
-            s->signaled = 1;
-            s->lseq = id;
+            mark_fence(r, id);
         }
         if (!r->size) return;
         p += r->size;
@@ -204,7 +207,10 @@ static void mark_fences(uint64_t p, uint64_t id, int depth) {
 
 // A copy of a submitted list, the lists it calls inlined: NVN reads the lists (in control memory) when they are
 // submitted, so a game may record over them right after (BOTW does), while the render thread runs them later.
-typedef struct { uint8_t *b; size_t n, cap; } Snap;
+// (fence: where the copy's CMD_FENCE_SYNC records are, noted while copying, so mark_fences doesn't walk the whole copy
+// again - that walk was ~19% of the game's presenting thread; nfence -1: more than fit, or a call deeper than 8
+// copied as a record, walk it)
+typedef struct { uint8_t *b; size_t n, cap; size_t fence[64]; int nfence; } Snap;
 static void snap_add(Snap *s, uint64_t p, int depth) {
     for (int guard = 0; guard < 10000000; guard++) {
         const CmdRec *r = (const CmdRec *)(uintptr_t)p;
@@ -220,30 +226,40 @@ static void snap_add(Snap *s, uint64_t p, int depth) {
                 s->b = realloc(s->b, s->cap);
                 if (!s->b) FATAL("vk: out of memory for a command list copy\n");
             }
+            if (r->op == CMD_FENCE_SYNC && r->x[1] && s->nfence >= 0) {
+                if (s->nfence < (int)(sizeof s->fence / sizeof *s->fence)) s->fence[s->nfence++] = s->n;
+                else s->nfence = -1;
+            } else if (r->op == CMD_CALL) {
+                s->nfence = -1;  // (deeper than 8, copied as a record: its lists' fences aren't noted - walk it)
+            }
             memcpy(s->b + s->n, r, r->size);
             s->n += r->size;
         }
         p += r->size;
     }
 }
-static uint8_t *snap_list(uint64_t handle) {
-    Snap s = {0};
-    snap_add(&s, handle, 0);
-    s.b = realloc(s.b, s.n + sizeof(CmdRec));
-    if (!s.b) FATAL("vk: out of memory for a command list copy\n");
-    memset(s.b + s.n, 0, sizeof(CmdRec));  // CMD_END
-    ((CmdRec *)(s.b + s.n))->size = sizeof(CmdRec);
-    return s.b;
+static uint8_t *snap_list(uint64_t handle, Snap *s) {
+    snap_add(s, handle, 0);
+    s->b = realloc(s->b, s->n + sizeof(CmdRec));
+    if (!s->b) FATAL("vk: out of memory for a command list copy\n");
+    memset(s->b + s->n, 0, sizeof(CmdRec));  // CMD_END
+    ((CmdRec *)(s->b + s->n))->size = sizeof(CmdRec);
+    return s->b;
 }
 
 void vk_async_execute(uint64_t handle) {
-    uint8_t *copy = getenv("LARECOMP_NO_LIST_COPY") ? NULL : snap_list(handle);
+    static int no_copy = -1;
+    if (no_copy < 0) no_copy = getenv("LARECOMP_NO_LIST_COPY") != NULL;
+    Snap s = {0};
+    uint8_t *copy = no_copy ? NULL : snap_list(handle, &s);
     if (copy) handle = (uint64_t)(uintptr_t)copy;
     pthread_mutex_lock(&p_lock);
     pthread_mutex_lock(&q_lock);
     uint64_t next = q_tail + 1;  // (the id the push gets: the list's fences carry it before the render thread sees them)
     pthread_mutex_unlock(&q_lock);
-    mark_fences(handle, next, 0);
+    if (copy && s.nfence >= 0)
+        for (int i = 0; i < s.nfence; i++) mark_fence((const CmdRec *)(copy + s.fence[i]), next);
+    else mark_fences(handle, next, 0);
     push(REQ_EXEC, handle, copy);  // (the render thread frees the copy once run)
     pthread_mutex_unlock(&p_lock);
 }
