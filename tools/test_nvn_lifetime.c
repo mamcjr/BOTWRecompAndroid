@@ -4,15 +4,32 @@
 
 static uint64_t test_frame;
 static int destroyed, drains;
+static bool test_async_slots;
+static struct { void (*fn)(void *); void *arg; } async_q[32];
+static int async_nq;
 uint64_t renderer_present_count(void) { return test_frame; }
 void backend_texture_destroyed(NvnTexture *t) { assert(t->refs == 0); destroyed++; }
-void vk_async_drain(void) { drains++; }
-// These lifetime checks exercise the synchronous texture registration path.
+void vk_async_drain(void) {
+    drains++;
+    for (int i = 0; i < async_nq; i++) {
+        async_q[i].fn(async_q[i].arg);
+        free(async_q[i].arg);
+    }
+    async_nq = 0;
+}
+// Synchronous checks keep vk_slot_async_default() == false unless the async-slot test enables it.
 bool vk_low_ram(void) { return false; }
+bool vk_slot_async_default(void) { return test_async_slots; }
 void vk_async_call(void (*fn)(void *), void *arg) {
-    (void)fn;
-    (void)arg;
-    abort();  // An unexpected queued registration would invalidate the synchronous assertions.
+    if (!test_async_slots) {
+        (void)fn;
+        (void)arg;
+        abort();  // An unexpected queued registration would invalidate the synchronous assertions.
+    }
+    assert(async_nq < 32);
+    async_q[async_nq].fn = fn;
+    async_q[async_nq].arg = arg;
+    async_nq++;
 }
 void rt_fatal_trace(void) { abort(); }
 void rt_fatal_message(const char *format, ...) { (void)format; abort(); }
@@ -58,6 +75,7 @@ static void sweep(void) {  // retire a scratch texture far in the future: every 
 }
 
 int main(void) {
+    unsetenv("LARECOMP_SLOT_DRAIN");
     NvnPool physical = {.storage = 0x300000000ull, .size = 0x7800000, .flags = 0x189};
     NvnPool virtual = {.size = physical.size, .flags = 0x2a1};
     uint64_t ph = (uintptr_t)&physical, vh = (uintptr_t)&virtual;
@@ -153,6 +171,81 @@ int main(void) {
     c.x[0] = (uintptr_t)&s1; c.x[1] = (uintptr_t)&s2;
     hle_nvnSamplerCompare(&c);
     assert(c.x[0] == 1);
+
+    // Async texture pool slot updates queue slot_apply without vk_async_drain() and retire displaced refs on finalize.
+#ifdef __ANDROID__
+    slot_old_reset();
+    test_async_slots = true;
+    unsetenv("LARECOMP_SLOT_DRAIN");
+    destroyed = drains = async_nq = 0;
+    test_frame = 0;
+    GuestTexture qa, qb, qc;
+    NvnTexture *tqa = init_texture(&qa, &ph, 0x10000, 128);
+    NvnTexture *tqb = init_texture(&qb, &ph, 0x20000, 128);
+    NvnTexEntry qentries[2] = {0};
+    NvnDescPool qpool = {.count = 2, .entries = qentries};
+    uint64_t qdh = (uintptr_t)&qpool;
+    c = (Cpu){0}; c.x[0] = (uintptr_t)&qdh; c.x[1] = 0; c.x[2] = (uintptr_t)&qa;
+    register_texture(&c);  // queued: entries[0] not populated until vk_async_drain
+    assert(async_nq == 1 && drains == 0 && qentries[0].tex == NULL && tqa->refs == 2);
+    vk_async_drain();
+    assert(async_nq == 0 && qentries[0].tex == tqa && tqa->refs == 2);
+    c.x[2] = (uintptr_t)&qb;
+    drains = 0;
+    register_texture(&c);  // replaces populated slot without blocking game thread in vk_async_drain
+    assert(drains == 0 && async_nq == 1 && qentries[0].tex == tqa && tqa->refs == 2 && tqb->refs == 2);
+    finalize(&qa);
+    assert(tqa->finalized && tqa->owners == 0 && tqa->refs == 2);
+    test_frame = 20;
+    c.x[0] = (uintptr_t)&qdh;
+    hle_nvnTexturePoolFinalize(&c);  // drains queued slot_apply, retires displaced tqa into g_retired, and clears tqb
+    assert(drains == 1 && async_nq == 0 && slot_nold == 0 && qentries[0].tex == NULL);
+    assert(tqa->refs == 1 && g_nretired == 2);
+    finalize(&qb);
+    NvnTexEntry qentries2[2] = {0};
+    NvnDescPool qpool2 = {.count = 2, .entries = qentries2};
+    uint64_t qdh2 = (uintptr_t)&qpool2;
+    NvnTexture *tqc = init_texture(&qc, &ph, 0x30000, 128);
+    c = (Cpu){0}; c.x[0] = (uintptr_t)&qdh2; c.x[1] = 1; c.x[2] = (uintptr_t)&qc;
+    register_texture(&c);
+    vk_async_drain();
+    GuestTexture qempty = {0};
+    c.x[2] = (uintptr_t)&qempty;
+    register_texture(&c);  // overwrite slot with finalized/empty object asynchronously -> pushes tqc to slot_old
+    vk_async_drain();
+    assert(slot_nold == 1 && qentries2[1].tex == NULL);
+    finalize(&qc);  // nvnTextureFinalize flushes slot_retire_pending() outside g_live_lock
+    assert(slot_nold == 0 && tqc->finalized);
+    sweep();
+    assert(destroyed == 4 && g_nretired == 1);
+    textures_reset();
+    slot_old_reset();
+    assert(!slot_old && !slot_nold && !slot_cap);
+
+    // LARECOMP_SLOT_DRAIN=1 forces synchronous slot update even when vk_slot_async_default() is true.
+    setenv("LARECOMP_SLOT_DRAIN", "1", 1);
+    GuestTexture qd, qd2;
+    NvnTexture *tqd = init_texture(&qd, &ph, 0x40000, 128);
+    NvnTexture *tqd2 = init_texture(&qd2, &ph, 0x41000, 128);
+    NvnTexEntry qentries3[1] = {0};
+    NvnDescPool qpool3 = {.count = 1, .entries = qentries3};
+    uint64_t qdh3 = (uintptr_t)&qpool3;
+    async_nq = drains = g_tex_drains = 0;
+    c = (Cpu){0}; c.x[0] = (uintptr_t)&qdh3; c.x[1] = 0; c.x[2] = (uintptr_t)&qd;
+    register_texture(&c);
+    assert(async_nq == 0 && drains == 0 && g_tex_drains == 0 && qentries3[0].tex == tqd);
+    c.x[2] = (uintptr_t)&qd2;
+    register_texture(&c);  // overwriting populated slot in drain mode calls vk_async_drain() and increments drains/g_tex_drains
+    assert(async_nq == 0 && drains == 1 && g_tex_drains == 1 && qentries3[0].tex == tqd2);
+    unsetenv("LARECOMP_SLOT_DRAIN");
+    finalize(&qd);
+    finalize(&qd2);
+    c = (Cpu){0}; c.x[0] = (uintptr_t)&qdh3;
+    hle_nvnTexturePoolFinalize(&c);
+    sweep();
+    textures_reset();
+    slot_old_reset();
+#endif
 
     puts("PASS: virtual pool alias/bounds, descriptor retention, copies and second finalizes, shared descriptions, "
          "initialize again, pool teardown, reset, compare");
