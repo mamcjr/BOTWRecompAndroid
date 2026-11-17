@@ -661,6 +661,14 @@ static uint64_t bc_upload_blocks(VkCommandBuffer cb, TexBackend *b, const uint8_
 }
 #endif
 
+static uint64_t tex_discarded_bytes;
+
+static void undiscard(TexBackend *b) {
+    tex_discarded_bytes = tex_discarded_bytes > b->discarded ? tex_discarded_bytes - b->discarded : 0;
+    b->discarded = 0;
+    b->disc_hash = 0;
+}
+
 static void destroy_image(TexBackend *b) {
 #ifdef __ANDROID__
     bc_shadow_destroy(b);
@@ -669,6 +677,12 @@ static void destroy_image(TexBackend *b) {
     if (b->image || b->mem) defer((Dead){.img = b->image, .mem = b->mem});  // (never the same allocation twice)
     b->image = VK_NULL_HANDLE;
     b->mem = VK_NULL_HANDLE;
+    undiscard(b);
+    b->uploaded = false;
+    b->data_hash = 0;
+    b->sample_hash = 0;
+    b->wgen = 0;
+    b->full_wgen = 0;
 }
 
 // Live game textures: an in-place reboot (vk_textures_reset) destroys them all.
@@ -825,7 +839,6 @@ static bool tex_discard(void) {
     }
     return on;
 }
-static uint64_t tex_discarded_bytes;
 static int tex_alias_logs;
 
 // The guest bytes of the textures uploaded from memory, and of those discarded (the memory log)
@@ -977,10 +990,27 @@ static void texture_trace_record(int kind, uint64_t source, uint64_t upload, uin
     }
     since = now;
 }
-static void upload_texture(NvnTexture *t, TexBackend *b) {
-    if (!t->addr || t->target == 10) return;
+static void tex_emit_image_barrier(VkCommandBuffer cb, const TexBackend *b, VkPipelineStageFlags2 src_stage,
+                                   VkAccessFlags2 src_access, VkPipelineStageFlags2 dst_stage, VkAccessFlags2 dst_access) {
+    VkImageMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER_2,
+                                .srcStageMask = src_stage,
+                                .srcAccessMask = src_access,
+                                .dstStageMask = dst_stage,
+                                .dstAccessMask = dst_access,
+                                .oldLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                .newLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                .srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED,
+                                .image = b->image,
+                                .subresourceRange = {b->aspect, 0, VK_REMAINING_MIP_LEVELS, 0, VK_REMAINING_ARRAY_LAYERS}};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .imageMemoryBarrierCount = 1, .pImageMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+}
+
+static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) {
+    if (!t->addr || t->target == 10) return false;
     uint64_t frame = vk_frame_counter();
-    if (b->uploaded && b->checked_frame == frame) return;
+    if (!for_rt_load && b->uploaded && b->checked_frame == frame) return false;
     // A texture that never changed since its upload is checked every 8th frame - but a linear one (flag 0x40 / 0x10)
     // every frame: BOTW fills its terrain height tiles (256x256 R16, 64x64, linear) on the CPU and draws them into the
     // terrain's arrays (512x512x8 RGBA8) right away, once. Read up to 7 frames late, an array layer was built from the
@@ -990,9 +1020,9 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     // linear textures, and page tracking makes most checks free. LARECOMP_LIN_STAGGER=1: every 8th frame, as before.
     static int lin_every = -1;
     if (lin_every < 0) lin_every = !getenv("LARECOMP_LIN_STAGGER");
-    if (b->uploaded && !b->dynamic && !(lin_every && (t->flags & 0x50)) && ((frame + ((uintptr_t)b >> 6)) & 7)) return;
+    if (!for_rt_load && b->uploaded && !b->dynamic && !(lin_every && (t->flags & 0x50)) && ((frame + ((uintptr_t)b >> 6)) & 7)) return false;
     const FormatInfo *fi = t->layout.fmt;
-    if (!fi || !fi->bpb) return;
+    if (!fi || !fi->bpb) return false;
     VkFmt mf = fmt_of(t->format);
     uint64_t total = tegra_total_size(&t->layout);
     b->checked_frame = frame;
@@ -1002,7 +1032,7 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     const uint8_t *mem = (const uint8_t *)(uintptr_t)t->addr;
     static int always_full = -1;
     if (always_full < 0) always_full = getenv("LARECOMP_TEX_FULLHASH") ? 1 : 0;
-    bool full = b->dynamic || !b->uploaded || always_full;
+    bool full = for_rt_load || b->dynamic || !b->uploaded || always_full;
     // (safety net: a full hash now and then - one larger than the frame's budget too, as the frame's first: a texture
     // over 4 MB never fit it, and a change its samples missed stayed unseen - TOTKRecompAndroid's 26 MB terrain atlas, 20 s)
     bool periodic = frame - b->full_frame >= 120 && (full_hash_budget >= total || full_hash_budget == (4u << 20));
@@ -1021,9 +1051,9 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
     static int watch_full = -1;
     if (watch_full < 0) { const char *e = getenv("LARECOMP_TEX_WATCH_FULL"); watch_full = !e || atoi(e) != 0; }
     bool tracked = false;
+    uint32_t prev_wgen = b->wgen, now = 0;
     if (watch && !always_full) {
         extern int vk_pages_changed(uint64_t addr, uint64_t size, uint32_t since, uint32_t *now);
-        uint32_t now = 0;
         int ch = vk_pages_changed(t->addr, total, b->wgen, &now);
         if (ch > 0 && watch_full) full = true;
         if (ch >= 0) {
@@ -1036,26 +1066,33 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
                         (unsigned long long)frame, t->width, t->height, t->depth, t->format, t->layout.levels,
                         t->layout.layers, t->flags, t->target, (unsigned long long)t->addr, (unsigned long long)total);
             }
-            if (!ch && b->uploaded && !restyle) {
+            if (!ch && b->uploaded && !restyle && (!for_rt_load || prev_wgen == b->full_wgen)) {
                 // (low RAM: no periodic full hash of a texture the CPU hasn't written - it read every texture back
                 // in from swap, ~90 MB each 2 s on a 4 GB tablet; LARECOMP_TEX_PERIODIC=1 / 0)
-                if (!periodic || !tex_periodic()) { prof_tex_watch_skips++; return; }
+                if (for_rt_load) b->full_wgen = now;
+                if (for_rt_load || !periodic || !tex_periodic()) { prof_tex_watch_skips++; return false; }
                 if (b->dynamic) full_hash_budget = full_hash_budget > total ? full_hash_budget - total : 0;  // (the others took theirs above)
             }
         }
     }
-    if (b->uploaded && b->dynamic && !always_full && !restyle && !periodic && texture_unchanged(b, mem, total)) return;
+    if (!for_rt_load && b->uploaded && b->dynamic && !always_full && !restyle && !periodic && texture_unchanged(b, mem, total)) return false;
     if (!full && !restyle) {
         prof_tex_samples++;
         uint64_t sh = fnv_sample(mem, total);
-        if (sh == b->sample_hash) return;
+        if (sh == b->sample_hash) return false;
     }
     prof_tex_full++; prof_tex_full_bytes += total; if (b->dynamic) prof_tex_dyn++;
     uint64_t h = hash_full(mem, total), last_full = b->full_frame, old_sample = b->sample_hash;
     b->full_frame = frame;
     b->sample_hash = fnv_sample(mem, total);
-    if (b->discarded && h == b->disc_hash && !restyle) return;  // (its zero pages, as discarded: nothing new)
-    if (b->uploaded && h == b->data_hash && !restyle) return;
+    if (b->discarded && h == b->disc_hash && !restyle) {
+        if (tracked) b->full_wgen = now;
+        return false;  // (its zero pages, as discarded: nothing new)
+    }
+    if (b->uploaded && h == b->data_hash && !restyle) {
+        if (tracked) b->full_wgen = now;
+        return false;
+    }
     if (!b->uploaded && tex_discard() && tex_alias_logs < 40) {  // (a new texture over discarded bytes: it reads zeros)
         for (int i = 0; i < g_nlive; i++) {
             NvnTexture *e = g_live[i];
@@ -1104,15 +1141,31 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         }
     }
     bench_add(BP_TEX_BYTES, total);
+    bool in_main = for_rt_load && b->uploaded;
     b->data_hash = h;
     b->uploaded = true;
+    if (tracked) b->full_wgen = now;
+    undiscard(b);
 #ifdef __ANDROID__
-    if (b->format != mf.vf && !b->astc_bw && !b->bc_vf) return;  // unsupported format: nothing sensible to copy
+    if (b->format != mf.vf && !b->astc_bw && !b->bc_vf) return false;  // unsupported format: nothing sensible to copy
 #else
-    if (b->format != mf.vf && !b->astc_bw) return;  // unsupported format: nothing sensible to copy
+    if (b->format != mf.vf && !b->astc_bw) return false;  // unsupported format: nothing sensible to copy
 #endif
     uint64_t bench_upload_start = bench_clock();
-    VkCommandBuffer cb = vk_upload_cmd();
+    VkCommandBuffer cb;
+    if (in_main) {
+        // Already uploaded once: earlier draws in s->main (or s->upload's prior copy) may reference the old contents.
+        // End any previous open pass, record the replacement in program order on s->main, wait for all prior reads/
+        // writes on b->image (WAR/WAW) before TRANSFER_WRITE, and publish to subsequent attachment/shader/transfer
+        // consumers (RAW/WAW) below.
+        vk_end_pass();
+        cb = vk_cmd();
+        tex_emit_image_barrier(cb, b, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
+                               VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                               VK_ACCESS_2_TRANSFER_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT);
+    } else {
+        cb = vk_upload_cmd();
+    }
     uint32_t layers = t->layout.layers ? t->layout.layers : 1;
     if (layers > b->layers && b->depth == 1) layers = b->layers;
     uint64_t layer_size = tegra_layer_size(&t->layout);
@@ -1233,6 +1286,16 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
             texture_trace_record(TEX_TRACE_NATIVE, sz, (uint64_t)out_row * l.hb * l.d, 0);
         }
     }
+    if (in_main) {
+        VkAccessFlags2 att_access = (b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))
+            ? (VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT)
+            : (VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT);
+        tex_emit_image_barrier(cb, b, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT,
+                               VK_PIPELINE_STAGE_2_ALL_GRAPHICS_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+                                   VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
+                               att_access | VK_ACCESS_2_SHADER_READ_BIT | VK_ACCESS_2_SHADER_WRITE_BIT |
+                                   VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT);
+    }
     bench_elapsed(BP_TEX_NS, bench_upload_start);
 #ifdef __ANDROID__
     // (low RAM: tex_discard) its guest bytes back to the OS: the whole pages inside it, once its
@@ -1241,14 +1304,17 @@ static void upload_texture(NvnTexture *t, TexBackend *b) {
         b->tp <= 0 && total >= (64u << 10)) {
         uint64_t lo = (t->addr + 0xFFF) & ~0xFFFull, hi = (t->addr + total) & ~0xFFFull;
         if (hi > lo && !madvise((void *)(uintptr_t)lo, hi - lo, MADV_DONTNEED)) {
-            if (!b->discarded) tex_discarded_bytes += hi - lo;
-            b->discarded = true;
+            undiscard(b);
+            b->discarded = hi - lo;
+            tex_discarded_bytes += b->discarded;
             b->disc_hash = hash_full(mem, total);
             b->sample_hash = fnv_sample(mem, total);
         }
     }
 #endif
+    return true;
 }
+static void upload_texture(NvnTexture *t, TexBackend *b) { (void)upload_texture_impl(t, b, false); }
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render) {
     TexBackend *b = tex_backend(t);
@@ -1748,6 +1814,24 @@ void vk_tex_upload_for_mips(NvnTexture *t) {
     if (nlog++ < 8) LOG("[vk] %ux%ux%u (nvn %#x) first drawn into at a level past 0: its CPU contents uploaded first\n",
                         t->width, t->height, t->depth, t->format);
     vk_tex(t, false);
+}
+
+// A write-back target drawn into at level 0 without a whole-target clear (LOAD_OP_LOAD): the pass keeps its
+// untouched texels and writes the whole image back to guest memory at the end (#296: an evicted 64x64 water height
+// clipmap tile drawn into along a 3-texel border wrote zeros back over the rest, dropping Link onto the riverbed).
+// Called once b->gpu_owned is set so tex_discard leaves guest pages alone; if never uploaded, uses s->upload, and if
+// already sampled (`b->uploaded`) with a subsequent CPU write before becoming gpu_owned, re-uploads in order on s->main.
+bool vk_tex_upload_for_load(NvnTexture *t) {
+    TexBackend *b = tex_backend(t);
+    extern uint64_t prof_up_ns;
+    uint64_t t0 = prof_up_ns != ~0ull ? SDL_GetTicksNS() : 0;
+    bool did = upload_texture_impl(t, b, true);
+    if (prof_up_ns != ~0ull) {
+        extern uint64_t prof_up_cum;
+        uint64_t d = SDL_GetTicksNS() - t0;
+        prof_up_ns += d, prof_up_cum += d;
+    }
+    return did;
 }
 
 // 1x1 black textures for unbound slots, per type

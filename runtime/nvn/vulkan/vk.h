@@ -113,9 +113,9 @@ typedef struct TexBackend {
     VkImageAspectFlags aspect;
     bool gpu_owned, uploaded, dynamic;
     uint64_t data_hash, sample_hash, checked_frame, full_frame;
-    uint32_t wgen;  // page write tracking generation at the last upload check (textures.c)
+    uint32_t wgen, full_wgen;  // page write tracking generations (sampled/periodic and last full-hash check)
     uint8_t skip;   // guest levels left out at the top (half-size textures on low RAM: textures.c create_image)
-    bool discarded; // (low RAM) its guest bytes given back to the OS after the upload: zero pages there (textures.c)
+    uint64_t discarded;  // (low RAM) guest bytes currently discarded via MADV_DONTNEED (0 if none; textures.c)
     uint64_t disc_hash;  // (discarded) the full hash of its memory right after: still that one = unchanged
     bool scalable, presented;
     uint8_t rs_group;  // RS_*: which output scale its allocation follows (textures.c)
@@ -139,6 +139,7 @@ typedef struct TexBackend {
 
 TexBackend *vk_tex(NvnTexture *t, bool for_render);  // backend image (uploads CPU contents unless for_render)
 void vk_tex_upload_for_mips(NvnTexture *t);  // (drawn into at a level past 0: the CPU's contents first, if never uploaded)
+bool vk_tex_upload_for_load(NvnTexture *t);  // (write-back target before gpu_owned LOAD_OP_LOAD: CPU contents synced)
 VkFormat vk_format(uint32_t nvn_format);
 bool vk_format_alpha_one(uint32_t nvn_format);
 bool renderer_texture_scalable(NvnTexture *t);

@@ -24,6 +24,7 @@ void vk_readback_ready(uint64_t size) { (void)size; }
 VkCommandBuffer vk_cmd(void) { return VK_NULL_HANDLE; }
 VkCommandBuffer vk_upload_cmd(void) { return VK_NULL_HANDLE; }
 void vk_full_barrier(VkCommandBuffer cb) { (void)cb; }
+void vk_end_pass(void) {}
 void renderer_flush(void) {}
 uint64_t vk_pending_seq(void) { return 1; }
 uint64_t vk_frame_counter(void) { return 1; }
