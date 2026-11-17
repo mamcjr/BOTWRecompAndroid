@@ -83,6 +83,22 @@ void plat_vibrate(int amplitude, int ms) {
     (*env)->DeleteLocalRef(env, act);
 }
 
+// The fastest refresh rate the screen offers at its current resolution (BOTWRecompAndroidActivity.maxRefreshRate;
+// SDL registers only the current mode): 0 unknown.
+float plat_max_refresh_hz(void) {
+    JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
+    jobject act = (jobject)SDL_GetAndroidActivity();
+    if (!env || !act) return 0;
+    float hz = 0;
+    jclass c = (*env)->GetObjectClass(env, act);
+    jmethodID m = (*env)->GetStaticMethodID(env, c, "maxRefreshRate", "()F");
+    if (m) hz = (*env)->CallStaticFloatMethod(env, c, m);
+    if ((*env)->ExceptionCheck(env)) { (*env)->ExceptionClear(env); hz = 0; }
+    (*env)->DeleteLocalRef(env, c);
+    (*env)->DeleteLocalRef(env, act);
+    return hz;
+}
+
 static int picked_folder_log(bool first) {  // BOTWRecompAndroidActivity.openLog: a descriptor, -1 without a usable folder
     JNIEnv *env = (JNIEnv *)SDL_GetAndroidJNIEnv();
     jobject act = (jobject)SDL_GetAndroidActivity();

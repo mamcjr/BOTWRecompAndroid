@@ -1291,6 +1291,27 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
     private static boolean dlgDone;
     private static String dlgText;
 
+    // The fastest refresh the screen offers at its current resolution (vulkan/device.c, Frame rate 40 / 45): SDL knows
+    // only the current mode, and HyperOS keeps a game at 60 Hz on a 120 Hz screen until the window asks for more. 0:
+    // unknown.
+    public static float maxRefreshRate() {
+        BOTWRecompAndroidActivity a = self;
+        if (a == null) return 0;
+        try {
+            android.view.Display d = a.getDisplay();
+            if (d == null) return 0;
+            android.view.Display.Mode cur = d.getMode();
+            float best = 0;
+            for (android.view.Display.Mode m : d.getSupportedModes())
+                if (m.getPhysicalWidth() == cur.getPhysicalWidth() && m.getPhysicalHeight() == cur.getPhysicalHeight())
+                    best = Math.max(best, m.getRefreshRate());
+            return best;
+        } catch (Throwable t) {
+            Log.w("BOTWRecompAndroid", "maxRefreshRate: " + t);
+            return 0;
+        }
+    }
+
     // The game's vibration on the phone's (or a handheld's) own motor, where the controller has none (hle/input.c
     // input_rumble_apply, Controls > Vibration): a one-shot of ms at amplitude 1-255 the native side renews while the
     // game keeps vibrating, so a stalled game stops it; 0 stops it now.
