@@ -208,7 +208,8 @@ static void mark_fences(uint64_t p, uint64_t id, int depth) {
 // A copy of a submitted list, the lists it calls inlined: NVN reads the lists (in control memory) when they are
 // submitted, so a game may record over them right after (BOTW does), while the render thread runs them later.
 // (fence: where the copy's CMD_FENCE_SYNC records are, noted while copying, so mark_fences doesn't walk the whole copy
-// again - that walk was ~19% of the game's presenting thread; nfence -1: more than fit, walk it)
+// again - that walk was ~19% of the game's presenting thread; nfence -1: more than fit, or a call deeper than 8
+// copied as a record, walk it)
 typedef struct { uint8_t *b; size_t n, cap; size_t fence[64]; int nfence; } Snap;
 static void snap_add(Snap *s, uint64_t p, int depth) {
     for (int guard = 0; guard < 10000000; guard++) {
@@ -228,6 +229,8 @@ static void snap_add(Snap *s, uint64_t p, int depth) {
             if (r->op == CMD_FENCE_SYNC && r->x[1] && s->nfence >= 0) {
                 if (s->nfence < (int)(sizeof s->fence / sizeof *s->fence)) s->fence[s->nfence++] = s->n;
                 else s->nfence = -1;
+            } else if (r->op == CMD_CALL) {
+                s->nfence = -1;  // (deeper than 8, copied as a record: its lists' fences aren't noted - walk it)
             }
             memcpy(s->b + s->n, r, r->size);
             s->n += r->size;
