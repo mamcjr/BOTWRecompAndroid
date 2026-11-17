@@ -729,3 +729,7 @@
  "Выбирает ваш Lossless.dll через выбор файлов Android и сохраняет копию в собственных файлах приложения, которые оно всегда может прочитать - на случай, если оно пишет, что не может открыть файл там, куда вы его положили."},
 {"Lossless.dll imported: %s",
  "Lossless.dll импортирован: %s"},
+{"Pipeline prewarming (experimental)",
+ "Предварительная сборка конвейеров (экспериментально)"},
+{"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
+ "Записывает графические конвейеры, используемые в мире, и собирает их в фоновом режиме во время загрузки сохранения, чтобы при входе меньше вызовов отрисовки ждали или пропускались. По умолчанию выключено. Применяется при следующей загрузке сохранения."},

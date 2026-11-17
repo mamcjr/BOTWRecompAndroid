@@ -1359,6 +1359,8 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
 // LARECOMP_SYNC_SHADERS=1 builds on first use, blocking (deterministic tests).
 typedef struct Job { void (*fn)(void *); void *arg; struct Job *next; } Job;
 static Job *jobs_head, *jobs_tail;
+static unsigned jobs_active, jobs_workers;
+static bool jobs_started;
 static pthread_mutex_t jobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t jobs_cond = PTHREAD_COND_INITIALIZER;
 
@@ -1370,9 +1372,13 @@ static void *worker(void *a) {
         Job *j = jobs_head;
         jobs_head = j->next;
         if (!jobs_head) jobs_tail = NULL;
+        jobs_active++;
         pthread_mutex_unlock(&jobs_lock);
         j->fn(j->arg);
         free(j);
+        pthread_mutex_lock(&jobs_lock);
+        jobs_active--;
+        pthread_mutex_unlock(&jobs_lock);
     }
     return NULL;
 }
@@ -1387,6 +1393,7 @@ static bool sync_shaders(void) {
 // translating on the game thread cost up to ~90 ms per frame on entering an area). Compiles go on to the workers.
 static pthread_mutex_t translate_lock = PTHREAD_MUTEX_INITIALIZER;  // graphics and compute share translator globals
 static Job *tjobs_head, *tjobs_tail;
+static unsigned tjobs_active;
 static pthread_mutex_t tjobs_lock = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t tjobs_cond = PTHREAD_COND_INITIALIZER;
 static void *translator(void *a) {
@@ -1397,9 +1404,13 @@ static void *translator(void *a) {
         Job *j = tjobs_head;
         tjobs_head = j->next;
         if (!tjobs_head) tjobs_tail = NULL;
+        tjobs_active++;
         pthread_mutex_unlock(&tjobs_lock);
         j->fn(j->arg);
         free(j);
+        pthread_mutex_lock(&tjobs_lock);
+        tjobs_active--;
+        pthread_mutex_unlock(&tjobs_lock);
     }
     return NULL;
 }
@@ -1417,11 +1428,18 @@ static void run_translate(void (*fn)(void *), void *arg) {
     pthread_mutex_unlock(&tjobs_lock);
 }
 
-static void run_job(void (*fn)(void *), void *arg) {
-    if (sync_shaders()) { fn(arg); return; }
-    static bool started;
-    if (!started) {
-        started = true;
+static bool enqueue_job(void (*fn)(void *), void *arg, bool idle_only) {
+    if (sync_shaders()) {
+        if (idle_only) return false;
+        fn(arg);
+        return true;
+    }
+    Job *j = malloc(sizeof *j);
+    if (!j) return false;
+    j->fn = fn; j->arg = arg; j->next = NULL;
+    pthread_mutex_lock(&jobs_lock);
+    if (!jobs_started) {
+        jobs_started = true;
         // first entry into an area builds dozens of pipelines at once: use most of the CPU (draws wait for them)
         int cores = SDL_GetNumLogicalCPUCores();
         int n = cores - 4;
@@ -1433,16 +1451,24 @@ static void run_job(void (*fn)(void *), void *arg) {
         if (workers) n = atoi(workers);
         if (n < 1) n = 1;
         if (n > 16) n = 16;
-        for (int i = 0; i < n; i++) { pthread_t t; pthread_create(&t, NULL, worker, NULL); }
+        for (int i = 0; i < n; i++) {
+            pthread_t t;
+            if (pthread_create(&t, NULL, worker, NULL) == 0) jobs_workers++;
+        }
     }
-    Job *j = malloc(sizeof *j);
-    j->fn = fn; j->arg = arg; j->next = NULL;
-    pthread_mutex_lock(&jobs_lock);
+    if (idle_only && (jobs_head || jobs_active >= jobs_workers)) {
+        pthread_mutex_unlock(&jobs_lock);
+        free(j);
+        return false;
+    }
     if (jobs_tail) jobs_tail->next = j; else jobs_head = j;
     jobs_tail = j;
     pthread_cond_signal(&jobs_cond);
     pthread_mutex_unlock(&jobs_lock);
+    return true;
 }
+
+static void run_job(void (*fn)(void *), void *arg) { enqueue_job(fn, arg, false); }
 
 // A skipped draw is lost for good when its target is built once and kept: BOTW's terrain height array (1024x1024x8,
 // each layer drawn once from the one before - the first draw of that shader skipped left layer 3 and all after it
@@ -2714,6 +2740,19 @@ static void descriptor_plan(const VkBindingInfo *binds, int count, uint32_t set,
     }
 }
 #endif
+#ifdef __ANDROID__
+typedef struct { uint64_t vs_h, fs_h, key_h; uint32_t nv, nf; } PwProgId;
+static _Atomic int pw_env = -2;  // -2 unread, -1 unset, 0 forced off, 1 forced on
+static bool prewarm_enabled(void) {
+    int e = atomic_load_explicit(&pw_env, memory_order_relaxed);
+    if (e == -2) {
+        const char *v = getenv("LARECOMP_PIPE_PREWARM");
+        e = (v && *v) ? (atoi(v) != 0) : -1;
+        atomic_store_explicit(&pw_env, e, memory_order_relaxed);
+    }
+    return e >= 0 ? e != 0 : __atomic_load_n(&g_settings.pipe_prewarm, __ATOMIC_RELAXED);
+}
+#endif
 typedef struct {
     ShaderInfo *vi, *fi;
     uint64_t code[2], cmax[2];  // guest addresses retained for translation and diagnostics
@@ -2724,6 +2763,7 @@ typedef struct {
     int nbinds;
 #ifdef __ANDROID__
     DescriptorPlan descriptor_plans[2];
+    PwProgId pw_id;
 #endif
     VkDescriptorSetLayout set_layout[2];
     VkPipelineLayout layout;
@@ -2803,6 +2843,17 @@ static void compile_program(void *arg) {
     free(p->vi->msl); p->vi->msl = NULL;
     free(p->fi->msl); p->fi->msl = NULL;
     if (!sv || !sf) { free(sv); free(sf); atomic_store(&p->state, 2); return; }
+#ifdef __ANDROID__
+    if (prewarm_enabled()) {
+        p->pw_id.nv = (uint32_t)nv;
+        p->pw_id.nf = (uint32_t)nf;
+        uint64_t vh = hash_words(0xcbf29ce484222325ull, sv, nv * sizeof *sv);
+        p->pw_id.vs_h = vh ? vh : 1;
+        p->pw_id.fs_h = hash_words(0xcbf29ce484222325ull, sf, nf * sizeof *sf);
+        uint64_t kh = hash_words(0xcbf29ce484222325ull, &p->vkey, sizeof p->vkey);
+        p->pw_id.key_h = hash_words(kh, &p->fkey, sizeof p->fkey);
+    }
+#endif
     p->nbinds = vk_reflect(sv, nv, p->binds, MAX_BIND);
     p->nbinds += vk_reflect(sf, nf, p->binds + p->nbinds, MAX_BIND - p->nbinds);
     p->vs = vk_module(sv, nv);
@@ -3267,6 +3318,9 @@ typedef struct {
     _Atomic int state;   // 0 building, 1 ready, 2 failed
     uint64_t used, seq;  // when it was last bound (ns), and that submission (pipe_evict)
     bool evicted;        // its VkPipeline destroyed by pipe_evict: built again at its next use
+#ifdef __ANDROID__
+    bool prewarmed;
+#endif
 } Pipe;
 static VkObjectCache pipe_cache;
 static _Atomic size_t pipeline_keys;
@@ -3329,9 +3383,17 @@ static void pipe_evict(void) {
     if (gone && nlog++ < 20) LOG("[vk] pipelines: %d unused ones destroyed, %d kept\n", gone, live);
 }
 
+#ifdef __ANDROID__
+static Pipe *pw_pending;
+#define PW_PENDING_DECLARED
+#endif
+
 // ---- freeing programs and their pipelines (render thread; nothing building with them, the GPU done with them)
 static void pipe_free(Pipe *pp) {
     if (pp == last_pipeline) last_pipeline = NULL;
+#ifdef __ANDROID__
+    if (pp == pw_pending) pw_pending = NULL;
+#endif
     if (pp->pipe) {
         long long mg0 = vk_mnow();
         vkDestroyPipeline(g_vk.dev, pp->pipe, NULL);
@@ -3580,6 +3642,10 @@ static void build_pipeline(void *arg) {
     }
     atomic_store(&pp->state, r == VK_SUCCESS ? 1 : 2);
 }
+
+#ifdef __ANDROID__
+#include "pipeline_prewarm.inc"
+#endif
 
 // ================================================================== feedback snapshots (renderer.m resolve_feedback)
 static NvnTexture *feedback_tex[4];
@@ -6096,6 +6162,9 @@ static int compute_reset(void);  // (below compute_program)
 // title screen, every benchmark scene) leaked them all - malloc 158 -> 1646 MB over 16 scenes on the POCO. Those
 // still building stay allocated (their jobs hold them), out of the index.
 void vk_exec_reset(void) {
+#ifdef __ANDROID__
+    prewarm_reset();
+#endif
     int np = 0, ng = 0, kept = 0;
     for (size_t i = 0; i < prog_cache.capacity; i++) {
         Prog *p = prog_cache.entries[i].object;
@@ -7269,11 +7338,23 @@ static void draw_(CmdRec *r, bool indexed) {
 #endif
         VkObjectEntry *entry = vk_object_slot(&pipe_cache, ph);
         pp = entry->object;
+#ifdef __ANDROID__
+        if (pp && pp->prewarmed && memcmp(&k, &pp->k, sizeof k) != 0 &&
+            !prewarm_resolve_collision(pp, &k)) {
+            stat_skipped_building++;
+            stat_skipped++;
+            skip_note("pipeline");
+            return;
+        }
+#endif
         if (!pp) {
             atomic_store(&pipeline_keys, pipe_cache.count);
             pp = calloc(1, sizeof *pp);
             pp->k = k;
             entry->object = pp;
+#ifdef __ANDROID__
+            if (prewarm_enabled()) prewarm_record(&k);
+#endif
             run_job(build_pipeline, pp);
         } else if (pp->evicted) {  // (destroyed by pipe_evict: built again)
             pp->evicted = false;
@@ -7288,6 +7369,9 @@ static void draw_(CmdRec *r, bool indexed) {
         last_pipeline = pp;
         pipeline_dirty = false;
     }
+#ifdef __ANDROID__
+    if (pp->prewarmed) prewarm_first_draw(pp);
+#endif
     if (keep) wait_built(&pp->state);
     if (atomic_load(&pp->state) != 1) {
         if (g_debug_frame) LOG("[draw]   skipped: pipeline %s\n", atomic_load(&pp->state) ? "failed" : "still building");
@@ -8867,6 +8951,9 @@ void vk_execute_now(uint64_t handle) {
 #else
 void backend_execute(uint64_t handle) {
 #endif
+#ifdef __ANDROID__
+    if (prewarm_enabled()) prewarm_tick();
+#endif
     PROF_T0();
 #ifdef __ANDROID__
     game_pending = true;  // (renderer_fence_seq)
@@ -8887,6 +8974,7 @@ void backend_execute(uint64_t handle) {
     else renderer_submit();
 #ifdef __ANDROID__
     game_pending = false;
+    if (prewarm_enabled()) prewarm_tick();
 #endif
 }
 

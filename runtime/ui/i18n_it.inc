@@ -729,3 +729,7 @@
  "Sceglie il tuo Lossless.dll con il selettore di file di Android e ne tiene una copia nei file dell'app, che l'app può sempre leggere - per quando dice di non riuscire ad aprire il file dove l'hai messo."},
 {"Lossless.dll imported: %s",
  "Lossless.dll importato: %s"},
+{"Pipeline prewarming (experimental)",
+ "Preriscaldamento pipeline (sperimentale)"},
+{"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
+ "Registra le pipeline grafiche usate nel mondo e le compila in background mentre carica un salvataggio, così meno disegni attendono o vengono saltati al primo ingresso. Disattivato per impostazione predefinita. Si applica al prossimo caricamento di un salvataggio."},
