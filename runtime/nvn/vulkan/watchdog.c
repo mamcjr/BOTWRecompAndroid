@@ -16,6 +16,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <unistd.h>
 
 #include "vk.h"
 #include "../../platform.h"
@@ -24,12 +25,22 @@
 extern pthread_t g_vk_render_thread;  // (async.c)
 extern bool g_vk_render_started;
 
-// Slot 0 is the render thread, slot 1 every other thread (the game's; without the async render thread, the one thread
-// that does both, which is then slot 1).
-static struct { _Atomic uint32_t stage, outer; _Atomic uint64_t ns, arg; } wd[2];
+// Slot 0 is the render thread; every other thread that marks a call gets a slot of its own the first time (the game
+// has several: one slot shared by all of them mixed their marks - one thread's enter, another's leave - and the first
+// 0.4.6 logs of #401 showed a 76 s "drain" that could not have been one). Past WD_SLOTS - 1 threads the last is shared.
+#define WD_SLOTS 17
+static struct { _Atomic uint32_t stage, outer; _Atomic uint64_t ns, arg; _Atomic int tid; } wd[WD_SLOTS];
+static _Atomic int wd_used = 1;
+static __thread int wd_mine = -1;
 
 static int wd_slot(void) {
-    return g_vk_render_started && pthread_equal(pthread_self(), g_vk_render_thread) ? 0 : 1;
+    if (g_vk_render_started && pthread_equal(pthread_self(), g_vk_render_thread)) return 0;
+    if (wd_mine < 0) {
+        int i = atomic_fetch_add_explicit(&wd_used, 1, memory_order_relaxed);
+        wd_mine = i < WD_SLOTS ? i : WD_SLOTS - 1;
+        atomic_store_explicit(&wd[wd_mine].tid, gettid(), memory_order_relaxed);
+    }
+    return wd_mine;
 }
 
 WdMark vk_wd_enter(uint32_t stage, uint64_t arg) {
@@ -108,20 +119,30 @@ static void report(uint64_t now, double stalled, bool second) {
     bool waiter = false;
     vk_async_wd_info(&q, &qd, &presents);
     vk_wd_gpu_info(&sub, &gdone, &age, &waiter);
-    char r[256], g[256], buf[1536];
+    char r[256], buf[1536];
     describe(r, sizeof r, 0, now);
-    describe(g, sizeof g, 1, now);
     int n = snprintf(buf, sizeof buf,
         "[watchdog] %s: no frame finished for %.1f s (frames rendered %llu, handed over by the game %llu)\n"
         "[watchdog]   render thread: %s\n"
-        "[watchdog]   game thread(s): %s\n"
         "[watchdog]   async queue: %llu request%s not run yet, %d present%s in flight\n"
         "[watchdog]   GPU: submitted seq %llu, last known done %llu (%s), last submit %.1f s ago\n",
-        second ? "still stalled" : "STALL", stalled, (unsigned long long)done, (unsigned long long)asked, r, g,
+        second ? "still stalled" : "STALL", stalled, (unsigned long long)done, (unsigned long long)asked, r,
         (unsigned long long)(q > qd ? q - qd : 0), q > qd + 1 ? "s" : "", presents, presents == 1 ? "" : "s",
         (unsigned long long)sub, (unsigned long long)gdone, waiter ? "from the waiter thread" : "from our own waits",
         age / 1e9);
     if (n > 0) LOG("%s", buf);
+    int used = atomic_load_explicit(&wd_used, memory_order_relaxed), marked = 0;
+    for (int i = 1; i < used && i < WD_SLOTS; i++) {  // (the other threads in a marked call; the rest are elsewhere)
+        if (atomic_load_explicit(&wd[i].stage, memory_order_relaxed) == WD_NONE) continue;
+        describe(r, sizeof r, i, now);
+        LOG("[watchdog]   thread %d: %s\n", atomic_load_explicit(&wd[i].tid, memory_order_relaxed), r);
+        marked++;
+    }
+    if (!marked) LOG("[watchdog]   other threads: none in a marked call\n");
+    // Where each of the game's threads is (kernel.c): the svc it waits in, for how long, and on what. In the 0.4.6 logs
+    // of #401 the render thread waited for the game and the GPU was done: the game's own threads had stopped.
+    extern void kernel_log_threads(uint64_t svc_ns);
+    kernel_log_threads(2000000000ull);
     fflush(stderr);  // (the log pump reads the pipe: nothing stays in stdio)
 }
 

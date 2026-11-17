@@ -796,27 +796,39 @@ static int prof_svc = -1;
 
 static void svc_entry(Cpu *c, uint32_t imm, uint64_t pc);
 
-// LARECOMP_WATCHDOG=<seconds>: every that many seconds, the game's threads stuck in one svc for longer, with its
-// arguments and caller, and where each of the others is (its guest lr) - for hangs.
+// The game's threads: those in one svc for longer than svc_ns, with its arguments, caller and what they wait on, and
+// where each of the others is (its guest lr; core 0's holder on Android). No lock (a stuck thread may hold g_klock):
+// the list only grows during a boot. Also from the freeze watchdog (vulkan/watchdog.c), once no frame finishes.
+void kernel_log_threads(uint64_t svc_ns) {
+    uint64_t now = plat_now_ns();
+    LOG("[watchdog] threads:\n");
+    for (KThread *t = g_threads; t; t = t->anext) {
+        if (t->finished) continue;
+        uint32_t n = t->svc_now;
+#ifdef __ANDROID__
+        const char *c0 = t->core0_held ? ", holds core 0" : "";
+#else
+        const char *c0 = "";
+#endif
+        if (n && now - t->svc_since > svc_ns)
+            LOG("[watchdog]  t%llu prio %d core %d: svc %02x for %.1f s (%llx, %llx, %llx, %llx) from %llx; wait kind %d addr %llx%s\n",
+                (unsigned long long)t->id, t->prio, __atomic_load_n(&t->core, __ATOMIC_RELAXED), n - 1,
+                (now - t->svc_since) / 1e9, (unsigned long long)t->svc_args[0], (unsigned long long)t->svc_args[1],
+                (unsigned long long)t->svc_args[2], (unsigned long long)t->svc_args[3],
+                (unsigned long long)t->svc_lr, (int)t->wait_kind, (unsigned long long)t->wait_addr, c0);
+        else
+            LOG("[watchdog]  t%llu prio %d core %d: running%s, pc %llx lr %llx%s\n", (unsigned long long)t->id, t->prio,
+                __atomic_load_n(&t->core, __ATOMIC_RELAXED), n ? " (short svc)" : "", (unsigned long long)t->cpu.pc,
+                (unsigned long long)t->cpu.x[30], c0);
+    }
+}
+
+// LARECOMP_WATCHDOG=<seconds>: every that many seconds, kernel_log_threads - for hangs.
 static void *watchdog_main(void *arg) {
     uint64_t every = (uint64_t)(uintptr_t)arg;
     for (;;) {
         sleep((unsigned)every);
-        uint64_t now = plat_now_ns();
-        LOG("[watchdog] threads:\n");
-        for (KThread *t = g_threads; t; t = t->anext) {
-            if (t->finished) continue;
-            uint32_t n = t->svc_now;
-            if (n && now - t->svc_since > every * 1000000000ull)
-                LOG("[watchdog]  t%llu prio %d: svc %02x for %llus (%llx, %llx, %llx, %llx) from %llx; wait kind %d addr %llx\n",
-                    (unsigned long long)t->id, t->prio, n - 1, (unsigned long long)((now - t->svc_since) / 1000000000ull),
-                    (unsigned long long)t->svc_args[0], (unsigned long long)t->svc_args[1],
-                    (unsigned long long)t->svc_args[2], (unsigned long long)t->svc_args[3],
-                    (unsigned long long)t->svc_lr, (int)t->wait_kind, (unsigned long long)t->wait_addr);
-            else
-                LOG("[watchdog]  t%llu prio %d: running%s, pc %llx lr %llx\n", (unsigned long long)t->id, t->prio,
-                    n ? " (short svc)" : "", (unsigned long long)t->cpu.pc, (unsigned long long)t->cpu.x[30]);
-        }
+        kernel_log_threads(every * 1000000000ull);
     }
     return NULL;
 }
