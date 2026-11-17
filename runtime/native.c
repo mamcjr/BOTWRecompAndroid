@@ -566,6 +566,27 @@ static uint64_t stub_fix(uint32_t *s, uint64_t at, uint64_t site, uint32_t id, u
     return 128;
 }
 
+// A test-and-set lock taken without acquire ordering: ldxr rt,[rn]; cbnz rt,<the ldxr>; stxr ws,rk,[rn];
+// cbnz ws,<the ldxr> (w or x, rk not the zero register), with no dmb ish / dmb ishld right after. Armv8 lets the loads
+// after such a lock be satisfied before it is held; the Switch's Cortex-A57 never showed it, a phone's big cores may:
+// two threads then take the same item of a queue the lock guards (BOTW 1.6.0 has 412 of these, 1.9.0 none - a job run
+// on two threads, garbage pointers 10-60 s in; found by peanuts-native, dm/tools/patch_nso.py acquire_lock_sites,
+// MIT, seedds / Swap2-Native contributors / EddizEge). The ldxr becomes an ldaxr (bit 15), the ordering Nintendo's own
+// SDK locks use. The recompiled code needs nothing: its exclusive loads are acquire atomics (runtime/cpu.h).
+static bool lock_without_acquire(const uint32_t *t, uint64_t i, uint64_t n) {
+    uint32_t w = t[i];
+    if ((w & 0xBFFFFC00u) != 0x885F7C00u || i + 4 > n) return false;  // ldxr (32 / 64-bit)
+    uint32_t c1 = t[i + 1], st = t[i + 2], c2 = t[i + 3];
+    uint32_t rt = w & 31, rn = w >> 5 & 31, rs = st >> 16 & 31, rk = st & 31;
+    // cbnz r, back <back> instructions (32 / 64-bit)
+#define CBNZ_BACK(x, r, back) (((x) & 0x7F00001Fu) == (0x35000000u | (r)) && ((x) >> 5 & 0x7FFFFu) == 0x80000u - (back))
+    bool fenced = i + 4 < n && (t[i + 4] == 0xD5033BBFu || t[i + 4] == 0xD50339BFu);  // dmb ish / dmb ishld
+    bool lock = CBNZ_BACK(c1, rt, 1) && CBNZ_BACK(c2, rs, 3) && (st & 0xBFE0FC00u) == 0x88007C00u &&  // stxr
+                (st >> 5 & 31) == rn && rk != 31 && rs != rn && rs != rk && !fenced;
+#undef CBNZ_BACK
+    return lock;
+}
+
 static void prepare_module(Module *m) {
     uint32_t *text = (uint32_t *)(uintptr_t)(m->base + m->text_off);
     uint64_t nw = m->text_size / 4, nsites = 0;
@@ -582,11 +603,14 @@ static void prepare_module(Module *m) {
     if (!asize) asize = 0x4000;
     plat_commit(area, asize);
     uint64_t at = area;
-    unsigned nsvc = 0, ntls = 0, ncnt = 0, nfrq = 0;
+    unsigned nsvc = 0, ntls = 0, ncnt = 0, nfrq = 0, nlock = 0;
+    static int acq = -1;  // (LARECOMP_NATIVE_LOCKS=0: the locks left as they are)
+    if (acq < 0) acq = getenv("LARECOMP_NATIVE_LOCKS") ? atoi(getenv("LARECOMP_NATIVE_LOCKS")) != 0 : 1;
     for (uint64_t i = 0; i < nw; i++) {
         uint32_t w = text[i];
         uint64_t site = (uint64_t)(uintptr_t)&text[i];
         uint64_t len = 0;
+        if (acq && lock_without_acquire(text, i, nw)) { text[i] = w | 0x8000u; nlock++; continue; }  // ldxr -> ldaxr
         if ((w & 0xFFE0001Fu) == 0xD4000001u) len = stub_svc((uint32_t *)(uintptr_t)at, at, site, (w >> 5) & 0xFFFF), nsvc++;
         else if ((w & ~31u) == MRS_TPIDRRO) len = stub_tls((uint32_t *)(uintptr_t)at, at, site, w & 31, 288, false), ntls++;
         else if ((w & ~31u) == MRS_TPIDR) len = stub_tls((uint32_t *)(uintptr_t)at, at, site, w & 31, 280, false), ntls++;
@@ -633,9 +657,9 @@ static void prepare_module(Module *m) {
     __builtin___clear_cache((char *)(uintptr_t)area, (char *)(uintptr_t)(area + asize));
     if (mprotect((void *)(uintptr_t)t0, tsz, PROT_READ | PROT_EXEC) || mprotect((void *)(uintptr_t)area, asize, PROT_READ | PROT_EXEC))
         FATAL("[native] %s: the code can't be made executable (errno %d)\n", m->name, errno);
-    LOG("[native] %s: %u svc, %u TLS, %u counter reads rewritten%s, %u rate reads, %u fixes; stubs at %llx (%llu KB)\n", m->name,
-        nsvc, ntls, ncnt, g_tick_mul ? " (scaled to 19.2 MHz)" : "", nfrq, nfixed, (unsigned long long)area,
-        (unsigned long long)(asize >> 10));
+    LOG("[native] %s: %u svc, %u TLS, %u counter reads rewritten%s, %u rate reads, %u fixes, %u locks given acquire "
+        "ordering%s; stubs at %llx (%llu KB)\n", m->name, nsvc, ntls, ncnt, g_tick_mul ? " (scaled to 19.2 MHz)" : "", nfrq,
+        nfixed, nlock, acq ? "" : " (LARECOMP_NATIVE_LOCKS=0)", (unsigned long long)area, (unsigned long long)(asize >> 10));
 }
 
 // The HLE slots as code: slot i = movz x17, #i; b trampoline (-> native_hle_gate)
