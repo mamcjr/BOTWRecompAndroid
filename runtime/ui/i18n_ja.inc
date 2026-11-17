@@ -729,3 +729,7 @@
  "Android のファイル選択で Lossless.dll を選び、アプリが必ず読めるアプリ自身のファイルにコピーを保存します - 置いた場所のファイルを開けないと表示されるときに。"},
 {"Lossless.dll imported: %s",
  "Lossless.dll を取り込みました: %s"},
+{"Pipeline prewarming (experimental)",
+ "パイプラインの事前構築 (実験的)"},
+{"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
+ "フィールドで使われたグラフィックスパイプラインを記録し、セーブデータのロード中にバックグラウンドで構築することで、入った直後の描画待ちやスキップを減らします。既定ではオフです。次にセーブデータをロードしたときに反映されます。"},

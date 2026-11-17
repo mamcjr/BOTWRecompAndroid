@@ -729,3 +729,7 @@
  "Android 파일 선택기로 Lossless.dll을 골라 앱이 항상 읽을 수 있는 앱 자체 파일에 사본을 둡니다 - 넣어 둔 곳의 파일을 열 수 없다고 나올 때 사용하세요."},
 {"Lossless.dll imported: %s",
  "Lossless.dll 가져옴: %s"},
+{"Pipeline prewarming (experimental)",
+ "파이프라인 사전 빌드 (실험적)"},
+{"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
+ "월드에서 사용된 그래픽스 파이프라인을 기록해 세이브를 불러오는 동안 백그라운드에서 미리 빌드하여, 처음 진입할 때 그리기가 대기하거나 건너뛰는 일을 줄입니다. 기본값은 꺼짐입니다. 다음에 세이브를 불러올 때 적용됩니다."},

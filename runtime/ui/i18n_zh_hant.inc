@@ -729,3 +729,7 @@
  "用 Android 的檔案選擇器選擇你的 Lossless.dll,並在應用程式自己的檔案中保留一份應用程式總能讀取的副本 - 用於應用程式提示無法開啟你放置的檔案時。"},
 {"Lossless.dll imported: %s",
  "已匯入 Lossless.dll:%s"},
+{"Pipeline prewarming (experimental)",
+ "管線預熱 (實驗性)"},
+{"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
+ "記錄在世界中使用的圖形管線,並在讀取存檔時於背景提前建置,減少初次進入時的繪製等待或跳過。預設關閉。下次讀取存檔時生效。"},
