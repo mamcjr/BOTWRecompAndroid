@@ -61,8 +61,11 @@ static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that e
 // the last barrier on it: a pass's colour / depth stores (vk_end_pass, vkCmdClearAttachments), a dispatch's storage
 // writes (dispatch), a draw's vertex/fragment shader storage writes (note_gmem_store), a transfer's writes (the
 // copies, clears and image writes recorded into the main buffer - vkCmdCopy*, vkCmdBlitImage, vkCmdResolveImage,
-// vkCmdClear*, copy_buffer, copy_buffer_to_texture). The barrier a new pass needs before it is built from exactly
-// those, with the stages that consume them; nothing is built when nothing was written. The bits are cleared by
+// vkCmdClear*, copy_buffer_to_texture; not copy_buffer, whose every caller is followed by a full barrier, which
+// orders and clears all of this anyway). The barrier a new pass needs before it is built from exactly
+// those, with the stages that consume them; nothing is built when nothing was written. Tracked only while the
+// scoped barriers are on (pass_barrier_mode() == 1): the full barrier (the default) and none note nothing, so no
+// barrier beyond main's own lands anywhere in them. The bits are cleared by
 // pass_barrier itself (a barrier ordered everything before it) and by vk_full_barrier on the main buffer (ALL_COMMANDS
 // covers every tracked writer: all of it is before it in queue order) - never anywhere else: vk_wait_seq's host wait
 // orders nothing on the GPU, and its thread (the game's) is not the one recording here (the render thread).
@@ -72,7 +75,20 @@ static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that e
 enum { PW_COLOR = 1, PW_DS = 2, PW_COMPUTE = 4, PW_TRANSFER = 8, PW_SHADER = 16 };
 static uint32_t pass_writers;
 static uint64_t pass_writers_seq;  // (the submission the tracked writers were recorded into; 0: none yet)
+// The mode, asked once (LARECOMP_VK_PASS_BARRIER below). 1, the scoped barriers, is the only mode anything of this
+// tracking is for: with the full barrier (2, the default) nothing is noted, so no extra barrier lands at a
+// submission boundary and the default is exactly main's, and 0 (none, a measurement) is exactly the old switch.
+static int pass_barrier_mode(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("LARECOMP_VK_PASS_BARRIER");
+        mode = e ? atoi(e) : getenv("LARECOMP_VK_NO_PASS_BARRIER") ? 0 : 2;
+        if (mode != 2) LOG("[vk] pass barriers: %s\n", mode == 1 ? "scoped" : "none (unsafe, a measurement)");
+    }
+    return mode;
+}
 static void pass_note_writers(uint64_t seq, uint32_t bits) {
+    if (pass_barrier_mode() != 1) return;  // (the tracking is the scoped barrier's alone: no other mode notes a thing)
     if (!pass_writers) pass_writers_seq = seq;  // (the first since the last barrier: the submission that carries them)
     else if (seq != pass_writers_seq) {  // (writers recorded past a submission boundary: a full barrier there
         vk_full_barrier(vk_cmd());          //  ordered the earlier ones - track from the newer submission on)
@@ -2196,19 +2212,15 @@ static bool no_chunks_now(void) {
 // that was ~10% of the frame (LARECOMP_VK_NO_PASS_BARRIER=1 measured what removing it entirely was worth: a large
 // gain, at the price of flickering - a new pass read targets whose stores were not visible yet). The scoped barrier
 // keeps the dependency and drops the drain; with nothing written since the last barrier it emits nothing at all.
-// Opt-in: the default is the full barrier exactly as main has it (the tracked masks are complete now - WAW between
+// Opt-in: the default is the full barrier exactly as main has it, with nothing tracked in any other mode (no extra
+// barrier lands at a submission boundary either) - the tracked masks are complete now - WAW between
 // passes, shader storage writes, indirect and uniform reads, copies as readers - but the gain was measured with the
 // incomplete ones, so the number to trust is the one still to come, with the Vulkan sync validation on top).
 // LARECOMP_VK_PASS_BARRIER: 0 = none (as NO_PASS_BARRIER, unsafe - a measurement), 1 = scoped, 2 = the full barrier
 // (the default, as main).
 enum { PB_PASS, PB_DISPATCH, PB_ANY };  // the reader this barrier is for: a pass's draws / a dispatch / whatever follows
 static void pass_barrier(VkCommandBuffer cb, int reader) {
-    static int mode = -1;
-    if (mode < 0) {
-        const char *e = getenv("LARECOMP_VK_PASS_BARRIER");
-        mode = e ? atoi(e) : getenv("LARECOMP_VK_NO_PASS_BARRIER") ? 0 : 2;
-        if (mode != 2) LOG("[vk] pass barriers: %s\n", mode == 1 ? "scoped" : "none (unsafe, a measurement)");
-    }
+    int mode = pass_barrier_mode();
     if (!mode || AB("nobarrier") == 1) return;
     if (mode == 2) {
         vk_full_barrier(cb);  // (as main: every boundary, whatever was tracked)
