@@ -395,7 +395,7 @@ static void prewarm_tick(void) {
             Pipe *p = calloc(1, sizeof *p);
             if (!p) return;
             p->k = k;
-            p->used = SDL_GetTicksNS();
+            p->used_s = g_exec_s;
             p->seq = vk_pending_seq();
             p->prewarmed = true;
             if (!enqueue_job(build_pipeline, p, true)) {
@@ -445,7 +445,7 @@ static bool prewarm_resolve_collision(Pipe *pp, const PipeKey *k) {
     pp->k = *k;
     pp->prewarmed = false;
     pp->evicted = false;
-    pp->used = SDL_GetTicksNS();
+    pp->used_s = g_exec_s;
     pp->seq = vk_pending_seq();
     atomic_store(&pp->state, 0);
     run_job(build_pipeline, pp);
