@@ -18,3 +18,7 @@ their own copy, and the app reads its shaders at run time.
 auxiliary buffer in `runtime/services/audio_reverb3d.inc` are adapted from its `games/totk/runtime/audio_reverb.c` and
 `audio_mixer.c` (Copyright (c) 2026 MacNativeGames contributors, MIT), whose reverb network is based on Ryujinx.Audio's
 Reverb3d (Copyright (c) Ryujinx Team and Contributors, MIT).
+
+**From [peanuts-native](https://github.com/igawa6/peanuts-native)** (MIT, Copyright (c) seedds, Swap2-Native contributors,
+EddizEge): the lock test in `runtime/native.c` (`lock_without_acquire`, native mode) is a C port of its
+`dm/tools/patch_nso.py` `acquire_lock_sites`.
