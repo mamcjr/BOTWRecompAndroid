@@ -3083,6 +3083,7 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey) {
 #ifdef __ANDROID__
     if (fkey->no_ds_write) { h ^= 0xE1; h *= 0x100000001B3ull; }  // (keys without it hash as before)
 #endif
+    if (fkey->soft_linear) h = hash_words(h, &fkey->soft_linear, 4 * sizeof(uint64_t));
     if (!h) h = 1;
     VkObjectEntry *entry = vk_object_slot(&prog_cache, h);
     if (entry->object) return prog_used(last_prog = entry->object);
@@ -6281,6 +6282,39 @@ void vk_exec_reset(void) {
     st_defaults();
 }
 
+_Static_assert(offsetof(ShaderKey, soft_linear_rep_v) - offsetof(ShaderKey, soft_linear) == 3 * sizeof(uint64_t),
+               "ShaderKey soft_linear fields must remain contiguous");
+
+static void stage_fill_soft_linear(int stage, const ShaderInfo *si, ShaderKey *k) {
+    k->soft_linear = k->soft_linear_mip = k->soft_linear_rep_u = k->soft_linear_rep_v = 0;
+    if (!vk_any_format_no_linear() || !si || !si->ntex || !st.tpool || !st.spool) return;
+    for (int i = 0; i < si->ntex && i < 64; i++) {
+        const ShaderTexture *t_ = &si->tex[i];
+        if (!t_->sampled || t_->shadow || t_->is_image ||
+            (t_->type != TEXTYPE_2D && t_->type != TEXTYPE_2D_ARRAY))
+            continue;
+        uint64_t h = shader_texture_handle(stage, t_);
+        if (!h) continue;
+        uint32_t tic = h & 0xFFFFF, tsc = (uint32_t)(h >> 20) & 0xFFF;
+        if (tic >= (uint32_t)st.tpool->count || tsc >= (uint32_t)st.spool->count) continue;
+        const NvnSamplerDesc *sd = &((const NvnSamplerDesc *)st.spool->entries)[tsc];
+        if (!(sd->mag_filter == 1 || sd->min_filter == 1 || sd->min_filter == 3 || sd->min_filter == 5)) continue;
+        uint32_t wu = sd->wrap[0], wv = sd->wrap[1];
+        // Emulate CLAMP/CLAMP_TO_EDGE (0, 7) and REPEAT (1); skip MIRROR* and CLAMP_TO_BORDER.
+        if ((wu != 0 && wu != 1 && wu != 7) || (wv != 0 && wv != 1 && wv != 7)) continue;
+        const NvnTexEntry *te = &((const NvnTexEntry *)st.tpool->entries)[tic];
+        if (!te->tex) continue;
+        NvnTexture *rt = naliases ? alias_read(te->tex) : te->tex;
+        VkFormat tfmt = vk_sampled_format(rt, &te->view, te->has_view);
+        if (tfmt == VK_FORMAT_UNDEFINED || vk_format_is_int(tfmt) || vk_format_filters_linear(tfmt)) continue;
+        uint64_t bit = 1ULL << i;
+        k->soft_linear |= bit;
+        if (sd->min_filter > 1) k->soft_linear_mip |= bit;
+        if (wu == 1) k->soft_linear_rep_u |= bit;
+        if (wv == 1) k->soft_linear_rep_v |= bit;
+    }
+}
+
 static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo *out, float sc[2], uint32_t wh[2]) {
     ShaderTexture *st_ = &si->tex[i];
     uint64_t h = shader_texture_handle(stage, st_);
@@ -6300,16 +6334,19 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
             extern uint64_t vk_frame_counter(void);
             static int nomemo = -1;
             if (nomemo < 0) nomemo = getenv("LARECOMP_VK_NO_TEX_MEMO") != NULL;
-            static struct { NvnTexture *tex; uint64_t vh, frame; uint32_t gen; uint8_t type, has_view; VkImageView view; } memo[1024];
+            static struct { NvnTexture *tex; uint64_t vh, frame; uint32_t gen; uint8_t type, has_view; VkFormat tfmt; VkImageView view; } memo[1024];
             uint64_t vh = e->has_view ? hash_words(0, &e->view, sizeof e->view) : 0, frame = vk_frame_counter();
             uint32_t ms = (uint32_t)((((uintptr_t)e->tex >> 4) ^ vh ^ (uint64_t)st_->type * 0x9E3779B97F4A7C15ull) & 1023);
             if (!nomemo && memo[ms].tex == e->tex && memo[ms].vh == vh && memo[ms].frame == frame && memo[ms].gen == vk_view_gen &&
                 memo[ms].type == st_->type && memo[ms].has_view == e->has_view) {
                 view = memo[ms].view;
+                tfmt = memo[ms].tfmt;
             } else {
-                view = vk_view(naliases ? alias_read(e->tex) : e->tex, &e->view, e->has_view, false, st_->type);
+                NvnTexture *rt = naliases ? alias_read(e->tex) : e->tex;
+                view = vk_view(rt, &e->view, e->has_view, false, st_->type);
+                tfmt = rt && rt->backend ? vk_sampled_format(rt, &e->view, e->has_view) : VK_FORMAT_UNDEFINED;
                 memo[ms].tex = e->tex; memo[ms].vh = vh; memo[ms].frame = frame; memo[ms].gen = vk_view_gen;
-                memo[ms].type = (uint8_t)st_->type; memo[ms].has_view = e->has_view; memo[ms].view = view;
+                memo[ms].type = (uint8_t)st_->type; memo[ms].has_view = e->has_view; memo[ms].tfmt = tfmt; memo[ms].view = view;
             }
             renderer_texture_scale(e->tex, &sc[0], &sc[1]);
             if (e->tex == scene_up.t && stage == 1) { view = scene_up_view(e); sc[0] = scene_up.sx; sc[1] = scene_up.sy; }
@@ -6337,10 +6374,6 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
                 }
         }
     }
-    if (h && st.tpool && tic < (uint32_t)st.tpool->count) {
-        NvnTexEntry *te = &((NvnTexEntry *)st.tpool->entries)[tic];
-        if (te->tex && te->tex->backend) tfmt = ((TexBackend *)te->tex->backend)->format;
-    }
     if (h && st.spool && tsc < (uint32_t)st.spool->count) {
         NvnSamplerDesc *sd = &((NvnSamplerDesc *)st.spool->entries)[tsc];
         smp = st_->shadow ? vk_sampler(sd) : vk_sampler_plain(sd);
@@ -6364,8 +6397,6 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
     }
     if (smp && tfmt != VK_FORMAT_UNDEFINED && h && st.spool && tsc < (uint32_t)st.spool->count) {
         // (a format the GPU doesn't filter linearly: the sampler's nearest twin - textures.c vk_format_filters_linear)
-        extern bool vk_format_filters_linear(VkFormat f);
-        extern VkSampler vk_sampler_nearest(NvnSamplerDesc *d, bool compare);
         if (!vk_format_filters_linear(tfmt))
             smp = vk_sampler_nearest(&((NvnSamplerDesc *)st.spool->entries)[tsc], st_->shadow);
     }
@@ -6607,10 +6638,15 @@ static void cs_free(CsProg *cp) {
     free(cp);
 }
 
-static CsProg *compute_program(NvnProgram *np) {
+static CsProg *compute_program(NvnProgram *np, const ShaderKey *slk) {
     NvnShaderStage *ss = &np->stages[5];
     if (!ss->code_addr) return NULL;
-    VkObjectEntry *entry = vk_object_slot(&compute_cache, ss->code_addr);
+    uint64_t key = ss->code_addr;
+    if (slk && slk->soft_linear) {
+        key = hash_words(key, &slk->soft_linear, 4 * sizeof(uint64_t));
+        if (!key) key = 1;
+    }
+    VkObjectEntry *entry = vk_object_slot(&compute_cache, key);
     if (entry->object) return entry->object;
     CsProg *cp = calloc(1, sizeof *cp);
     cp->code_addr = ss->code_addr;
@@ -6635,6 +6671,12 @@ static CsProg *compute_program(NvnProgram *np) {
 #endif
     ShaderKey k = {0};
     k.glsl = 1;
+    if (slk) {
+        k.soft_linear = slk->soft_linear;
+        k.soft_linear_mip = slk->soft_linear_mip;
+        k.soft_linear_rep_u = slk->soft_linear_rep_u;
+        k.soft_linear_rep_v = slk->soft_linear_rep_v;
+    }
 #ifdef __ANDROID__
     {   // Keep the cached binary lookup for graphics and Turnip; Qualcomm rejects it in large compute shaders.
         extern bool vk_driver_is_qualcomm(void);
@@ -6681,9 +6723,19 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
                     gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, i, (unsigned long long)st.sbuf[5][i].addr,
                     (unsigned long long)st.sbuf[5][i].size);
     }
-    CsProg *cp = compute_program(st.program);
+    CsProg *cp = compute_program(st.program, NULL);
     if (cp && !atomic_load(&cp->p.state)) stat_skipped_building++;
     if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
+    if (vk_any_format_no_linear()) {
+        ShaderKey ck = {0};
+        stage_fill_soft_linear(5, cp->si, &ck);
+        if (ck.soft_linear) {
+            CsProg *sl = compute_program(st.program, &ck);
+            int sl_state = sl ? atomic_load(&sl->p.state) : 2;
+            if (sl_state == 0) { stat_skipped_building++; stat_skipped++; return; }
+            if (sl_state == 1) cp = sl;
+        }
+    }
     {   // LARECOMP_SKIP_CS=<code address hex>[,...] (debug): skip those compute shaders' dispatches, to see what they do;
         // "store": every one that stores to global memory
         static uint64_t skip[16];
@@ -6903,6 +6955,14 @@ static void draw_(CmdRec *r, bool indexed) {
     if (maxwell_gmem_miss_log)  // (copy mode: early depth tests for the shaders that log misses - ShaderKey)
         fkey.no_ds_write = !st.rt.depth || !((st.ds[0] && st.ds[1]) || (st.ds[3] && ((st.stencil_mask[0] | st.stencil_mask[1]) & 0xFF)));
 #endif
+    ShaderKey vbase = vkey, fbase = fkey;
+    bool masks_done = false;
+    if (vk_any_format_no_linear() && last_prog && atomic_load(&last_prog->state) == 1 &&
+        last_prog->code[0] == st.program->stages[0].code_addr && last_prog->code[1] == st.program->stages[1].code_addr) {
+        stage_fill_soft_linear(0, last_prog->vi, &vkey);
+        stage_fill_soft_linear(1, last_prog->fi, &fkey);
+        masks_done = true;
+    }
     Prog *pr = get_program(st.program, &vkey, &fkey);
     bool keep = false;  // (a target built once and kept: wait for the shader and pipeline - wait_built)
     {   // (the same targets as the previous draw, same frame: their answer again - reading 6 texture objects a draw
@@ -6926,8 +6986,26 @@ static void draw_(CmdRec *r, bool indexed) {
         keep = kkeep;
     }
     if (pr && keep) wait_built(&pr->state);
+    if (masks_done && (vkey.soft_linear || fkey.soft_linear) && (!pr || atomic_load(&pr->state) == 2)) {
+        vkey = vbase;
+        fkey = fbase;
+        pr = get_program(st.program, &vkey, &fkey);
+        if (pr && keep) wait_built(&pr->state);
+    }
     if (pr && !atomic_load(&pr->state)) stat_skipped_building++;
     if (!pr || atomic_load(&pr->state) != 1) { stat_skipped++; skip_note("shader"); return; }
+    if (!masks_done && vk_any_format_no_linear()) {
+        ShaderKey vk2 = vkey, fk2 = fkey;
+        stage_fill_soft_linear(0, pr->vi, &vk2);
+        stage_fill_soft_linear(1, pr->fi, &fk2);
+        if (vk2.soft_linear || fk2.soft_linear) {
+            Prog *sl = get_program(st.program, &vk2, &fk2);
+            if (sl && keep) wait_built(&sl->state);
+            int sl_state = sl ? atomic_load(&sl->state) : 2;
+            if (sl_state == 0) { stat_skipped_building++; stat_skipped++; skip_note("shader"); return; }
+            if (sl_state == 1) { vkey = vk2; fkey = fk2; pr = sl; }
+        }
+    }
     {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t last_fs, last_hash;
         uint64_t fs = st.program->stages[1].code_addr;
@@ -8168,7 +8246,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
                       .srcOffsets = {{sx0, sy0, 0}, {sx0 + sw, sy0 + sh, 1}},
                       .dstSubresource = {depth ? (da & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : da) : da, dlv, dly, 1},
                       .dstOffsets = {{dx0, dy0, 0}, {dx0 + dw, dy0 + dh, 1}}};
-    bool linear = (flags & 1) && !depth && !rt_kind(st_->format);
+    bool linear = (flags & 1) && !depth && !rt_kind(st_->format) && vk_format_filters_linear(s->format);
     dl_note("  blit %p lv%u/%u %ux%u (%d,%d %dx%d) -> %p lv%u/%u %ux%u (%d,%d %dx%d) %s", (void *)s->image, slv, s->levels, s->width,
             s->height, sx0, sy0, sw, sh, (void *)d->image, dlv, d->levels, d->width, d->height, dx0, dy0, dw, dh, linear ? "linear" : "nearest");
     vkCmdBlitImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);

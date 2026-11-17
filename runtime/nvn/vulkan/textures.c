@@ -4,6 +4,7 @@
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #ifdef __ANDROID__
@@ -436,8 +437,49 @@ void vk_collect_dead(void) {
     vk_rp_collect(done);
 }
 
+static VkFormat resolve_tex_format(const NvnTexture *t, VkFormat *bc_vf_out, bool *astc_out, bool quiet) {
+    VkFormat vf = fmt_of(t->format).vf;
+    VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+    bool astc_used = false;
+#ifdef __ANDROID__
+    static int no_bc = -1;  // LARECOMP_NO_BC=1 (a test): as a GPU without BC - the CPU decode on an Adreno
+    if (no_bc < 0) no_bc = getenv("LARECOMP_NO_BC") != NULL;
+    if (!format_supports(vf, need) || (no_bc && is_bc(vf))) {
+#else
+    if (!format_supports(vf, need)) {
+#endif
+        bool astc = vf >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && vf <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK;
+        const FormatInfo *fi = t->layout.fmt;
+#ifdef __ANDROID__
+        uint32_t bpp;
+        if (is_bc(vf) && fi && (fi->bpb == 8 || fi->bpb == 16) && fi->bw == 4 && fi->bh == 4 &&
+            format_supports(bc_target(vf, &bpp), need)) {
+            if (!quiet) {
+                static bool told;
+                if (!told) { told = true; LOG("[vk] no BC textures on this GPU: decoded on the CPU at upload\n"); }
+            }
+            bc_vf = vf;
+            vf = bc_target(vf, &bpp);
+        } else
+#endif
+        if (astc && fi && fi->bpb == 16) {  // desktop GPUs: decoded on the CPU into an RGBA8 image of the same colour space
+            astc_used = true;
+            vf = t->format >= 0x87 ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
+        } else {
+            if (!quiet) {
+                static int nlog;
+                if (nlog++ < 20) LOG("[vk] format %d (nvn %#x) not supported: RGBA8 instead\n", vf, t->format);
+            }
+            vf = VK_FORMAT_R8G8B8A8_UNORM;
+        }
+    }
+    if (bc_vf_out) *bc_vf_out = bc_vf;
+    if (astc_out) *astc_out = astc_used;
+    return vf;
+}
+
 static void create_image(NvnTexture *t, TexBackend *b) {
-    VkFmt mf = fmt_of(t->format);
     b->scalable = b->rs_group != RS_NONE;
     b->sx = g_rs[b->rs_group][0];
     b->sy = g_rs[b->rs_group][1];
@@ -467,39 +509,18 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     }
     uint32_t samples = t->samples > 1 ? t->samples : 1;
     if (samples > 1) levels = 1;
-    VkFormat vf = mf.vf;
-    VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     b->astc_bw = b->astc_bh = 0;
+    VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+    bool astc_used = false;
+    VkFormat vf = resolve_tex_format(t, &bc_vf, &astc_used, false);
 #ifdef __ANDROID__
-    b->bc_vf = VK_FORMAT_UNDEFINED;
-    static int no_bc = -1;  // LARECOMP_NO_BC=1 (a test): as a GPU without BC - the CPU decode on an Adreno
-    if (no_bc < 0) no_bc = getenv("LARECOMP_NO_BC") != NULL;
-    if (!format_supports(vf, need) || (no_bc && is_bc(vf))) {
-#else
-    if (!format_supports(vf, need)) {
+    b->bc_vf = bc_vf;
 #endif
-        bool astc = vf >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && vf <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK;
+    if (astc_used) {
         const FormatInfo *fi = t->layout.fmt;
-#ifdef __ANDROID__
-        uint32_t bpp;
-        if (is_bc(vf) && fi && (fi->bpb == 8 || fi->bpb == 16) && fi->bw == 4 && fi->bh == 4 &&
-            format_supports(bc_target(vf, &bpp), need)) {
-            static bool told;
-            if (!told) { told = true; LOG("[vk] no BC textures on this GPU: decoded on the CPU at upload\n"); }
-            b->bc_vf = vf;
-            vf = bc_target(vf, &bpp);
-        } else
-#endif
-        if (astc && fi && fi->bpb == 16) {  // desktop GPUs: decoded on the CPU into an RGBA8 image of the same colour space
-            b->astc_bw = fi->bw;
-            b->astc_bh = fi->bh;
-            b->astc_srgb = t->format >= 0x87;
-            vf = b->astc_srgb ? VK_FORMAT_R8G8B8A8_SRGB : VK_FORMAT_R8G8B8A8_UNORM;
-        } else {
-            static int nlog;
-            if (nlog++ < 20) LOG("[vk] format %d (nvn %#x) not supported: RGBA8 instead\n", vf, t->format);
-            vf = VK_FORMAT_R8G8B8A8_UNORM;
-        }
+        b->astc_bw = fi->bw;
+        b->astc_bh = fi->bh;
+        b->astc_srgb = t->format >= 0x87;
     }
     bool depthfmt = renderer_format_is_depth(t->format);
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
@@ -1458,23 +1479,54 @@ static int rt3d_mode(void) {
 
 // render: attachment view (one level, one layer). Otherwise a sampled view of type want_textype (TEXTYPE_*),
 // with the NVN component swizzle, converting between compatible types the way renderer.m does.
+static VkFormat view_format(VkFormat base_fmt, VkFormat bc_vf, VkImageAspectFlags aspect, bool fixed_fmt, VkFormat view_alt,
+                            const NvnTexture *t, const NvnTextureView *v, bool has_view, bool warn) {
+    if (!has_view) v = NULL;
+    VkFormat fmt = base_fmt;
+    if (v && (v->setmask & 4) && !(aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
+        VkFormat vf = fmt_of(v->format).vf;
+        if (vk_format(t->format) == base_fmt) fmt = vf;  // (fallback images keep their own format)
+#ifdef __ANDROID__
+        else if (bc_vf && is_bc(vf)) { uint32_t bpp; fmt = bc_target(vf, &bpp); }  // (decoded BC: its sRGB / UNORM view)
+#endif
+        if (fixed_fmt && fmt != base_fmt && fmt != view_alt) {  // (not in its format list: create_image)
+            if (warn) {
+                static int nlog;
+                if (nlog++ < 8) LOG("[vk] a view of render target %ux%u (nvn %#x) as nvn %#x: in its own format\n", t->width, t->height,
+                                    t->format, v->format);
+            }
+            fmt = base_fmt;
+        }
+    }
+    return fmt;
+}
+
+VkFormat vk_sampled_format(NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    if (!t) return VK_FORMAT_UNDEFINED;
+    if (t->backend) {
+        const TexBackend *b = (const TexBackend *)t->backend;
+#ifdef __ANDROID__
+        VkFormat bc_vf = b->bc_vf;
+#else
+        VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+#endif
+        return view_format(b->format, bc_vf, b->aspect, b->fixed_fmt, b->view_alt, t, v, has_view, false);
+    }
+    VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+    VkFormat vf = resolve_tex_format(t, &bc_vf, NULL, true);
+    VkImageAspectFlags asp = renderer_format_is_depth(t->format) ? aspect_of(t->format) : VK_IMAGE_ASPECT_COLOR_BIT;
+    return view_format(vf, bc_vf, asp, false, VK_FORMAT_UNDEFINED, t, v, has_view, false);
+}
+
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype) {
     TexBackend *b = vk_tex(t, render);
     if (!has_view) v = NULL;
-    VkFormat fmt = b->format;
-    if (v && (v->setmask & 4) && !(b->aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
-        VkFormat vf = fmt_of(v->format).vf;
-        if (vk_format(t->format) == b->format) fmt = vf;  // (fallback images keep their own format)
 #ifdef __ANDROID__
-        else if (b->bc_vf && is_bc(vf)) { uint32_t bpp; fmt = bc_target(vf, &bpp); }  // (decoded BC: its sRGB / UNORM view)
+    VkFormat bc_vf = b->bc_vf;
+#else
+    VkFormat bc_vf = VK_FORMAT_UNDEFINED;
 #endif
-        if (b->fixed_fmt && fmt != b->format && fmt != b->view_alt) {  // (not in its format list: create_image)
-            static int nlog;
-            if (nlog++ < 8) LOG("[vk] a view of render target %ux%u (nvn %#x) as nvn %#x: in its own format\n", t->width, t->height,
-                                t->format, v->format);
-            fmt = b->format;
-        }
-    }
+    VkFormat fmt = view_format(b->format, bc_vf, b->aspect, b->fixed_fmt, b->view_alt, t, v, has_view, true);
     uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
     uint32_t nlv = v && (v->setmask & 1) && v->num_levels ? v->num_levels : b->levels + b->skip - lv0;
     if (b->skip) {  // (the guest's levels, the image's from b->skip on: create_image)
@@ -1900,6 +1952,46 @@ VkSampler vk_sampler_plain(NvnSamplerDesc *d) {
     return p;
 }
 
+bool vk_format_is_int(VkFormat f) {
+    switch (f) {
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT:
+    case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
+    case VK_FORMAT_R8G8B8_UINT: case VK_FORMAT_R8G8B8_SINT:
+    case VK_FORMAT_B8G8R8_UINT: case VK_FORMAT_B8G8R8_SINT:
+    case VK_FORMAT_R8G8B8A8_UINT: case VK_FORMAT_R8G8B8A8_SINT:
+    case VK_FORMAT_B8G8R8A8_UINT: case VK_FORMAT_B8G8R8A8_SINT:
+    case VK_FORMAT_A8B8G8R8_UINT_PACK32: case VK_FORMAT_A8B8G8R8_SINT_PACK32:
+    case VK_FORMAT_A2R10G10B10_UINT_PACK32: case VK_FORMAT_A2R10G10B10_SINT_PACK32:
+    case VK_FORMAT_A2B10G10R10_UINT_PACK32: case VK_FORMAT_A2B10G10R10_SINT_PACK32:
+    case VK_FORMAT_R16_UINT: case VK_FORMAT_R16_SINT:
+    case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16_SINT:
+    case VK_FORMAT_R16G16B16_UINT: case VK_FORMAT_R16G16B16_SINT:
+    case VK_FORMAT_R16G16B16A16_UINT: case VK_FORMAT_R16G16B16A16_SINT:
+    case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT:
+    case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT:
+    case VK_FORMAT_R32G32B32_UINT: case VK_FORMAT_R32G32B32_SINT:
+    case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT:
+    case VK_FORMAT_R64_UINT: case VK_FORMAT_R64_SINT:
+    case VK_FORMAT_S8_UINT:
+        return true;
+    default:
+        return false;
+    }
+}
+
+static _Atomic int g_any_no_linear;
+
+bool vk_any_format_no_linear(void) {
+    int v = atomic_load_explicit(&g_any_no_linear, memory_order_relaxed);
+    if (v & 1) return (v & 2) != 0;
+    int bits = 1;
+    if (!getenv("LARECOMP_NO_FILTER_FALLBACK") &&
+        !format_supports(VK_FORMAT_R16G16B16A16_UNORM, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT))
+        bits |= 2;
+    v = atomic_fetch_or_explicit(&g_any_no_linear, bits, memory_order_relaxed) | bits;
+    return (v & 2) != 0;
+}
+
 // A format the GPU can't filter linearly (no SAMPLED_IMAGE_FILTER_LINEAR): undefined through a linear sampler. Mali's
 // drivers list R16G16B16A16_UNORM so - BOTW's grass reads one in its vertex shader, and an older driver returned
 // garbage: the grass stretched and black (#307 Immortalis-G715, #258 G68; #244, Propinbo). Those take the sampler's
@@ -1909,7 +2001,10 @@ bool vk_format_filters_linear(VkFormat f) {
     static int n;
     for (int i = 0; i < n; i++) if (cache[i].f == f) return cache[i].ok;
     bool ok = format_supports(f, VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT) || getenv("LARECOMP_NO_FILTER_FALLBACK");
-    if (!ok) LOG("[vk] format %d can't be filtered linearly on this GPU: its textures sampled nearest\n", f);
+    if (!ok) {
+        if (!vk_format_is_int(f)) atomic_fetch_or_explicit(&g_any_no_linear, 3, memory_order_relaxed);
+        LOG("[vk] format %d can't be filtered linearly on this GPU: its textures sampled nearest\n", f);
+    }
     if (n < 64) cache[n].f = f, cache[n].ok = ok, n++;
     return ok;
 }
@@ -1969,6 +2064,7 @@ static VkSampler make_sampler(const NvnSamplerDesc *d, bool compare) {
     static int stest = -1;
     if (stest < 0) stest = getenv("LARECOMP_SAMPLER_TEST") != NULL;
     if (stest && mf > 1) { si.minLod = 0; si.maxLod = VK_LOD_CLAMP_NONE; si.anisotropyEnable = VK_TRUE; si.maxAnisotropy = 16; }
+    if (g_force_nearest) { si.anisotropyEnable = VK_FALSE; si.maxAnisotropy = 1.0f; }
     if (d->compare_mode && compare) {
         si.compareEnable = VK_TRUE;
         si.compareOp = getenv("LARECOMP_NO_SHADOW") ? VK_COMPARE_OP_ALWAYS : compare_op(d->compare_func);
