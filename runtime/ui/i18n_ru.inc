@@ -581,6 +581,8 @@
  "Удалить DLC"},
 {"DLC removed.",
  "DLC удалено."},
+{"The DLC's file is damaged or incomplete. The game runs without it: reinstall it with Install DLC, or Remove DLC.",
+ "Файл DLC повреждён или неполный. Игра запускается без него: установите DLC заново кнопкой «Установить DLC» или нажмите «Удалить DLC»."},
 {"DLC installed. Start the game: the title shows Master Mode.",
  "DLC установлено. Запустите игру: на титульном экране появится режим мастера."},
 {"No DLC there: choose the folder with the DLC's romfs (System/AocVersion.txt and Pack).",

@@ -581,6 +581,8 @@
  "移除 DLC"},
 {"DLC removed.",
  "DLC 已移除。"},
+{"The DLC's file is damaged or incomplete. The game runs without it: reinstall it with Install DLC, or Remove DLC.",
+ "DLC 檔案已損毀或不完整。遊戲將在沒有 DLC 的情況下執行：請用「安裝 DLC」重新安裝，或選擇「移除 DLC」。"},
 {"DLC installed. Start the game: the title shows Master Mode.",
  "DLC 已安裝。啟動遊戲後，標題畫面會出現大師模式。"},
 {"No DLC there: choose the folder with the DLC's romfs (System/AocVersion.txt and Pack).",

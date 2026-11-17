@@ -4,6 +4,7 @@
 #include <fcntl.h>
 #include <stdlib.h>
 #include <string.h>
+#include <time.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -607,7 +608,7 @@ static Service *open_romfs_storage(void) {
 // (LARECOMP_AOC_IMAGE=<path> for tests). The game mounts it as aoc: (nn::fs::MountAddOnContent ->
 // OpenDataStorageByDataId) once aoc:u lists both packs (services/misc.c).
 #define AOC_DATA_ID 0x01007EF00011F001ull
-const char *fs_aoc_image(void) {
+static const char *aoc_path(void) {
     static char path[1100];
     const char *e = getenv("LARECOMP_AOC_IMAGE");
     char root[1024];
@@ -615,7 +616,41 @@ const char *fs_aoc_image(void) {
     else if (rt_version_root(100, root, sizeof root)) snprintf(path, sizeof path, "%s/dlc/aoc.bin", root);
     else return NULL;
     struct stat sb;
-    return !stat(path, &sb) && sb.st_size > 0 ? path : NULL;
+    return !stat(path, &sb) ? path : NULL;
+}
+
+// The DLC's image checked as the main romfs.bin is (its header against its size): a copy that stopped early kept its
+// header, and listing the DLC's packs anyway had the game's SDK abort 1 s after OpenDataStorageByDataId failed (#472,
+// aoc.bin with 0.00 of its 1.39 GB). Remembered per size and time, as the launcher asks every frame.
+static bool aoc_state(const char **path, char *why, size_t why_size) {
+    static char seen[1100], reason[128];
+    static off_t seen_size = -1;
+    static time_t seen_time;
+    static bool ok;
+    const char *p = aoc_path();
+    struct stat sb;
+    if (!p || stat(p, &sb)) return false;
+    if (strcmp(seen, p) || seen_size != sb.st_size || seen_time != sb.st_mtime) {
+        snprintf(seen, sizeof seen, "%s", p);
+        seen_size = sb.st_size, seen_time = sb.st_mtime;
+        reason[0] = 0;
+        ok = romfs_image_ok(p, reason, sizeof reason);
+        if (!ok) LOG("[fs] the DLC's data (%s) is incomplete or damaged: %s\n", p, reason);
+    }
+    *path = p;
+    if (why && why_size) snprintf(why, why_size, "%s", reason);
+    return ok;
+}
+
+const char *fs_aoc_image(void) {  // NULL when not set up, or damaged (fs_aoc_damaged)
+    const char *p;
+    return aoc_state(&p, NULL, 0) ? p : NULL;
+}
+
+// A DLC file there that can't be used: why (for the launcher, which says so and offers Install/Remove).
+bool fs_aoc_damaged(char *why, size_t why_size) {
+    const char *p;
+    return aoc_path() && !aoc_state(&p, why, why_size);
 }
 
 static Service *open_aoc_storage(void) {

@@ -581,6 +581,8 @@
  "DLC verwijderen"},
 {"DLC removed.",
  "DLC verwijderd."},
+{"The DLC's file is damaged or incomplete. The game runs without it: reinstall it with Install DLC, or Remove DLC.",
+ "Het DLC-bestand is beschadigd of onvolledig. De game draait zonder DLC: installeer de DLC opnieuw met \"DLC installeren\" of kies \"DLC verwijderen\"."},
 {"DLC installed. Start the game: the title shows Master Mode.",
  "DLC geïnstalleerd. Start het spel: het titelscherm toont Master Mode."},
 {"No DLC there: choose the folder with the DLC's romfs (System/AocVersion.txt and Pack).",

@@ -581,6 +581,8 @@
  "DLC 제거"},
 {"DLC removed.",
  "DLC를 제거했습니다."},
+{"The DLC's file is damaged or incomplete. The game runs without it: reinstall it with Install DLC, or Remove DLC.",
+ "DLC 파일이 손상되었거나 불완전합니다. DLC 없이 게임이 실행됩니다. 'DLC 설치'로 다시 설치하거나 'DLC 제거'를 누르세요."},
 {"DLC installed. Start the game: the title shows Master Mode.",
  "DLC를 설치했습니다. 게임을 시작하면 타이틀에 마스터 모드가 나옵니다."},
 {"No DLC there: choose the folder with the DLC's romfs (System/AocVersion.txt and Pack).",

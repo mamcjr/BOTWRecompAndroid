@@ -581,6 +581,8 @@
  "DLC entfernen"},
 {"DLC removed.",
  "DLC entfernt."},
+{"The DLC's file is damaged or incomplete. The game runs without it: reinstall it with Install DLC, or Remove DLC.",
+ "Die DLC-Datei ist beschädigt oder unvollständig. Das Spiel läuft ohne sie: Installiere die DLC neu mit „DLC installieren“ oder wähle „DLC entfernen“."},
 {"DLC installed. Start the game: the title shows Master Mode.",
  "DLC installiert. Starte das Spiel: der Titelbildschirm zeigt den Meister-Modus."},
 {"No DLC there: choose the folder with the DLC's romfs (System/AocVersion.txt and Pack).",
