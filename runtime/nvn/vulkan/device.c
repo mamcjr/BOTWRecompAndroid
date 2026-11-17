@@ -2018,6 +2018,7 @@ static void quick_exit_handler(void) {
     static int trace = -1;
     if (trace < 0) trace = getenv("LARECOMP_VK_TRACE") != NULL;
     if (g_vk.dev) {
+        vk_shader_build_report("exit");
 #ifndef __ANDROID__
         if (trace) LOG("[vk] exit: waiting for the GPU\n");
         vkDeviceWaitIdle(g_vk.dev);

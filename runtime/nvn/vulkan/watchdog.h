@@ -6,7 +6,7 @@
 // other thread (the game's) have a place each. vk_wd_enter returns what was there, for vk_wd_leave to put back.
 enum {
     WD_NONE, WD_R_WAIT_GAME, WD_R_TRANSLATE, WD_R_PRESENT_REQ, WD_R_FENCE_REQ, WD_R_CALL_REQ, WD_R_SUBMIT, WD_R_SEQ_WAIT,
-    WD_R_ACQUIRE, WD_R_QUEUE_PRESENT, WD_R_SWAPCHAIN, WD_GPU_WAIT, WD_G_QUEUE_FULL, WD_G_WAIT_ID, WD_G_DRAIN, WD_G_SYNCWAIT,
+    WD_R_ACQUIRE, WD_R_QUEUE_PRESENT, WD_R_SWAPCHAIN, WD_R_BUILD_WAIT, WD_GPU_WAIT, WD_G_QUEUE_FULL, WD_G_WAIT_ID, WD_G_DRAIN, WD_G_SYNCWAIT,
     WD_STAGES
 };
 typedef struct { uint32_t stage, outer; uint64_t ns, arg; } WdMark;
