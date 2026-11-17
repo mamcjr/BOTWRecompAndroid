@@ -101,9 +101,15 @@ static void failed_why(char *why, size_t why_size, const char *what, int r) {
 
 static void sleep_ms(int ms) { plat_sleep_until_ns(plat_now_ns() + (uint64_t)ms * 1000000ull); }
 
-static int wait_for(PlatProc p) {
+static int wait_for(PlatProc p, const GameBuildOpts *o) {
     int r;
-    while ((r = finished(p)) < 0) sleep_ms(20);
+    while ((r = finished(p)) < 0) {
+        // asked from outside while it links (PLAY / Later): the linker is ended at once, not waited out - the
+        // objects stay, the next build links again from them, and the UI thread's join is over in a moment,
+        // not the link's minutes (a stoppable link, so no app-not-responding)
+        if (o && o->stopped && o->stopped()) { stop(p); return 128 + 9; }
+        sleep_ms(20);
+    }
     return r;
 }
 
@@ -318,6 +324,14 @@ static void add_cflags(Args *a, const Tools *t) {
     }
 }
 
+// The fast (-O0, Android-only) build's two bits of state, at file scope: the mode flag (opts->fast, read by
+// start_compile) and the marker a fast library carries. A fast library is marked, not silent: its .id file is
+// "<GAMELIB_ID>-fast" and its own GameLibTables->id says the same (gamelib.c id_matches / gamelib_fast_present).
+// A distinct marker is what makes the scheme safe - with the same id as a full one it would look complete and never
+// be rebuilt.
+static bool g_fast_build;  // (opts->fast: everything at -O0 - the quick first build a phone set up with)
+#define GAMELIB_ID_FAST GAMELIB_ID "-fast"
+
 #ifdef __ANDROID__
 // Hot / cold (LASRecompAndroid's): compiling the generated C at -O1 is most of the setup's time on a phone, and most of
 // the game's functions never run in a play session. gamelib-src/hot_functions_<version>.txt (tools/hot_functions.py:
@@ -463,11 +477,14 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
     Args a = {0};
     compiler(&a, t);
     add_cflags(&a, t);
-    if (u->o0) add(&a, "-O0");  // (after GAMELIB_CFLAGS' -O1: the last one counts)
+    if (u->o0 || g_fast_build) add(&a, "-O0");  // (after GAMELIB_CFLAGS' -O1: the last one counts)
     char inc[1200];
     snprintf(inc, sizeof inc, "-I%s", t->inc);
     add(&a, inc);
-    add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID "\"");
+    // (a fast library's own id says fast: a marker to upgrade, not a finished library - gamelib.c id_matches. The
+    // id is part of GAMELIB_ID's hash in a full build's C too: a fast one isn't that library)
+    if (g_fast_build) add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID_FAST "\"");
+    else add(&a, "-DGAMELIB_ID=\"" GAMELIB_ID "\"");
     add(&a, "-c");
     add(&a, u->src);
     add(&a, "-o");
@@ -480,11 +497,13 @@ static PlatProc start_compile(const Tools *t, const Unit *u) {
 // ------------------------------------------------------------------ going on after the app closed
 // What the objects in .gamebuild were compiled from: this builder (GAMELIB_ID), its compile flags and the game code's
 // build ids. The flags too: 0.2.1 took them from zig's Debug mode (UBSan at -O0) without a new GAMELIB_ID, so a build
-// 0.2.0 had begun went on with its objects and the library wanted __ubsan_* symbols (issues #56, #60)
-static void build_stamp(const char *game_dir, char *out, size_t n) {
+// 0.2.0 had begun went on with its objects and the library wanted __ubsan_* symbols (issues #56, #60). The mode too:
+// a fast build's objects are -O0 with the fast id - a full build must not go on from them (it would leave a mixed
+// library whose .id says complete), and a fast one not from a full build's.
+static void build_stamp(const char *game_dir, bool fast, char *out, size_t n) {
     uint32_t h = 2166136261u;  // (FNV-1a)
     for (const char *s = GAMELIB_CFLAGS; *s; s++) h = (h ^ (uint8_t)*s) * 16777619u;
-    int k = snprintf(out, n, "%s %08x", GAMELIB_ID, h);
+    int k = snprintf(out, n, "%s%s %08x", GAMELIB_ID, fast ? "-fast" : "", h);
     static const char *const mods[2] = {"main", "sdk"};
     for (int m = 0; m < 2 && k > 0 && (size_t)k < n; m++) {
         char p[1100];
@@ -529,7 +548,9 @@ static void mark_done(const Unit *u) {
 // phone until it overheated (issue #25): one more starts only with 1.5 GB of memory available, a second after the last
 // one, and on a hot phone no more than half of them run - Android's thermal status moderate or worse, its headroom
 // near throttling, or the battery past 42 degrees (the activity's, once a second; a CPU zone read 70 degrees on the
-// POCO F7 Ultra from the build's first second, so it doesn't count). One always runs.
+// POCO F7 Ultra from the build's first second, so it doesn't count). One always runs. The same floors in a fast
+// (-O0) build: its compilers are lighter, but the giant files' peak is what killed the 4 GB phones (#25/#47/#51),
+// whatever the mode.
 static bool may_start_another(int nrun, int jobs) {
     static uint64_t last_start;
     static int last_cap = -1;  // (0: waiting for memory)
@@ -557,6 +578,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     uint64_t t0 = plat_now_ns();
     static bool registered;
     if (!registered) registered = true, atexit(end_all);
+    g_fast_build = o->fast;
     Tools t;
     if (!find_tools(&t)) {
         snprintf(why, why_size, "the game code builder is missing from this copy of BOTWRecompAndroid");
@@ -587,14 +609,21 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     }
 #endif
     // A build the system stopped (the app closed: issues #18, #25) goes on where it was: the objects compiled for the same
-    // game code by the same builder stay in .gamebuild (each with a .ok beside it once whole); only the rest is compiled
+    // game code by the same builder stay in .gamebuild (each with a .ok beside it once whole); only the rest is compiled.
+    // The mode is part of the stamp: a fast build's -O0 objects are never gone on from by a full one (a mixed library,
+    // its .id saying complete), nor a full one's by a fast.
     char stamp[256], stamp_path[1200];
-    build_stamp(game_dir, stamp, sizeof stamp);
+    build_stamp(game_dir, o->fast, stamp, sizeof stamp);
     snprintf(stamp_path, sizeof stamp_path, "%s" SEP "stamp.txt", work);
     bool resume = same_text(stamp_path, stamp);
     if (!resume) rt_remove_game_file(game_dir, ".gamebuild");
-    rt_remove_game_file(game_dir, GAMELIB_NAME);
-    rt_remove_game_file(game_dir, GAMELIB_NAME ".id");
+    if (!o->keep_current) {
+        // The old library and its .id go only when they are to be replaced by this build's result: a build that keeps
+        // the current one (the fast library's -O1 upgrade) leaves them in place until the new library is whole - a
+        // failed upgrade then changes nothing, and Play during one keeps the library that loaded.
+        rt_remove_game_file(game_dir, GAMELIB_NAME);
+        rt_remove_game_file(game_dir, GAMELIB_NAME ".id");
+    }
     mkdir(work, 0755);
     {
         FILE *sf = fopen(stamp_path, "wb");
@@ -603,11 +632,13 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     int resumed = 0;
 #ifdef __ANDROID__
     android_env(work);
-    load_hot_for(game_dir);
+    if (!o->fast) load_hot_for(game_dir);
     {   // (the previous one in internal storage: a failed build must not leave it looking current)
-        char idp[1200];
-        snprintf(idp, sizeof idp, "%s.id", lib);
-        remove(lib), remove(idp);
+        if (!o->keep_current) {
+            char idp[1200];
+            snprintf(idp, sizeof idp, "%s.id", lib);
+            remove(lib), remove(idp);
+        }
     }
 #endif
     if (t.zig) {  // its caches in the work folder too (deleted below), not ~/.cache: hundreds of MB, used once
@@ -664,6 +695,13 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         add_unit(&units, t.entry, work, "gamelib_entry");
     }
     while (ok) {
+        // asked from outside (PLAY / Later / a setup needs the builders): stop where this is - the compilers end,
+        // the work folder stays, the next build goes on from it
+        if (o->stopped && o->stopped()) {
+            snprintf(why, why_size, "postponed");
+            ok = false;
+            break;
+        }
         // generator progress, newly finished files
         bool gens_done = true;
         double gen_frac = 0;
@@ -727,8 +765,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
 #endif
 #ifdef __ANDROID__  // (unit 0 is the shipped entry file; a file that can't be marked just stays at -O1)
             Unit *nu = &units.u[next];
-            if (next > 0 && !nu->marked) {
-                nu->marked = true;
+            if (next > 0 && !nu->marked) {  // (fast too: no hot list is loaded, so nothing is marked cold - but the
+                nu->marked = true;       //  giant files are still found, and they build alone: Unit.alone, the floors)
                 if (!mark_cold(nu->src, &nu->o0, &nu->alone))
                     LOG("[gamebuild] couldn't mark cold functions in %s\n", nu->src);
                 if (nu->alone) LOG("[gamebuild] %s has a giant function: at -O0, no other compiler beside it\n", nu->src);
@@ -780,6 +818,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         if (gens[i].p && gens[i].exit < 0) stop(gens[i].p);
 
     // 2. link
+    if (ok && o->stopped && o->stopped()) ok = false;  // (the link is minutes of its own: not worth it when stopped)
     if (ok) {
         if (o->progress) o->progress(shown > 0.95 ? shown : 0.95, "Finishing...");
         char rsp[1100], log[1100];
@@ -829,8 +868,12 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         }
         PlatProc p = f ? spawn(a.v, log) : 0;
         args_free(&a);
-        int r = p ? wait_for(p) : 255;
-        if (r != 0) {
+        int r = p ? wait_for(p, o) : 255;
+        if (r == 128 + 9 && o->stopped && o->stopped()) {  // (ended by a stop, not the system: not a failure -
+            LOG("[gamebuild] link postponed\n");           //  the objects stay, the next one links again)
+            snprintf(why, why_size, "postponed");
+            ok = false;
+        } else if (r != 0) {
             char last[300];
             log_tail(log, last, sizeof last);
             LOG("[gamebuild] linking failed: %s\n", last);
@@ -839,11 +882,15 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         }
     }
     if (ok) {
-        remove(lib);
+        // A keep-current build (the fast library's -O1 upgrade) swaps the new library in only here, whole: until then
+        // the one that loaded is what runs - a failed build, or the app closed mid-way, changes nothing. The rename
+        // replaces the old file in one step (nothing is removed first: a kill between a remove and a rename would
+        // leave no library at all); the .id lands after it, of the build that just finished (fast: "<id>-fast").
         char idp[1100];
         snprintf(idp, sizeof idp, "%s.id", lib);
         FILE *f = NULL;
-        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", GAMELIB_ID) < 0) {
+        const char *id = o->fast ? GAMELIB_ID_FAST : GAMELIB_ID;
+        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", id) < 0) {
             snprintf(why, why_size, "the game code couldn't be saved");
             ok = false;
         }
@@ -854,8 +901,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     // the C, the objects, the logs - kept after a failure, for the next build to go on from
     if (ok) rt_remove_game_file(game_dir, ".gamebuild");
 #ifdef __ANDROID__
-    LOG("[gamebuild] %llu of %llu functions cold (optnone, or %llu files all cold at -O0), %llu giant (their files at "
-        "-O0)\n", g_cold_fns, g_all_fns, g_cold_files, g_heavy_fns);
+    LOG("[gamebuild] %s build: %llu of %llu functions cold (optnone, or %llu files all cold at -O0), %llu giant (their "
+        "files at -O0)\n", g_fast_build ? "fast -O0" : "full", g_cold_fns, g_all_fns, g_cold_files, g_heavy_fns);
 #endif
     LOG("[gamebuild] %s in %.0fs\n", ok ? "done" : "failed", (double)(plat_now_ns() - t0) / 1e9);
     if (ok && o->progress) o->progress(1, "Finishing...");
