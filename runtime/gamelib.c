@@ -16,7 +16,6 @@
 
 static const GameLibTables *g_tables;
 static char g_error[256];
-static bool g_fast;  // (the loaded library was built fast: everything -O0, an upgrade pending - launcher.mm)
 
 // The library's id file (<library>.id, written next to it by the build): its GAMELIB_ID, read without loading it.
 // A fast (-O0) library is marked "<GAMELIB_ID>-fast" (gamebuild.c): it loads like any other - the game runs, a
@@ -126,10 +125,10 @@ bool gamelib_present(const char *game_dir) {
 }
 
 // The library in place is a fast one, without loading it (its .id says "-fast"): what the start screen's background
-// upgrade keys on (runtime/ui/launcher.mm). boot() loads the library only after the start screen, so the marker on
-// disk - not the loaded library - is what says an upgrade is pending. True of the loaded one too, once it is.
+// upgrade keys on (runtime/ui/launcher.mm). Read from disk every call: the upgrade can finish during a later title
+// screen of the same process and replace the marker with a full build's, and the library that stands loaded in the
+// process (the fast one, until a reboot hands over what the upgrade built) must not answer for what is on the disk.
 bool gamelib_fast_present(const char *game_dir) {
-    if (g_tables) return g_fast;
     char c[3][1100];
     int n = candidates(game_dir, c);
     for (int i = 0; i < n; i++)
@@ -184,7 +183,6 @@ static const GameLibTables *open_lib(const char *path) {
         snprintf(g_error, sizeof g_error, "%s was built for another version", path);
         return NULL;  // (left loaded: nothing of it runs)
     }
-    g_fast = !strcmp(t->id, GAMELIB_ID "-fast");
 #ifdef __ANDROID__
     // its addresses follow the guest window wherever it is (gen.py --dyn-base: botwgame_gb)
     void (*set_base)(uint64_t) = (void (*)(uint64_t))dlsym(h, "botwgame_set_guest_base");

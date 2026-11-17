@@ -448,7 +448,7 @@ static std::string setup_dest(void) {
 static std::atomic<bool> g_upgrade_stop;    // (set by upgrade_postpone: gamebuild_run's loop reads it between units)
 static std::atomic<float> g_upgrade_frac;   // (-1: not running, else 0..1 - the status line's percent)
 static std::atomic<int> g_upgrade_note;     // (1: postponed, 2: failed - shown a few seconds where the percent was)
-static std::atomic<uint64_t> g_note_at_ms;  // (SDL_GetTicks64 when it was set; the note dies on its own)
+static std::atomic<uint64_t> g_note_at_ms;  // (SDL_GetTicks when it was set; the note dies on its own)
 static bool g_upgrade_started, g_upgrade_postponed;
 static pthread_t g_upgrade_th;
 static bool g_upgrade_th_live;
@@ -479,13 +479,13 @@ static void *upgrade_thread(void *) {
     android_call("buildServiceStop");
     g_upgrade_frac = -1;
     if (g_upgrade_stop) {  // (PLAY / Later / a setup: stopped where it was, resumable - not a failure)
-        g_upgrade_note = 1, g_note_at_ms = SDL_GetTicks64();
+        g_upgrade_note = 1, g_note_at_ms = SDL_GetTicks();
         fprintf(stderr, "[launcher] upgrade postponed at %d%%\n", was);
     } else if (ok) {
         fprintf(stderr, "[launcher] upgrade done\n");
         set_job("Game files ready.");
     } else {
-        g_upgrade_note = 2, g_note_at_ms = SDL_GetTicks64();
+        g_upgrade_note = 2, g_note_at_ms = SDL_GetTicks();
         fprintf(stderr, "[launcher] upgrade failed: %s\n", why);
         set_job(tr("The game code upgrade didn't finish; the game still runs."), true);
     }
@@ -494,7 +494,7 @@ static void *upgrade_thread(void *) {
 
 // The start screen starts it once nothing else is going on: a fast library in place (its marker on disk - boot()
 // loads the library only after the start screen) and the player at the menu, the phone in their hand. Once per
-// process; a postponement keeps it stopped until the app is opened again.
+// title screen (a fresh one resets the flags below); a postponement keeps it stopped until the next one.
 static void upgrade_offer(bool at_menu, bool busy) {
     static double next;
     double now = ImGui::GetTime();
@@ -519,15 +519,17 @@ static void upgrade_offer(bool at_menu, bool busy) {
 
 // Stopping it: PLAY (the game gets the phone to itself), the Later button, a game-files delete, or a setup starting
 // (its own build needs the builders). The build stops where it is - the work folder stays, the next one goes on
-// from it - and the thread is waited for: nothing of it runs into the game. Any thread; idempotent.
+// from it, a running link included (it is ended at once, not waited out: the objects stay, and the join below is
+// over in a moment, so the UI thread never stands still for it) - and the thread is waited for: nothing of it runs
+// into the game. Any thread; idempotent.
 static void upgrade_postpone(void) {
     pthread_mutex_lock(&g_upg_lock);
     if (g_upgrade_started) {
         g_upgrade_stop = true;
         if (g_upgrade_th_live) pthread_join(g_upgrade_th, NULL);
         g_upgrade_th_live = false;
-        g_upgrade_postponed = true;  // (not again this run: the next app start offers it)
-        g_upgrade_note = 1, g_note_at_ms = SDL_GetTicks64();
+        g_upgrade_postponed = true;  // (not again until the next title screen, where it offers itself again)
+        g_upgrade_note = 1, g_note_at_ms = SDL_GetTicks();
     }
     pthread_mutex_unlock(&g_upg_lock);
 }
@@ -2860,9 +2862,9 @@ extern "C" void launcher_run(const char *root) {
                         upgrade_postpone();
 #endif
                     }
-                } else if (note && SDL_GetTicks64() - note_at < 8000) {
+                } else if (note && SDL_GetTicks() - note_at < 8000) {
                     ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "\xe2\x96\xb8  %s", tr(note == 1
-                        ? "The upgrade is postponed: it goes on the next time the app is opened."
+                        ? "The upgrade is postponed: it resumes at the next title screen."
                         : "The game code upgrade didn't finish; the game still runs."));
                 } else {
                 {  // a drawn check mark (the Switch font has no ✓)

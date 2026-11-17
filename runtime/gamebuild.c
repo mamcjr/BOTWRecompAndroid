@@ -101,9 +101,15 @@ static void failed_why(char *why, size_t why_size, const char *what, int r) {
 
 static void sleep_ms(int ms) { plat_sleep_until_ns(plat_now_ns() + (uint64_t)ms * 1000000ull); }
 
-static int wait_for(PlatProc p) {
+static int wait_for(PlatProc p, const GameBuildOpts *o) {
     int r;
-    while ((r = finished(p)) < 0) sleep_ms(20);
+    while ((r = finished(p)) < 0) {
+        // asked from outside while it links (PLAY / Later): the linker is ended at once, not waited out - the
+        // objects stay, the next build links again from them, and the UI thread's join is over in a moment,
+        // not the link's minutes (a stoppable link, so no app-not-responding)
+        if (o && o->stopped && o->stopped()) { stop(p); return 128 + 9; }
+        sleep_ms(20);
+    }
     return r;
 }
 
@@ -862,8 +868,12 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         }
         PlatProc p = f ? spawn(a.v, log) : 0;
         args_free(&a);
-        int r = p ? wait_for(p) : 255;
-        if (r != 0) {
+        int r = p ? wait_for(p, o) : 255;
+        if (r == 128 + 9 && o->stopped && o->stopped()) {  // (ended by a stop, not the system: not a failure -
+            LOG("[gamebuild] link postponed\n");           //  the objects stay, the next one links again)
+            snprintf(why, why_size, "postponed");
+            ok = false;
+        } else if (r != 0) {
             char last[300];
             log_tail(log, last, sizeof last);
             LOG("[gamebuild] linking failed: %s\n", last);
