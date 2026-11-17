@@ -320,12 +320,16 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
     // Only once the world has been on screen for a while (LAG_SETTLE frames, the pause menu and map counting): with the
     // lag on from the start, some ponds stayed white for the whole session, and turned on later in play they were right
     // (2026-10-28, POCO F7 Ultra; issue #43 on an Adreno 740) - the water's colour taken once, while loading, from a GPU
-    // result the lag made a frame old. So each load (the save, a fast travel) runs its first seconds without it.
+    // result the lag made a frame old. So each load (the save, a fast travel) ran its first 300 frames without it - and
+    // on a slower GPU those were ~12 s at 17-20 fps after every load (#465, Adreno 825). Re-checked 2026-11-17 on the
+    // POCO with the player's save on the Plateau tower, looking down at the ruins' pond: right with the lag on from
+    // the start too (the write-back fixes since), the same as with 300. Now 30 frames, a second.
     // Away from the world for 45 frames in a row before that: closing the pause menu, the game is unpaused while
     // its screen is still up (framepace_on_title for a few frames), and each menu cost the next 300 frames their lag -
     // ~12 s at ~26 fps instead of 30 after every menu (#374 #439 #433, POCO F7 Ultra 2026-11-15). A load lasts seconds.
     if (lag > 0 && env_lag < 0) {
-        enum { LAG_SETTLE = 300 };
+        static int LAG_SETTLE = -1;  // (LARECOMP_LAG_SETTLE=<frames>: 300 as before)
+        if (LAG_SETTLE < 0) LAG_SETTLE = getenv("LARECOMP_LAG_SETTLE") ? atoi(getenv("LARECOMP_LAG_SETTLE")) : 30;
         static int lag_away = -1;  // (LARECOMP_LAG_AWAY=<frames>, 0: as before - an A/B)
         if (lag_away < 0) lag_away = getenv("LARECOMP_LAG_AWAY") ? atoi(getenv("LARECOMP_LAG_AWAY")) : 45;
         extern uint64_t vk_scene_frame(void), renderer_present_count(void);
@@ -344,7 +348,11 @@ NVN(nvnSyncWait) {  // NVN_SYNC_WAIT_RESULT_ALREADY_SIGNALED
             away_since = 0;
             if (!world_since) world_since = now;
         }
-        if (!world_since || !world || now - world_since < LAG_SETTLE) lag = 0;
+        if (!world_since || !world || now - world_since < (uint64_t)LAG_SETTLE) lag = 0;
+        static bool was_on;
+        if ((lag > 0) != was_on && (was_on = lag > 0))
+            LOG("[synclag] on at frame %llu (the world back since frame %llu)\n", (unsigned long long)now,
+                (unsigned long long)world_since);
     }
     extern int vk_ab(const char *what);
     int ab = vk_ab("synclag");
