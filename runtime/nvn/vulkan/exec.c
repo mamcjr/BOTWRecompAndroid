@@ -2152,6 +2152,9 @@ static volatile uint64_t g_scene_frame;
 uint64_t vk_scene_frame(void) { return g_scene_frame; }
 
 static VkRect2D scissor_rect(void);
+static NvnTexture *inplace_tex[4];  // (targets this draw samples in place while writing them: resolve_feedback)
+static int ninplace;
+static void snapshots_invalidate_for(NvnTexture *t, const char *why);
 // No submissions in the middle of a frame (LARECOMP_VK_CHUNK_US, LARECOMP_VK_SPLIT_US) while a menu is up (inventory, map,
 // pause: hle/framepace.c framepace_in_menu): each one has the vertex cache read the game's memory again (vc_flush), and
 // by then the game was writing its next frame's text - the menus' letters were those of other words, a frame at a time
@@ -2241,12 +2244,19 @@ static void begin_pass(void) {
         if (st.rt.ncolor && st.rt.has_cview[0] && (st.rt.cview[0].setmask & 1) && st.rt.cview[0].base_level) g_pass_layer = -1;  // (mips: not these)
     }
     wb_npass = 0;
+    uint32_t unowned_slots = 0, unowned_wb = 0;
+    uint32_t att_ew[8] = {0}, att_eh[8] = {0};
     for (int i = 0; i < st.rt.ncolor; i++) {
         NvnTexture *t = st.rt.color[i];
         ca[i] = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
         pass_color[i] = VK_FORMAT_UNDEFINED;
         if (!t) continue;
         uint32_t lv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
+        TexBackend *b0 = t->backend;
+        bool was_unowned = !b0 || !b0->gpu_owned;
+        for (int j = 0; !was_unowned && unowned_slots && j < i && j < 8; j++)
+            if (st.rt.color[j] == t && ((unowned_slots >> j) & 1)) was_unowned = true;
+        if (was_unowned && i < 8) unowned_slots |= 1u << i;
         if (lv) vk_tex_upload_for_mips(t);
         renderer_mark_gpu_owned(t);
         VkFormat vf = VK_FORMAT_UNDEFINED;  // the attachment's format and extent
@@ -2276,6 +2286,7 @@ static void begin_pass(void) {
             ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
         }
         ca[i].imageView = v;
+        if (i < 8) { att_ew[i] = ew; att_eh[i] = eh; }
         ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -2285,8 +2296,11 @@ static void begin_pass(void) {
             ca[i].clearValue.color.float32[3] = fresh ? 0.0f : 1.0f;
         }
         pass_color[i] = vf;
-        if (wb_eligible(t, b, lv) && !(st.rt.has_cview[i] && ((st.rt.cview[i].setmask & ~3u) || st.rt.cview[i].min_layer)))
-            wb_pass[wb_npass++] = t;  // (a view of its level 0 / layer 0 only)
+        if (wb_eligible(t, b, lv)) {
+            if (!(st.rt.has_cview[i] && ((st.rt.cview[i].setmask & ~3u) || st.rt.cview[i].min_layer)))
+                wb_pass[wb_npass++] = t;  // (a view of its level 0 / layer 0 only)
+            if (was_unowned && i < 8) unowned_wb |= 1u << i;
+        }
         if (!w) { renderer_texture_scale(t, &pass_sx, &pass_sy); w = ew; }
         if (ew < minw) minw = ew;
         if (eh < minh) minh = eh;
@@ -2367,6 +2381,17 @@ static void begin_pass(void) {
                 } else break;
                 lclear[nlclear].rec = q, lclear[nlclear].aspects = asp, nlclear++;
                 q = (const CmdRec *)((const uint8_t *)q + q->size);
+            }
+        }
+    }
+    if (unowned_wb) {
+        for (uint32_t i = 0; i < pass_ncolor && i < 8; i++) {
+            if (!((unowned_wb >> i) & 1) || !ca[i].imageView) continue;
+            if (ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR && att_ew[i] <= minw && att_eh[i] <= minh) continue;
+            if (vk_tex_upload_for_load(st.rt.color[i])) {
+                bool armed_inplace = false;
+                for (int k = 0; k < ninplace; k++) armed_inplace |= inplace_tex[k] == st.rt.color[i];
+                if (!armed_inplace) snapshots_invalidate_for(st.rt.color[i], "cpu-upload");
             }
         }
     }
@@ -3586,8 +3611,6 @@ static NvnTexture *feedback_tex[4];
 static VkImageView feedback_view[4];
 static TexBackend *feedback_snap[4];  // (the snapshot copy itself: array views of it are made at binding)
 static int nfeedback;
-static NvnTexture *inplace_tex[4];  // (targets this draw samples in place while writing them: resolve_feedback)
-static int ninplace;
 static int g_inplace_copy = -1;  // (those targets copied instead; -1: not decided yet this boot - vk_exec_reset)
 static uint64_t g_cur_fs_hash;
 static NvnTexture *snap_tex[8];
@@ -3598,6 +3621,10 @@ static const char *snap_reason = "?";
 static void snapshots_invalidate(NvnTexture *t) {
     for (int i = 0; i < 8; i++)
         if ((!t || snap_tex[i] == t) && snap_ok[i]) { snap_ok[i] = false; snap_fb_dirty[i] = false; snap_why[i] = snap_reason; }
+}
+static void snapshots_invalidate_for(NvnTexture *t, const char *why) {
+    snap_reason = why;
+    snapshots_invalidate(t);
 }
 static void snapshots_mark_fb_dirty(NvnTexture *t) {
     for (int i = 0; i < 8; i++) if (snap_tex[i] == t && snap_ok[i]) snap_fb_dirty[i] = true;
@@ -3685,7 +3712,10 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
     Snap *s = NULL;
     for (int i = 0; i < nsnaps; i++) if (snaps[i].key == t) s = &snaps[i];
     if (!s) {
-        if (nsnaps == 16) { static int rr; s = &snaps[rr++ & 15]; } else s = &snaps[nsnaps++];
+        for (int i = 0; i < nsnaps; i++) if (!snaps[i].key) { s = &snaps[i]; break; }
+        if (!s) {
+            if (nsnaps == 16) { static int rr; s = &snaps[rr++ & 15]; } else s = &snaps[nsnaps++];
+        }
         s->key = t;
     }
     TexBackend *d = &s->copy;
@@ -3894,11 +3924,20 @@ static bool alias_make(NvnTexture *src, NvnTexture *dst, TexBackend *s, TexBacke
     return true;
 }
 
-// textures.c: t is being freed - an alias source hands its contents over first
+// textures.c: t is being freed - an alias source hands its contents over first, and feedback caches forget dead pointers
 void vk_alias_texture_destroyed(NvnTexture *t) {
     if (naliases) alias_before_write(t, 0, "freed");
+    for (int i = 0; i < 8; i++)
+        if (snap_tex[i] == t) { snap_tex[i] = NULL; snap_ok[i] = false; snap_fb_dirty[i] = false; }
+    for (int i = 0; i < nsnaps; i++) if (snaps[i].key == t) snaps[i].key = NULL;
+    for (int i = 0; i < ninplace; i++) if (inplace_tex[i] == t) inplace_tex[i] = NULL;
 }
-void vk_alias_reset(void) { naliases = 0; }  // (reboot: every texture goes)
+void vk_alias_reset(void) {
+    naliases = 0;
+    ninplace = 0;
+    for (int i = 0; i < 8; i++) { snap_tex[i] = NULL; snap_ok[i] = false; snap_fb_dirty[i] = false; }
+    for (int i = 0; i < nsnaps; i++) snaps[i].key = NULL;
+}  // (reboot: every texture goes)
 
 // (renderer_stats, once per stats interval) copies made aliases / renamed / partly or fully copied later
 void vk_alias_stats(void) {
@@ -3989,6 +4028,11 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
                 }
                 extern int vk_ab(const char *what);
                 if (!g_inplace_copy && bit && bit < 1u << 8 && AB("copy") != 1) {
+                    TexBackend *b0 = t->backend;
+                    if (!b0 || !b0->gpu_owned) {
+                        for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t) snaps[k].key = NULL;
+                        snapshots_invalidate_for(t, "unowned");
+                    }
                     int si = -1;
                     for (int k = 0; k < 8; k++) if (snap_tex[k] == t) si = k;
                     if (si < 0 || !snap_ok[si]) {
@@ -4009,7 +4053,22 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
             if (nosnap < 0) nosnap = getenv("LARECOMP_NO_SNAPSHOT_REUSE") != NULL;
             int si = -1;
             for (int k = 0; k < 8; k++) if (snap_tex[k] == t) si = k;
+            TexBackend *b0 = t->backend;
+            bool was_unowned = !b0 || !b0->gpu_owned;
             TexBackend *src = vk_tex(t, true);
+            if (was_unowned) {
+                bool uploaded_sync = false;
+                for (int k = 0; k < st.rt.ncolor; k++) {
+                    if (st.rt.color[k] != t) continue;
+                    uint32_t lv = st.rt.has_cview[k] && (st.rt.cview[k].setmask & 1) ? st.rt.cview[k].base_level : 0;
+                    if (!lv && wb_eligible(t, src, 0)) {
+                        uploaded_sync = vk_tex_upload_for_load(t);
+                        break;
+                    }
+                }
+                for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t) snaps[k].key = NULL;
+                snapshots_invalidate_for(t, uploaded_sync ? "cpu-upload" : "unowned");
+            }
             Snap *existing = NULL;
             for (int k = 0; k < nsnaps; k++) if (snaps[k].key == t && snaps[k].copy.image) existing = &snaps[k];
             VkImageAspectFlags sa = src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT ? VK_IMAGE_ASPECT_DEPTH_BIT : src->aspect;
@@ -7115,6 +7174,7 @@ static void draw_(CmdRec *r, bool indexed) {
         gres_premerge((pr->vi->uses_gmem_map ? 1u : 0u) | (pr->fi->uses_gmem_map ? 2u : 0u));  // (before the pass opens)
 #endif
     begin_pass();
+    ninplace = 0;
     VkCommandBuffer cb = vk_cmd();
 
     uint32_t mode = (uint32_t)r->x[0];
