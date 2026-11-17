@@ -217,7 +217,49 @@ typedef struct {
     AVPacket *pkt;
     bool have_pkt, eof;
     bool skippable;  // the launch opening (forced on the first launch, no save yet): A / B / + ends it
+    AVIOContext *mem;  // the built-in black movie's reader (ex_open_blank), else NULL
+    size_t mem_pos;
 } Extractor;
+
+#include "movie_blank.inc"
+static int blank_read(void *opaque, uint8_t *buf, int n) {
+    Extractor *e = opaque;
+    size_t left = sizeof k_blank_webm - e->mem_pos;
+    if (!left) return AVERROR_EOF;
+    if ((size_t)n > left) n = (int)left;
+    memcpy(buf, k_blank_webm + e->mem_pos, (size_t)n);
+    e->mem_pos += (size_t)n;
+    return n;
+}
+static int64_t blank_seek(void *opaque, int64_t off, int whence) {
+    Extractor *e = opaque;
+    if (whence == AVSEEK_SIZE) return (int64_t)sizeof k_blank_webm;
+    int64_t to = (whence & 3) == SEEK_CUR ? (int64_t)e->mem_pos + off : (whence & 3) == SEEK_END ? (int64_t)sizeof k_blank_webm + off : off;
+    if (to < 0 || to > (int64_t)sizeof k_blank_webm) return -1;
+    e->mem_pos = (size_t)to;
+    return to;
+}
+static void ex_close(Extractor *e) {
+    if (e->fmt) avformat_close_input(&e->fmt);  // (a custom reader is the caller's to free)
+    if (e->mem) { av_freep(&e->mem->buffer); avio_context_free(&e->mem); }
+}
+// The built-in black movie (movie_blank.inc), read from memory: for a dump without its Movie folder, where the game
+// crashed on the failed open (#470).
+static bool ex_open_blank(Extractor *e) {
+    ex_close(e);
+    uint8_t *buf = av_malloc(4096);
+    e->mem = buf ? avio_alloc_context(buf, 4096, 0, e, blank_read, NULL, blank_seek) : NULL;
+    if (!e->mem) { av_free(buf); return false; }
+    e->mem_pos = 0;
+    e->fmt = avformat_alloc_context();
+    if (!e->fmt) { ex_close(e); return false; }
+    e->fmt->pb = e->mem;
+    if (avformat_open_input(&e->fmt, NULL, NULL, NULL) < 0 || avformat_find_stream_info(e->fmt, NULL) < 0) {
+        ex_close(e);
+        return false;
+    }
+    return true;
+}
 
 static bool g_skip_held;           // ex_fill: A / B held at the last look
 static double g_skip_pressed_at;    // when they were pressed (0 = not yet)
@@ -287,15 +329,16 @@ static void ex_set_data_source(Cpu *c) {
             }
         if (dir) closedir(dir);
     }
+    ex_close(e);  // (a source set again)
     bool stand_in = false;
     if (avformat_open_input(&e->fmt, host, NULL, NULL) < 0 || avformat_find_stream_info(e->fmt, NULL) < 0) {
         // A movie that isn't there crashed the game (#113: the Zora's Domain cutscene, a dump used in place): an
         // error, or no video track (tried: a null object at +0x188), are things it never sees on the Switch. In its
         // place, another movie of the same folder from its last moments: a video track that ends at once.
-        if (e->fmt) avformat_close_input(&e->fmt);
+        ex_close(e);
         char *slash = strrchr(host, '/');
         DIR *dir = NULL;
-        if (slash) { *slash = 0; dir = opendir(host); *slash = '/'; }
+        if (slash && !getenv("LARECOMP_MOVIE_NONE")) { *slash = 0; dir = opendir(host); *slash = '/'; }  // (test: none beside it)
         for (struct dirent *de; dir && (de = readdir(dir));) {
             size_t n = strlen(de->d_name);
             if (n < 5 || strcasecmp(de->d_name + n - 5, ".webm")) continue;
@@ -306,13 +349,16 @@ static void ex_set_data_source(Cpu *c) {
                 stand_in = true;
                 break;
             }
-            if (e->fmt) avformat_close_input(&e->fmt);
+            ex_close(e);
         }
         if (dir) closedir(dir);
-        if (!stand_in) {
-            LOG("[movie] cannot open %s, nor any movie beside it\n", host);
-            c->x[0] = 1;
-            return;
+        if (!stand_in) {  // (no movie beside it either - a dump without its Movie folder, #470: a black one, built in)
+            if (!ex_open_blank(e)) {
+                LOG("[movie] cannot open %s, nor any movie beside it, nor the black one\n", host);
+                c->x[0] = 1;
+                return;
+            }
+            LOG("[movie] cannot open %s, nor any movie beside it: a black one in its place\n", host);
         }
     }
     e->pkt = av_packet_alloc();
@@ -445,7 +491,7 @@ static void movie_track(int kind, void *p, bool add) {
 
 static void ex_dtor(Cpu *c) {
     Extractor *e = self_state(c);
-    if (e && e->fmt) avformat_close_input(&e->fmt);
+    if (e) ex_close(e);
     if (e) movie_track(0, e, false);
     c->x[0] = 0;
 }
@@ -930,7 +976,7 @@ static void dec_dtor(Cpu *c) {
 RT_ON_RESET(movie_reset) {
     for (int i = 0; i < MAX_MOVIE_OBJS; i++) {
         Extractor *e = g_movie_objs[0][i];
-        if (e && e->fmt) avformat_close_input(&e->fmt);
+        if (e) ex_close(e);
         Decoder *d = g_movie_objs[1][i];
         if (d && d->ctx) avcodec_free_context(&d->ctx);
         g_movie_objs[0][i] = g_movie_objs[1][i] = NULL;
