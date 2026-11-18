@@ -1188,6 +1188,8 @@ static void android_create_surface(struct ANativeWindow *aw) {
 // Frame rate 40 / 45 (#207, #216): between 30 and 60, at a rate the screen shows evenly - 40 fps is three vsyncs at
 // 120 Hz, 45 two at 90 Hz; at 60 Hz neither is (25 / 16.7 ms frames), so 30 there. The POCO F7 Ultra's system kept
 // its 120 Hz when asked for 45 fps content (2026-11-03): the screen's own rate decides, read once a second.
+static int between_for(float hz) { return hz > 110 ? 40 : hz > 80 ? 45 : hz > 50 ? 30 : 45; }
+
 int vk_between_fps(void) {
     static int fps = 45;
     static uint64_t next;
@@ -1196,11 +1198,26 @@ int vk_between_fps(void) {
         next = now + 1000000000ull;
         const SDL_DisplayMode *m = SDL_GetCurrentDisplayMode(SDL_GetDisplayForWindow(window));
         float hz = m ? m->refresh_rate : 0;
-        int f = hz > 110 ? 40 : hz > 80 ? 45 : hz > 50 ? 30 : 45;
+        int f = between_for(hz);
         if (f != fps) LOG("[vk] Frame rate 40 / 45: %d fps on a %.0f Hz screen\n", f, hz);
         fps = f;
     }
     return fps;
+}
+
+// ... and the one the window asks for (android_frame_rate): from the fastest rate the screen offers, not the current
+// one - HyperOS keeps a game at 60 Hz on a 120 Hz screen until it asks for more, so from the current rate 40 / 45 fell
+// to 30 and never asked (POCO F7 Pro, 2026-11-15). The frame rate itself still follows the screen's rate
+// (vk_between_fps): 30 until the system switches, and on a system that won't.
+static int vk_between_target(void) {
+    static int fps;
+    if (!fps) {
+        extern float plat_max_refresh_hz(void);
+        float hz = plat_max_refresh_hz();
+        fps = hz > 0 ? between_for(hz) : -1;
+        LOG("[vk] Frame rate 40 / 45: the screen offers up to %.0f Hz\n", hz);
+    }
+    return fps > 0 ? fps : vk_between_fps();
 }
 
 // (hle/benchmark.c) the screen's refresh rate now
@@ -1215,7 +1232,7 @@ double vk_display_hz(void) {
 static void android_frame_rate(struct ANativeWindow *aw) {
     static struct ANativeWindow *asked_aw;
     static float asked = -1;
-    float want = fps_mode_now() == 4 && vk_between_fps() != 30 ? (float)vk_between_fps() : 0.0f;
+    float want = fps_mode_now() == 4 && vk_between_target() != 30 ? (float)vk_between_target() : 0.0f;
     bool fg = false;
     {   // Frame generation on: room on the screen for the frames it makes - the chosen frame rate times its multiplier
         // (60 fps x 2: 120 Hz). Android leaves a game at 60 Hz unless asked, and then a 40-50 fps game left no refresh
