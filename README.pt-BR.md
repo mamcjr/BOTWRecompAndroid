@@ -14,7 +14,7 @@ O projeto parte do motor do **[LAS Recomp](https://github.com/peiikai/LASRecomp)
 > [!WARNING]
 > **Beta.** Testado principalmente em um celular (POCO F7 Ultra, Adreno 830, driver Mesa Turnip). O desempenho e a
 > compatibilidade variam entre aparelhos; espere bugs, sobretudo em GPUs ainda não testadas fisicamente. Veja as
-> [notas da 0.4.6-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.6-beta) e as
+> [notas da 0.4.7-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.7-beta) e as
 > [notas de desenvolvimento](docs/BOTW-PORT.md).
 
 ## Plataforma suportada
@@ -75,6 +75,9 @@ Windows, Linux e macOS podem continuar sendo usados como ambientes de desenvolvi
   vez de 10 (#465), controles de toque escondidos por um sensor de digital (#477), sem fechar com os vídeos ou o
   arquivo da DLC faltando ou danificado, travas mais seguras no modo Nativo na 1.0.0 / 1.6.0, filtro bilinear em
   GPUs Mali que não o têm para alguns formatos, e pré-aquecimento de pipelines opcional.
+- **0.4.7:** o mapa e o minimapa escuros com a Economia de RAM ligada (#471 #478), a opção Vídeo > Sombras,
+  Taxa de quadros 40 / 45 pela maior taxa da tela, menos esperas por shaders (os urgentes primeiro, um cache da
+  tradução), slots de textura na Mali sem esperas, e um relatório de travamento no log (#401).
 - **Problemas conhecidos:** a grama baixa só aparece de perto; reflexos da água podem acompanhar a câmera; o fundo
   do menu de pausa pode ficar preto no driver padrão da Qualcomm; Link pode piscar no primeiro golpe no modo nativo;
   a chuva cai mais devagar que no console.
@@ -130,7 +133,7 @@ Desde a **0.2.12-beta**, enquanto você joga no mundo, os controles de toque mos
    **Configurações > Arquivos > Driver Vulkan**. Se o app informar que o driver Vulkan é antigo ao abrir, toque e
    segure o ícone do app e escolha **Escolher driver** antes de iniciar o jogo.
 
-Atualizar da 0.2.x para a 0.4.6-beta não exige recompilar o código do jogo. Os shaders são compilados novamente uma
+Atualizar da 0.2.x para a 0.4.7-beta não exige recompilar o código do jogo. Os shaders são compilados novamente uma
 vez, então os primeiros minutos podem ter travadinhas. Para relatar um problema, abra uma
 [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) com celular, GPU, driver, versão do jogo e um log de
 **Configurações > Arquivos > Salvar um arquivo de log**.
