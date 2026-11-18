@@ -735,3 +735,7 @@
  "파이프라인 사전 빌드 (실험적)"},
 {"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
  "월드에서 사용된 그래픽스 파이프라인을 기록해 세이브를 불러오는 동안 백그라운드에서 미리 빌드하여, 처음 진입할 때 그리기가 대기하거나 건너뛰는 일을 줄입니다. 기본값은 꺼짐입니다. 다음에 세이브를 불러올 때 적용됩니다."},
+{"Shadows",
+ "그림자"},
+{"The game's shadows: of the sun, of Link and of everything around. Off: none are drawn - the picture is flatter and evenly lit, for a little less GPU work each frame; only worth it on a phone at its limit. Applies at once.",
+ "게임의 그림자: 태양, 링크, 주변의 모든 것의 그림자. 끄기: 그림자를 그리지 않습니다 - 화면이 더 평평하고 고르게 밝아지며, 프레임마다 GPU 작업이 조금 줄어듭니다. 성능이 한계인 휴대폰에서만 권장합니다. 즉시 적용됩니다."},

@@ -735,3 +735,7 @@
  "パイプラインの事前構築 (実験的)"},
 {"Records graphics pipelines used in the world and builds them on background workers while a save loads, so fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.",
  "フィールドで使われたグラフィックスパイプラインを記録し、セーブデータのロード中にバックグラウンドで構築することで、入った直後の描画待ちやスキップを減らします。既定ではオフです。次にセーブデータをロードしたときに反映されます。"},
+{"Shadows",
+ "影"},
+{"The game's shadows: of the sun, of Link and of everything around. Off: none are drawn - the picture is flatter and evenly lit, for a little less GPU work each frame; only worth it on a phone at its limit. Applies at once.",
+ "ゲームの影（太陽、リンク、周囲のすべての影）。オフ：影を描画しません。画面は平坦で均一に明るくなり、GPU の負荷がフレームごとに少し減ります。性能に余裕のない端末でのみおすすめです。すぐに反映されます。"},

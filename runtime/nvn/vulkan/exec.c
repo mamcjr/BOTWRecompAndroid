@@ -7587,6 +7587,20 @@ static void draw_(CmdRec *r, bool indexed) {
             }
         }
         for (int i = 0; i < nskip; i++) if (last_hash == skip[i]) { stat_skipped++; return; }
+        {   // Video > Shadows off (g_settings.shadows; LARECOMP_SHADOWS=0 / 1 over it): the draws of a depth-only pass into a
+            // target outside the 3D scene's skipped - the shadow maps. In BOTW 1.8.2 that is one target, the sun's
+            // cascades (896x896, 3 layers): no depth pre-pass or occlusion pass matched, and with them gone the scene
+            // is evenly lit. Mostly a look; it pays on a phone at its limit. A/B in one run (LARECOMP_AB=60:shadow, drawn
+            // on side B), Adreno 750, 720p: at 30 fps GPU -0.8 ms, the same power; at 60 fps (GPU-bound) 55.4 -> 59.3 fps,
+            // GPU 18.3 -> 15.5 ms, render thread 17.0 -> 13.3 ms.
+            static int env = -2;
+            if (env == -2) env = getenv("LARECOMP_SHADOWS") ? atoi(getenv("LARECOMP_SHADOWS")) != 0 : -1;
+            if (!(env >= 0 ? env : g_settings.shadows) && AB("shadow") != 1 &&
+                st.rt.ncolor == 0 && st.rt.depth && vk_texture_scale_group(st.rt.depth) != RS_SCENE) {
+                stat_skipped++;
+                return;
+            }
+        }
         {   // LARECOMP_SKIPVS=1 (diagnosis): build/skipvs.txt lists vertex shader code addresses ("3da039b00,3da258600";
             // empty: none) whose draws are skipped - re-read twice a second, so a draw can be found by toggling it while
             // the game runs
