@@ -1238,8 +1238,9 @@ NVN(nvnTexturePoolGetSize) { RET(G(uint32_t, A(0), 24)); }
 // before it see the old texture, those after the new one, as on the GPU. It used to wait for the render thread to
 // catch up (vk_async_drain) instead: ~30 times a frame in the overworld, ~1.5 s of every 2 s of the game's threads
 // on a Galaxy Tab A9+ (2026-11-13) and ~2,100-2,400 stalls (~1.0-1.2 s of every 2 s) on Mali-G925 - the game's
-// core 0 held meanwhile. With the render thread idle it is written at once. Enabled by default on low-RAM devices
-// and Mali (vk_slot_async_default); LARECOMP_SLOT_DRAIN=1 / 0: the wait, as before / queued.
+// core 0 held meanwhile; on an Adreno 750 (Snapdragon 8 Gen 3, Turnip, 2026-11-18) at 60 fps 44.2 -> 53.4 fps, the GPU
+// idle 4.9 -> 0.9 ms a frame. With the render thread idle it is written at once. Enabled by default on every device
+// (vk_slot_async_default); LARECOMP_SLOT_DRAIN=1 / 0: the wait, as before / queued.
 typedef struct {
     NvnDescPool *d;
     int id;

@@ -2342,10 +2342,8 @@ bool vk_driver_is_mali(void) {
     return cur >= 0 ? cur > 0 : g_vk.props.vendorID == 0x13B5;
 }
 
-bool vk_slot_async_default(void) {
-    extern bool vk_low_ram(void);
-    return vk_low_ram() || vk_driver_is_mali();
-}
+// Texture slots queued for the render thread (objects.c SlotReg): every device, low-RAM and Mali first, then the rest.
+bool vk_slot_async_default(void) { return true; }
 #endif
 
 void backend_init(void) {
