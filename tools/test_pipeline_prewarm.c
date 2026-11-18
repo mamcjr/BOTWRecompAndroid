@@ -61,7 +61,8 @@ typedef struct {
     uint64_t hash;
     VkPipeline pipe;
     _Atomic int state;
-    uint64_t used, seq;
+    uint32_t used_s;
+    uint64_t seq;
     bool evicted;
     bool prewarmed;
 } Pipe;
@@ -69,7 +70,7 @@ typedef struct {
 static struct {
     VkDevice dev;
     VkPhysicalDeviceProperties props;
-    bool dyn_render, eds, eds2, divisor, exec_stats;
+    bool dyn_render, eds, eds2, divisor, exec_stats, dyn_vi;
 } g_vk = {
     .props = {.vendorID = 0x13b5, .deviceID = 0xd8300010, .driverVersion = 49,
               .pipelineCacheUUID = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
@@ -403,6 +404,72 @@ int main(void) {
     assert(prewarm_scene_frame() == 204);
     assert(pw_pending == NULL && !pw_read && !pw_loading && !pw_saw_title);
     assert(pw_queued_boot == 0 && pw_ready_boot == 0);
+
+    // dyn_vi toggle invalidates saved static-VI prewarm file and rejects non-zero vertex fields
+    g_vk.dyn_vi = true;
+    assert(prewarm_parse_and_validate(raw, raw_n) == 0);
+    PwRecord dyn_rec = {0};
+    dyn_rec.prog = (PwProgId){.vs_h = 0x11ull, .fs_h = 0x22ull, .key_h = 0x33ull, .nv = 10, .nf = 10};
+    PipeKey dyn_k = {.ncolor = 1, .samples = 1, .topo_class = 2};
+    memcpy(dyn_rec.baked, &dyn_k.color, PW_BAKED_SIZE);
+    assert(prewarm_valid_record(&dyn_rec));
+    dyn_k.attr_mask = 1u;
+    memcpy(dyn_rec.baked, &dyn_k.color, PW_BAKED_SIZE);
+    assert(!prewarm_valid_record(&dyn_rec));
+    dyn_k.attr_mask = 0;
+    dyn_k.used_streams = 1u;
+    memcpy(dyn_rec.baked, &dyn_k.color, PW_BAKED_SIZE);
+    assert(!prewarm_valid_record(&dyn_rec));
+    dyn_k.used_streams = 0;
+    dyn_k.stride[0] = 32u;
+    memcpy(dyn_rec.baked, &dyn_k.color, PW_BAKED_SIZE);
+    assert(!prewarm_valid_record(&dyn_rec));
+
+    // dyn_vi = true save + reload round-trip, prewarm_tick hash parity, and true -> false invalidation
+    free_caches();
+    prewarm_clear_records();
+    free(pw_records);
+    pw_records = NULL;
+    pw_alloc_cap = 0;
+    remove(PW_PATH);
+    prewarm_reset();
+    Prog dp = make_prog(0x7777);
+    vk_object_slot(&prog_cache, 77)->object = &dp;
+    PipeKey dk_rec = {.prog = &dp, .color = {VK_FORMAT_R8G8B8A8_UNORM}, .depth = VK_FORMAT_D32_SFLOAT, .ncolor = 1, .samples = 1, .topo_class = 2};
+    mock_title = false;
+    g_scene_frame = 210;
+    mock_frame = 210;
+    prewarm_record(&dk_rec);
+    assert(pw_count == 1 && prewarm_save());
+    FILE *df = fopen(PW_PATH, "rb");
+    assert(df != NULL);
+    uint8_t draw_raw[4096];
+    size_t draw_n = fread(draw_raw, 1, sizeof draw_raw, df);
+    fclose(df);
+    assert(draw_n == sizeof(PwHeader) + sizeof(PwRecord));
+
+    prewarm_reset();
+    prewarm_clear_records();
+    prewarm_load();
+    assert(pw_count == 1 && pw_records != NULL);
+    PipeKey dk_draw;
+    memset(&dk_draw, 0, sizeof dk_draw);
+    memcpy(&dk_draw.color, pw_records[0].baked, PW_BAKED_SIZE);
+    dk_draw.prog = &dp;
+    uint64_t expected_dh = hash_words(0xcbf29ce484222325ull, &dk_draw, sizeof dk_draw);
+    if (!expected_dh) expected_dh = 1;
+    mock_title = true;
+    mock_frame = 211;
+    prewarm_tick();
+    mock_title = false;
+    g_scene_frame = 210;
+    mock_frame = 212;
+    prewarm_tick();
+    assert(pw_loading && pw_pending != NULL && pw_pending->prewarmed && pw_pending->used_s == g_exec_s);
+    assert(pw_cache_find(&pipe_cache, expected_dh) == pw_pending && vk_object_slot(&pipe_cache, expected_dh)->object == pw_pending);
+
+    g_vk.dyn_vi = false;
+    assert(prewarm_parse_and_validate(draw_raw, draw_n) == 0);
 
     free_caches();
     free(pw_records);
