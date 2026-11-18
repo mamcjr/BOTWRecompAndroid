@@ -73,6 +73,7 @@ typedef struct {
     VkImageView sc_views[VK_MAX_SWAP_IMAGES];
 } VkG;
 extern VkG g_vk;
+void vk_shader_build_report(const char *where);
 
 // ---- rendering: dynamic rendering, or classic render passes without it (rpcompat.c)
 // colors / ds_format: the attachments' view formats (VK_FORMAT_UNDEFINED: an unused slot), as the pipelines get them
