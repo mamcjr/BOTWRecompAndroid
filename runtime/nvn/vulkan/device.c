@@ -471,6 +471,7 @@ void vk_device_fault_probe(void) {
 // GPU) gives the vsync period and when earlier frames reached the screen; the pacer keeps each frame queued half a
 // vsync before one (backend_vsync_offset). LARECOMP_PACE_VSYNC=0: off, the extension not even enabled.
 static bool display_timing;
+static bool g_driver_props;
 #endif
 
 static void create_device(void) {
@@ -519,6 +520,7 @@ static void create_device(void) {
         if (g_vk.api < COMPAT_EXT[i].below && cg[COMPAT_EXT[i].optional]) ext[n_ext++] = COMPAT_EXT[i].name;
     // (VkPhysicalDeviceDriverProperties: core from 1.2, before that its own extension, only queried)
     bool driver_props = g_vk.api >= VK_API_VERSION_1_2 || has_ext(ep, ne, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
+    g_driver_props = driver_props;
 #endif
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
 #ifdef __ANDROID__
@@ -2271,6 +2273,27 @@ bool vk_driver_is_radv(void) {
         r = d.driverID == VK_DRIVER_ID_MESA_RADV;
     }
     return r > 0;
+}
+
+// ARM Mali proprietary driver (or vendor 0x13B5 when driverID is unset, e.g. Vulkan 1.1).
+bool vk_driver_is_mali(void) {
+    static _Atomic int m = -1;
+    int cur = atomic_load_explicit(&m, memory_order_relaxed);
+    if (cur < 0 && g_vk.phys) {
+        VkPhysicalDeviceDriverProperties d = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+        if (g_driver_props) {
+            VkPhysicalDeviceProperties2 p = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &d};
+            vkGetPhysicalDeviceProperties2(g_vk.phys, &p);
+        }
+        cur = (d.driverID == VK_DRIVER_ID_ARM_PROPRIETARY || (!d.driverID && g_vk.props.vendorID == 0x13B5)) ? 1 : 0;
+        atomic_store_explicit(&m, cur, memory_order_relaxed);
+    }
+    return cur >= 0 ? cur > 0 : g_vk.props.vendorID == 0x13B5;
+}
+
+bool vk_slot_async_default(void) {
+    extern bool vk_low_ram(void);
+    return vk_low_ram() || vk_driver_is_mali();
 }
 #endif
 

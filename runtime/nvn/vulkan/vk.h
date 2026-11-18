@@ -182,3 +182,7 @@ VkShaderModule vk_builtin_shader(const char *name);  // internal shaders (clear,
 
 // ---- device / window (device.c)
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h);
+#ifdef __ANDROID__
+bool vk_driver_is_mali(void);
+bool vk_slot_async_default(void);
+#endif

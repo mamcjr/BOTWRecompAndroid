@@ -1,4 +1,5 @@
 // NVN objects, builders, and state objects (everything except command recording).
+#include <stdatomic.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
@@ -949,7 +950,9 @@ NVN(nvnTextureInitialize) {
     G(uint64_t, A(0), 16) = debug_id;
     RET(1);
 }
+static void slot_retire_pending(void);
 NVN(nvnTextureFinalize) {
+    slot_retire_pending();
     pthread_mutex_lock(&g_live_lock);
     NvnTexture *t = owner_take(A(0));
     pthread_mutex_unlock(&g_live_lock);
@@ -1213,6 +1216,7 @@ NVN(nvnTexturePoolFinalize) {
 #ifdef __ANDROID__
     vk_async_drain();
 #endif
+    slot_retire_pending();
     NvnTexEntry *entries = d->entries;
     for (int i = 0; i < d->count; i++) {
         NvnTexture *t = entries[i].tex;
@@ -1233,8 +1237,9 @@ NVN(nvnTexturePoolGetSize) { RET(G(uint32_t, A(0), 24)); }
 // (vulkan/async.c): the write is queued after them and applied by the render thread in order - the draws submitted
 // before it see the old texture, those after the new one, as on the GPU. It used to wait for the render thread to
 // catch up (vk_async_drain) instead: ~30 times a frame in the overworld, ~1.5 s of every 2 s of the game's threads
-// on a Galaxy Tab A9+ - the game's core 0 held meanwhile (2026-11-13). With the render thread idle it is written at
-// once. Low RAM only for now; LARECOMP_SLOT_DRAIN=1 / 0: the wait, as before / queued.
+// on a Galaxy Tab A9+ (2026-11-13) and ~2,100-2,400 stalls (~1.0-1.2 s of every 2 s) on Mali-G925 - the game's
+// core 0 held meanwhile. With the render thread idle it is written at once. Enabled by default on low-RAM devices
+// and Mali (vk_slot_async_default); LARECOMP_SLOT_DRAIN=1 / 0: the wait, as before / queued.
 typedef struct {
     NvnDescPool *d;
     int id;
@@ -1250,20 +1255,29 @@ typedef struct {
 static pthread_mutex_t slot_m = PTHREAD_MUTEX_INITIALIZER;
 static NvnTexture **slot_old;
 static int slot_nold, slot_cap;
+#ifdef __ANDROID__
+static _Atomic int g_slot_drain = -1;
+#endif
 static void slot_retire_pending(void) {  // (the game's thread)
     pthread_mutex_lock(&slot_m);
     int n = slot_nold;
     NvnTexture **v = n ? malloc((size_t)n * sizeof *v) : NULL;
+    if (n && !v) FATAL("nvn: out of memory retiring replaced texture slots\n");
     if (v) memcpy(v, slot_old, (size_t)n * sizeof *v);
     slot_nold = 0;
     pthread_mutex_unlock(&slot_m);
-    for (int i = 0; i < n && v; i++) texture_retire(v[i]);
+    for (int i = 0; i < n; i++) texture_retire(v[i]);
     free(v);
 }
 RT_ON_RESET(slot_old_reset) {  // (every texture goes with the reset)
     pthread_mutex_lock(&slot_m);
-    slot_nold = 0;
+    free(slot_old);
+    slot_old = NULL;
+    slot_nold = slot_cap = 0;
     pthread_mutex_unlock(&slot_m);
+#ifdef __ANDROID__
+    atomic_store_explicit(&g_slot_drain, -1, memory_order_relaxed);
+#endif
 }
 static void slot_apply(void *arg) {
     SlotReg *r = arg;
@@ -1312,14 +1326,16 @@ static void register_texture(Cpu *c) {
     const uint8_t *sw = r.t ? obj_swizzle(A(2)) : NULL;
     if (sw) r.has_sw = true, memcpy(r.sw, sw, 4);
 #ifdef __ANDROID__
-    static int drain = -1;
-    if (drain < 0) {  // (queued on low RAM - the weak phones, vulkan/exec.c vk_low_ram - for now)
-        extern bool vk_low_ram(void);
+    int dr = atomic_load_explicit(&g_slot_drain, memory_order_relaxed);
+    if (dr < 0) {
+        extern bool vk_slot_async_default(void);
         const char *e = getenv("LARECOMP_SLOT_DRAIN");
-        drain = e ? atoi(e) != 0 : !vk_low_ram();
+        dr = e ? (atoi(e) != 0) : !vk_slot_async_default();
+        atomic_store_explicit(&g_slot_drain, dr, memory_order_relaxed);
     }
-    if (!drain) {
+    if (!dr) {
         SlotReg *q = malloc(sizeof *q);
+        if (!q) FATAL("nvn: out of memory queuing texture slot update\n");
         *q = r;
         extern void vk_async_call(void (*fn)(void *), void *arg);
         vk_async_call(slot_apply, q);  // (q freed after it runs)
