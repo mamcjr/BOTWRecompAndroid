@@ -73,6 +73,45 @@ uint64_t vk_cum_wait_ns(void) { return cum_wait; }  // (the performance overlay:
 #endif
 static uint32_t prof_dirty[4];  // (LARECOMP_VK_PROF) passes restarted: in-place read, feedback copy, unbound slot, other targets
 static uint32_t prof_end_line[4096];  // passes ended, by the exec.c line that ended them (0: submit / present)
+// ---- writers tracked for the scoped pass barrier (pass_barrier, below). The main command buffer's writers since
+// the last barrier on it: a pass's colour / depth stores (vk_end_pass, vkCmdClearAttachments), a dispatch's storage
+// writes (dispatch), a draw's vertex/fragment shader storage writes (note_gmem_store), a transfer's writes (the
+// copies, clears and image writes recorded into the main buffer - vkCmdCopy*, vkCmdBlitImage, vkCmdResolveImage,
+// vkCmdClear*, copy_buffer_to_texture; not copy_buffer, whose every caller is followed by a full barrier, which
+// orders and clears all of this anyway). The barrier a new pass needs before it is built from exactly
+// those, with the stages that consume them; nothing is built when nothing was written. Tracked only while the
+// scoped barriers are on (pass_barrier_mode() == 1): the full barrier (the default) and none note nothing, so no
+// barrier beyond main's own lands anywhere in them. The bits are cleared by
+// pass_barrier itself (a barrier ordered everything before it) and by vk_full_barrier on the main buffer (ALL_COMMANDS
+// covers every tracked writer: all of it is before it in queue order) - never anywhere else: vk_wait_seq's host wait
+// orders nothing on the GPU, and its thread (the game's) is not the one recording here (the render thread).
+// pass_writers_seq is the submission the writers were recorded into: a note that straddles a submission boundary
+// (a barrier at the boundary ordered the earlier ones) starts the tracking over. The upload buffer's writes go
+// through its own end-of-submission publication barrier (upload_begin_barrier), not these.
+enum { PW_COLOR = 1, PW_DS = 2, PW_COMPUTE = 4, PW_TRANSFER = 8, PW_SHADER = 16 };
+static uint32_t pass_writers;
+static uint64_t pass_writers_seq;  // (the submission the tracked writers were recorded into; 0: none yet)
+// The mode, asked once (LARECOMP_VK_PASS_BARRIER below). 1, the scoped barriers, is the only mode anything of this
+// tracking is for: with the full barrier (2, the default) nothing is noted, so no extra barrier lands at a
+// submission boundary and the default is exactly main's, and 0 (none, a measurement) is exactly the old switch.
+static int pass_barrier_mode(void) {
+    static int mode = -1;
+    if (mode < 0) {
+        const char *e = getenv("LARECOMP_VK_PASS_BARRIER");
+        mode = e ? atoi(e) : getenv("LARECOMP_VK_NO_PASS_BARRIER") ? 0 : 2;
+        if (mode != 2) LOG("[vk] pass barriers: %s\n", mode == 1 ? "scoped" : "none (unsafe, a measurement)");
+    }
+    return mode;
+}
+static void pass_note_writers(uint64_t seq, uint32_t bits) {
+    if (pass_barrier_mode() != 1) return;  // (the tracking is the scoped barrier's alone: no other mode notes a thing)
+    if (!pass_writers) pass_writers_seq = seq;  // (the first since the last barrier: the submission that carries them)
+    else if (seq != pass_writers_seq) {  // (writers recorded past a submission boundary: a full barrier there
+        vk_full_barrier(vk_cmd());          //  ordered the earlier ones - track from the newer submission on)
+        pass_writers = 0, pass_writers_seq = seq;
+    }
+    pass_writers |= bits;
+}
 uint64_t prof_views_created;  // textures.c vk_image_view cache misses
 uint64_t prof_up_ns = ~0ull;  // textures.c upload checks (~0: profiling off)
 uint64_t prof_up_cum;  // (the same, never reset)
@@ -966,6 +1005,10 @@ void vk_full_barrier(VkCommandBuffer cb) {
                            .dstAccessMask = VK_ACCESS_2_MEMORY_READ_BIT | VK_ACCESS_2_MEMORY_WRITE_BIT};
     VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
     vkCmdPipelineBarrier2(cb, &di);
+    // A full barrier in the main command buffer orders every tracked writer (all of it is before it in queue
+    // order); the upload buffer's own end-of-submission publication one does not - the main buffer's recorded work
+    // follows it - so only there the tracked writers stay.
+    if (cb == subs[cur_sub].main) pass_writers = 0;
 }
 
 static void ring_retire(void);
@@ -2188,6 +2231,7 @@ static void wb_queue(NvnTexture *t) {
     VkBufferImageCopy c = {.bufferOffset = (VkDeviceSize)off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                            .imageExtent = {t->width, t->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, wb_buf, 1, &c);
+    pass_note_writers(vk_pending_seq(), PW_TRANSFER);  // (its readback done: what follows sees it)
     VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT,
                            .srcAccessMask = VK_ACCESS_2_TRANSFER_WRITE_BIT, .dstStageMask = VK_PIPELINE_STAGE_2_HOST_BIT,
                            .dstAccessMask = VK_ACCESS_2_HOST_READ_BIT};
@@ -2288,6 +2332,7 @@ static void dump_layers_raw(TexBackend *b) {  // every layer, level 0, as stored
         VkBufferImageCopy c = {.bufferOffset = out.off + one * l, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lvl, l, 1},
                                .imageExtent = {w, h, 1}};
         vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+        pass_note_writers(vk_pending_seq(), PW_TRANSFER);
     }
     renderer_flush();
     vk_readback_ready(one * nl);
@@ -2330,6 +2375,7 @@ void vk_dump_watch_frame(void) {
             VkBufferImageCopy c = {.bufferOffset = out.off + one * l, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, lv, l, 1},
                                    .imageExtent = {w, h, 1}};
             vkCmdCopyImageToBuffer(vk_cmd(), b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+            pass_note_writers(vk_pending_seq(), PW_TRANSFER);
         }
         renderer_flush();
         vk_readback_ready(one * nl);
@@ -2352,8 +2398,10 @@ void vk_end_pass(void) { vk_end_pass_at(0); }
 static void vk_end_pass_at(int line) {
     if (!in_pass) return;
     if (prof && line < 4096) prof_end_line[line]++;
-    vk_end_rendering(vk_cmd());
+    VkCommandBuffer ecb = vk_cmd();  // (the buffer the rendering ends into: the pass's stores are its writers now)
+    vk_end_rendering(ecb);
     in_pass = false;
+    pass_note_writers(vk_pending_seq(), PW_COLOR | PW_DS);  // (the pass's stores: whatever reads or tests them next)
     {   extern TexBackend *g_dump_sampled;
         if (g_dump_sampled) { TexBackend *db = g_dump_sampled; g_dump_sampled = NULL; dump_layers_raw(db); }
     }
@@ -2433,6 +2481,97 @@ static bool no_chunks_now(void) {
     extern bool framepace_in_menu(void);
     return !keep && framepace_in_menu();
 }
+// ---- the pass barrier: scoped, not ALL_COMMANDS (begin_pass)
+// What the writers tracked since the last barrier (pass_note_writers) are made visible to, on a tiler: the stages of
+// the command the barrier is for consume them in - not every stage of every command. A full barrier (ALL_COMMANDS ->
+// ALL_COMMANDS) drains the whole pipeline at every pass boundary, hundreds of times a frame; on a Helio G95's Mali-G76
+// that was ~10% of the frame (LARECOMP_VK_NO_PASS_BARRIER=1 measured what removing it entirely was worth: a large
+// gain, at the price of flickering - a new pass read targets whose stores were not visible yet). The scoped barrier
+// keeps the dependency and drops the drain; with nothing written since the last barrier it emits nothing at all.
+// Opt-in: the default is the full barrier exactly as main has it, with nothing tracked in any other mode (no extra
+// barrier lands at a submission boundary either) - the tracked masks are complete now - WAW between
+// passes, shader storage writes, indirect and uniform reads, copies as readers - but the gain was measured with the
+// incomplete ones, so the number to trust is the one still to come, with the Vulkan sync validation on top).
+// LARECOMP_VK_PASS_BARRIER: 0 = none (as NO_PASS_BARRIER, unsafe - a measurement), 1 = scoped, 2 = the full barrier
+// (the default, as main).
+enum { PB_PASS, PB_DISPATCH, PB_ANY };  // the reader this barrier is for: a pass's draws / a dispatch / whatever follows
+static void pass_barrier(VkCommandBuffer cb, int reader) {
+    int mode = pass_barrier_mode();
+    if (!mode || AB("nobarrier") == 1) return;
+    if (mode == 2) {
+        vk_full_barrier(cb);  // (as main: every boundary, whatever was tracked)
+        return;
+    }
+    uint32_t w = pass_writers;
+    if (!w) return;  // (nothing written since the last barrier: nothing to make visible)
+    // The source: what was written, in the stages that wrote it. SHADER_READ beside SHADER_STORAGE_WRITE because an
+    // atomic counts as a read (a shader that writes through one is both), and a write to an image a later pass
+    // samples is the pair to order, the read not.
+    VkPipelineStageFlags2 sst = 0;
+    VkAccessFlags2 sac = 0;
+    if (w & PW_COLOR) {  // a pass's colour stores
+        sst |= VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        sac |= VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT;
+    }
+    if (w & PW_DS) {  // its depth/stencil writes, both sides of the fragment tests
+        sst |= VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT;
+        sac |= VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    }
+    if (w & PW_SHADER) {  // a draw's vertex/fragment shader storage writes (note_gmem_store: the game's own memory)
+        sst |= VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT;
+        sac |= VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT;
+    }
+    if (w & PW_COMPUTE) {  // a dispatch's storage writes
+        sst |= VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT;
+        sac |= VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT | VK_ACCESS_2_SHADER_READ_BIT;
+    }
+    if (w & PW_TRANSFER) {  // the copies, blits, resolves, clears and image writes
+        sst |= VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        sac |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    }
+    // The destination: every way the reader consumes memory - including its own writes, so that a write-after-write
+    // between two passes / two dispatches is ordered too (the second write must not land before the first).
+    VkPipelineStageFlags2 dst;
+    VkAccessFlags2 dacc;
+    if (reader == PB_PASS) {
+        // its draws: shader reads (sampled, storage, uniforms) in every graphics stage, vertex and index fetches,
+        // indirect commands, and the attachments' loads, tests and stores
+        dst = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+              VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT | VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
+              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
+              VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+              VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT;
+        dacc = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+               VK_ACCESS_2_UNIFORM_READ_BIT | VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT |
+               VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT;
+    } else if (reader == PB_DISPATCH) {
+        // the dispatch: its shader's reads (sampled, storage, uniforms) and writes (a WAW with an earlier dispatch)
+        dst = VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT;  // (dispatch indirect too)
+        dacc = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+               VK_ACCESS_2_UNIFORM_READ_BIT | VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT;
+    } else {  // PB_ANY: no known reader - a pass, a dispatch, or a copy reading what was written (and writing over it)
+        dst = VK_PIPELINE_STAGE_2_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_2_TESSELLATION_CONTROL_SHADER_BIT |
+              VK_PIPELINE_STAGE_2_TESSELLATION_EVALUATION_SHADER_BIT | VK_PIPELINE_STAGE_2_GEOMETRY_SHADER_BIT |
+              VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_VERTEX_ATTRIBUTE_INPUT_BIT |
+              VK_PIPELINE_STAGE_2_INDEX_INPUT_BIT | VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
+              VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT | VK_PIPELINE_STAGE_2_LATE_FRAGMENT_TESTS_BIT |
+              VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_COMPUTE_SHADER_BIT |
+              VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT;
+        dacc = VK_ACCESS_2_SHADER_SAMPLED_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_READ_BIT | VK_ACCESS_2_SHADER_STORAGE_WRITE_BIT |
+               VK_ACCESS_2_UNIFORM_READ_BIT | VK_ACCESS_2_VERTEX_ATTRIBUTE_READ_BIT | VK_ACCESS_2_INDEX_READ_BIT |
+               VK_ACCESS_2_INDIRECT_COMMAND_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+               VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_READ_BIT |
+               VK_ACCESS_2_DEPTH_STENCIL_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_TRANSFER_READ_BIT | VK_ACCESS_2_TRANSFER_WRITE_BIT;
+    }
+    VkMemoryBarrier2 mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2, .srcStageMask = sst, .srcAccessMask = sac,
+                           .dstStageMask = dst, .dstAccessMask = dacc};
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    pass_writers = 0;  // (ordered: everything before this barrier is visible to everything after it)
+}
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     pipeline_dirty = true;
@@ -2474,10 +2613,7 @@ static void begin_pass(void) {
 #endif
     st.rt_dirty = false;
     VkCommandBuffer cb = vk_cmd();
-    static int no_barrier = -1;  // (LARECOMP_VK_NO_PASS_BARRIER=1: none - unsafe, a measurement of what it costs)
-    if (no_barrier < 0) no_barrier = getenv("LARECOMP_VK_NO_PASS_BARRIER") != NULL;
-    extern int vk_ab(const char *what);
-    if (!no_barrier && AB("nobarrier") != 1) vk_full_barrier(cb);  // passes, copies and dispatches see each other's results
+    pass_barrier(cb, PB_PASS);  // (the previous pass's / copy's / dispatch's writes, visible to this pass - scoped, not ALL_COMMANDS)
     {
         NvnTexture *t0n = st.rt.ncolor ? st.rt.color[0] : NULL;
         dl_note("pass %d color %ux%u fmt %#x depth %p", st.rt.ncolor, t0n ? t0n->width : 0, t0n ? t0n->height : 0, t0n ? t0n->format : 0,
@@ -2957,7 +3093,10 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
         VkImageAspectFlags dsa = (depth && pass_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (stencil && pass_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
         if (dsa) a[n++] = (VkClearAttachment){.aspectMask = dsa, .clearValue.depthStencil = {dval, sval}};
         VkClearRect cr = {rect, 0, 1};
-        if (n) vkCmdClearAttachments(cb, n, a, 1, &cr);
+        if (n) {
+            vkCmdClearAttachments(cb, n, a, 1, &cr);
+            pass_note_writers(vk_pending_seq(), (index >= 0 ? PW_COLOR : 0) | (dsa ? PW_DS : 0));  // (attachment writes)
+        }
         return;
     }
     VkPipeline p = clear_pipeline(index, kind, mask, depth, stencil);
@@ -4340,6 +4479,7 @@ static void debug_save_depth(TexBackend *b, const char *path) {
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_DEPTH_BIT, 0, 0, 1},
                            .imageExtent = {b->width, b->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+    pass_note_writers(vk_pending_seq(), PW_TRANSFER);
     renderer_flush();
     vk_readback_ready((uint64_t)n * 4);
     const float *d = out.ptr;
@@ -4434,6 +4574,7 @@ static void alias_copy(CopyAlias *a, VkImageAspectFlags aspects, const char *why
     gp_mark(cb, "copy texture (deferred, %s%s) %ux%u", why, aspects == d->aspect ? "" : ", stencil only", a->dst->width, a->dst->height);
     VkImageCopy c = {.srcSubresource = {aspects, 0, 0, 1}, .dstSubresource = {aspects, 0, 0, 1}, .extent = {d->width, d->height, 1}};
     vkCmdCopyImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+    pass_note_writers(vk_pending_seq(), PW_TRANSFER);  // (the deferred alias copy)
     if (aspects == d->aspect) stat_alias_copied++; else stat_alias_partial++;
     if (ct_on()) LOG("[ct] alias copy %p -> %p aspects %#x (%s)\n", (void *)a->src, (void *)a->dst, aspects, why);
 }
@@ -4674,6 +4815,7 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
                 VkImageCopy rg = {.srcSubresource = {src->aspect, lv, 0, dst->layers}, .dstSubresource = {src->aspect, lv, 0, dst->layers},
                                   .extent = {w ? w : 1, h ? h : 1, 1}};
                 vkCmdCopyImage(cb, src->image, VK_IMAGE_LAYOUT_GENERAL, dst->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rg);
+                pass_note_writers(vk_pending_seq(), PW_TRANSFER);  // (the snapshot copy: the draws sampling it follow)
             }
             if (g_debug_frame && (src->aspect & VK_IMAGE_ASPECT_DEPTH_BIT)) {
                 static int nd;
@@ -5697,8 +5839,9 @@ static bool dchain_keeps(uint32_t op) {  // (records no GPU work: binds, state, 
 static void gfast_finish(VkCommandBuffer cb) {
 #ifdef __ANDROID__
     if (gfast_win.buffer) {  // (stored into the heap itself: visible to what follows)
+        pass_note_writers(vk_pending_seq(), PW_COMPUTE);  // (a storage write of the dispatch: tracked as one)
         if (dchain_ok()) dchain_after = true;
-        else vk_full_barrier(cb);
+        else pass_barrier(cb, PB_ANY);  // (what follows is not known here: a pass, a dispatch or a copy)
         return;
     }
 #endif
@@ -5707,8 +5850,8 @@ static void gfast_finish(VkCommandBuffer cb) {
     for (int i = 0; i < gfast_n; i++) back[i] = (VkBufferCopy){gfast_cp[i].dstOffset, gfast_cp[i].srcOffset, gfast_cp[i].size};
     vk_full_barrier(cb);
     copy_buffer(cb, gfast_buf, gmem_buf, (uint32_t)gfast_n, back);
-    vk_full_barrier(cb);
-    gfast_n = 0;
+    vk_full_barrier(cb);  // (back in the heap: everything reads the heap - draws' attributes, dispatches, copies - so
+    gfast_n = 0;          //  ALL_COMMANDS, not a tracked subset)
 }
 
 #ifdef __ANDROID__
@@ -6018,8 +6161,8 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
             n->stored |= e->stored;
             e->live = false, e->dead_seq = vk_pending_seq();  // (its space and index back once that's done: gres_reclaim)
         }
-        vk_full_barrier(cb);
-    }
+        vk_full_barrier(cb);  // (the merged copies land in the arena, which draws, dispatches and copies alike read -
+    }                         //  ALL_COMMANDS, not a tracked subset)
     return n;
 }
 
@@ -6582,7 +6725,8 @@ static void vc_mark_gpu(uint64_t lo, uint64_t hi) {
 // the stage, its shader's code address, the submission and the storage buffers bound (where its stores may land)
 static void note_gmem_store(int stage) {
     atomic_store(&g_gmem_store_seq, vk_pending_seq());
-    static long at = -2;
+    pass_note_writers(vk_pending_seq(), stage == 5 ? PW_COMPUTE : PW_SHADER);  // (a storing shader's writes: the next
+    static long at = -2;                                                       //  barrier's source, whichever stage wrote)
     if (at == -2) at = getenv("LARECOMP_LOG_STORES") ? atol(getenv("LARECOMP_LOG_STORES")) : -1;
     if (at < 0 || (long)renderer_present_count() != at || !st.program) return;
     char line[700];
@@ -7319,8 +7463,8 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     VkCommandBuffer cb = vk_cmd();
     bool chained = dchain && cb == dchain_cb && dchain_ok();
     if (chained) stat_dchained++;
-    else vk_full_barrier(cb);
-    dchain = false;
+    else pass_barrier(cb, PB_DISPATCH);  // (the tracked writers, made visible to the dispatch's reads - scoped; a
+    dchain = false;                        //  chained one is ordered against the dispatch before it by its own barriers)
     dchain_after = false;
     gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u) cs %llx gmem %d", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2],
             (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
@@ -7343,6 +7487,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     vkCmdDispatch(cb, gx, gy, gz);
+    pass_note_writers(vk_pending_seq(), PW_COMPUTE);  // (its storage writes: whatever reads them next - or samples them)
     if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) gfast_finish(cb);
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5), note_gmem_store(5);
     stat_dispatches++;
@@ -7455,6 +7600,7 @@ static void pick_after_draw(void) {
                                .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, level, layer, 1},
                                .imageOffset = {(int32_t)x, (int32_t)y, 0}, .imageExtent = {1, 1, 1}};
         vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, pick.buf, 1, &c);
+        pass_note_writers(vk_pending_seq(), PW_TRANSFER);
     }
     PickRec *pr = &pick.rec[pick.n++];
     pr->vs = st.program->stages[0].code_addr;
@@ -8653,7 +8799,8 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
                            .imageOffset = {rg[0], rg[1], array ? 0 : rg[2]},
                            .imageExtent = {(uint32_t)rg[3], (uint32_t)rg[4], array ? 1 : nz}};
     vkCmdCopyBufferToImage(cb, s.buf, b->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
-}
+    pass_note_writers(vk_pending_seq(), PW_TRANSFER);  // (the image write: tracked - the full barrier above cleared
+}                                                      //  everything before it, this is what a sampling pass needs)
 
 static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     NvnTexture *t = (NvnTexture *)(uintptr_t)src->tex;
@@ -8692,6 +8839,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
         VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{0, 0, 0}, {(int32_t)b->width, (int32_t)b->height, 1}},
                           .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{0, 0, 0}, {(int32_t)t->width, (int32_t)t->height, 1}}};
         vkCmdBlitImage(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, srcimg, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, VK_FILTER_LINEAR);
+    pass_note_writers(vk_pending_seq(), PW_TRANSFER);
         vk_full_barrier(cb);
     }
     bool array = b->layers > 1 && b->depth == 1;
@@ -8808,6 +8956,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
         VkImageResolve rv = {.srcSubresource = {sa, slv, sly, 1}, .srcOffset = {sx0, sy0, 0}, .dstSubresource = {da, dlv, dly, 1},
                              .dstOffset = {dx0, dy0, 0}, .extent = {(uint32_t)sw, (uint32_t)sh, 1}};
         vkCmdResolveImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &rv);
+        pass_note_writers(vk_pending_seq(), PW_TRANSFER);
         return;
     }
     if (s->samples != d->samples) return;
@@ -8815,6 +8964,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
         VkImageCopy c = {.srcSubresource = {sa, slv, sly, 1}, .srcOffset = {sx0, sy0, 0}, .dstSubresource = {da, dlv, dly, 1},
                          .dstOffset = {dx0, dy0, 0}, .extent = {(uint32_t)sw, (uint32_t)sh, 1}};
         vkCmdCopyImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
+        pass_note_writers(vk_pending_seq(), PW_TRANSFER);
         return;
     }
     // scaled / converting copy: the game builds its depth pyramid this way (nearest), colour copies filter if asked
@@ -8828,6 +8978,7 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     dl_note("  blit %p lv%u/%u %ux%u (%d,%d %dx%d) -> %p lv%u/%u %ux%u (%d,%d %dx%d) %s", (void *)s->image, slv, s->levels, s->width,
             s->height, sx0, sy0, sw, sh, (void *)d->image, dlv, d->levels, d->width, d->height, dx0, dy0, dw, dh, linear ? "linear" : "nearest");
     vkCmdBlitImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &bl, linear ? VK_FILTER_LINEAR : VK_FILTER_NEAREST);
+    pass_note_writers(vk_pending_seq(), PW_TRANSFER);
 }
 
 // ================================================================== present helpers (device.c)
@@ -9238,6 +9389,7 @@ static void save_texture_raw(TexBackend *b, const char *path) {
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1},
                            .imageExtent = {b->width, b->height, 1}};
     vkCmdCopyImageToBuffer(cb, b->image, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+    pass_note_writers(vk_pending_seq(), PW_TRANSFER);
     renderer_flush();
     vk_readback_ready(size);
     char rp[300];
@@ -9297,6 +9449,7 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     VkSpan out = vk_readback((uint64_t)w * h * 4);
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
     vkCmdCopyImageToBuffer(cb, img, VK_IMAGE_LAYOUT_GENERAL, out.buf, 1, &c);
+    pass_note_writers(vk_pending_seq(), PW_TRANSFER);
     renderer_flush();
     vk_readback_ready((uint64_t)w * h * 4);
     vk_save_png(path, out.ptr, w, h);
@@ -9354,8 +9507,8 @@ static void exec_list(uint64_t handle, int depth) {
         if (r->op < CMD_COUNT) op_counts[r->op]++;
         if (dchain && r->op != CMD_DISPATCH && !dchain_keeps(r->op)) {  // (the dispatches' run ends)
             dchain = false;
-            if (dchain_after) vk_full_barrier(vk_cmd());
-            dchain_after = false;
+            if (dchain_after) pass_barrier(vk_cmd(), PB_ANY);  // (the writers the dispatch tracked - whatever follows: a pass,
+            dchain_after = false;                                //  a dispatch or a copy reads them)
         }
         switch (r->op) {
         case CMD_END: return;
