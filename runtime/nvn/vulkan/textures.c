@@ -1,6 +1,7 @@
 // Vulkan textures: NVN formats, images, change-detected uploads from guest memory, views and samplers
 // (counterpart of the texture half of metal.m and the view helpers of renderer.m).
 #include <SDL3/SDL_timer.h>
+#include <errno.h>
 #include <float.h>
 #include <math.h>
 #include <pthread.h>
@@ -845,21 +846,27 @@ static bool tex_periodic(void) {
 }
 
 // Low RAM (exec.c vk_low_ram; LARECOMP_TEX_DISCARD=1 / 0): a sampled texture's guest bytes go back to the OS once
-// uploaded (MADV_DONTNEED: zero pages there from then on) - the guest copy of every texture otherwise sat in RAM or
-// swap next to its image. On a Galaxy Tab A9+ (3.4 GB) ~190 MB, and the game's memory stopped being read back from
-// swap ~5000 times a second: ~14.5 fps after 9 minutes instead of ~10 (2026-11-13). Only where the page write
-// tracking watches it, so a CPU write (new contents) is still seen; a texture first uploaded over such bytes is
-// logged ("[discard]": it would read zeros).
-static bool tex_discard(void) {
+// uploaded - the guest copy of every texture otherwise sat in RAM next to its image. On a Galaxy Tab A9+ (3.4 GB)
+// ~190 MB, and ~14.5 fps after 9 minutes instead of ~10 (2026-11-13). Only where the page write tracking watches it,
+// so a CPU write (new contents) is still seen.
+// Given back with MADV_PAGEOUT: the pages go to swap (zram) with their contents kept. MADV_DONTNEED (=2: as before)
+// left zero pages, and the game counts on those bytes: it destroys a texture object and later makes a new one over the
+// same memory without loading it again - the zoomed-in map's tiles (840x840 BC1) came back black after a pan or a
+// zoom, and the minimap with them (#471 #478 #489: "dark map with RAM saving on"). Kernels without MADV_PAGEOUT
+// (before Linux 5.4): MADV_COLD, the same contents kept, reclaimed first under pressure.
+static int tex_discard_mode(void) {  // 0 off, 1 contents kept (pageout / cold), 2 zero pages (DONTNEED)
     static int on = -1;
     if (on < 0) {
         extern bool vk_low_ram(void);
         const char *e = getenv("LARECOMP_TEX_DISCARD");
-        on = e ? atoi(e) != 0 : vk_low_ram();
-        if (on) LOG("[vk] textures: guest bytes given back after upload (low RAM)\n");
+        on = e ? atoi(e) : vk_low_ram() ? 1 : 0;
+        if (on < 0 || on > 2) on = 1;
+        if (on) LOG("[vk] textures: guest bytes given back after upload (low RAM; %s)\n",
+                    on == 2 ? "zero pages, LARECOMP_TEX_DISCARD=2" : "to swap, contents kept");
     }
     return on;
 }
+static bool tex_discard(void) { return tex_discard_mode() != 0; }
 static int tex_alias_logs;
 
 // The guest bytes of the textures uploaded from memory, and of those discarded (the memory log)
@@ -1324,12 +1331,24 @@ static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) 
     if (tex_discard() && tracked && !b->dynamic && !linear && b->rs_group == RS_NONE && !b->gpu_owned && !b->scalable &&
         b->tp <= 0 && total >= (64u << 10)) {
         uint64_t lo = (t->addr + 0xFFF) & ~0xFFFull, hi = (t->addr + total) & ~0xFFFull;
-        if (hi > lo && !madvise((void *)(uintptr_t)lo, hi - lo, MADV_DONTNEED)) {
+        bool zero = tex_discard_mode() == 2;
+        static int pageout = 1;  // (MADV_PAGEOUT refused once - EINVAL, an older kernel: MADV_COLD from then on)
+        int adv = zero ? MADV_DONTNEED : pageout ? MADV_PAGEOUT : MADV_COLD;
+        int r = hi > lo ? madvise((void *)(uintptr_t)lo, hi - lo, adv) : -1;
+        if (r && !zero && pageout && errno == EINVAL) {
+            pageout = 0;
+            LOG("[vk] textures: MADV_PAGEOUT not supported, MADV_COLD instead\n");
+            r = madvise((void *)(uintptr_t)lo, hi - lo, MADV_COLD);
+        }
+        if (!r) {
             undiscard(b);
             b->discarded = hi - lo;
             tex_discarded_bytes += b->discarded;
-            b->disc_hash = hash_full(mem, total);
-            b->sample_hash = fnv_sample(mem, total);
+            if (zero) {
+                b->disc_hash = hash_full(mem, total);
+                b->sample_hash = fnv_sample(mem, total);
+            } else
+                b->disc_hash = h;  // (the contents stay: reading them now would only bring the pages straight back)
         }
     }
 #endif
