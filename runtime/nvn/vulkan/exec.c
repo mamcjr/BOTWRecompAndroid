@@ -2733,7 +2733,8 @@ static bool g_off_layout;  // (this draw is a menu layout's pane placed past the
 static uint64_t g_map_frame;
 static bool map_open(float g) {
     extern bool widescreen_in_menu(void);
-    return g > 1.001f && g_map_frame && renderer_present_count() - g_map_frame <= 2 && widescreen_in_menu();
+    return (g > 1.001f || (g >= 9.0f / 16.0f && g < 0.999f)) && g_map_frame && renderer_present_count() - g_map_frame <= 2 &&
+           widescreen_in_menu();
 }
 
 static VkRect2D scissor_rect(void) {
@@ -2742,13 +2743,16 @@ static VkRect2D scissor_rect(void) {
     if (!w) return (VkRect2D){{0, 0}, {pass_w, pass_h}};
     int x = st.scissor[0][0], y = st.scissor[0][1], sw = st.scissor[0][2], sh = st.scissor[0][3];
     float sx = vp_sx, sy = vp_sy, ox = vp_ox, oy = vp_oy;
-    {   // The minimap group up top (widescreen.c widescreen_hud_top): a scissor of it (the map's own) goes up with its panes
+    {   // The minimap group up top (widescreen.c widescreen_hud_top) and narrow world HUD edge anchors
+        // (widescreen_hud_anchor): move scissors alongside their panes in guest target coordinates before scaling.
         extern float widescreen_hud_top(float x, float y);
+        extern float widescreen_hud_anchor(float x, float y);
         NvnTexture *t0 = st.rt.ncolor ? st.rt.color[0] : NULL;
         if (t0 && vk_texture_scale_group(t0) == RS_OUT && sw < 16384 && sh < 16384 &&
             !(x <= 0 && y <= 0 && x + sw >= (int)t0->width && y + sh >= (int)t0->height)) {
             float k = t0->height / 720.0f;  // (target pixels a layout unit)
-            float dy = widescreen_hud_top((x + sw * 0.5f - t0->width * 0.5f) / k, (t0->height * 0.5f - (y + sh * 0.5f)) / k);
+            float lx = (x + sw * 0.5f - t0->width * 0.5f) / k, ly = (t0->height * 0.5f - (y + sh * 0.5f)) / k;
+            float dy = widescreen_hud_top(lx, ly) + widescreen_hud_anchor(lx, ly);
             if (dy != 0) y -= (int)lroundf(dy * k);
         }
     }
@@ -2765,9 +2769,14 @@ static VkRect2D scissor_rect(void) {
             float k = t0->width / 1280.0f, g = widescreen_factor();
             x += (int)lroundf(widescreen_hud_shift(((float)x + sw * 0.5f - t0->width * 0.5f) / k,
                                                    (t0->height * 0.5f - (y + sh * 0.5f)) / (t0->height / 720.0f)) * k);
-            if (map_open(g)) {  // (the map's clips spread out with it, g times as wide about the middle: cbuf_info)
-                float c = (x + sw * 0.5f - t0->width * 0.5f) * g;
-                sw = (int)lroundf(sw * g), x = (int)lroundf(t0->width * 0.5f + c - sw * 0.5f);
+            if (map_open(g)) {  // (the map's clips spread out with its stretched terrain: width for wide, height for tall)
+                if (g > 1.001f) {
+                    float c = (x + sw * 0.5f - t0->width * 0.5f) * g;
+                    sw = (int)lroundf(sw * g), x = (int)lroundf(t0->width * 0.5f + c - sw * 0.5f);
+                } else if (g < 0.999f) {
+                    float c = (y + sh * 0.5f - t0->height * 0.5f) / g;
+                    sh = (int)lroundf(sh / g), y = (int)lroundf(t0->height * 0.5f + c - sh * 0.5f);
+                }
             }
             float u = fminf(sx, sy);
             ox = ((float)w - t0->width * u) * 0.5f, oy = ((float)h - t0->height * u) * 0.5f;
@@ -4840,11 +4849,34 @@ static bool up_patch_frag(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *
 // the inventory's pages turned (#195).
 static float wide_half(void) {
     extern float widescreen_factor(void);
-    return 640.0f * widescreen_factor() + 1.0f;
+    return 640.0f * fmaxf(1.0f, widescreen_factor()) + 1.0f;
 }
 static bool full_width_pane(const float *f) {
     float ax = fabsf(f[19]);
     return f[132] >= 1279.5f && fabsf(f[134] + f[132] * 0.5f) < 0.5f && (ax < 1.0f || f[132] * 0.5f - ax >= wide_half());
+}
+
+// A layout pane whose transformed bounds cover the full 720-unit height and at least a full screen width overlapping
+// the viewport (full-screen fades, blurred world backdrops, and 4542-wide sliding pause menu dimmers).
+static bool tall_full_cover(const float *f) {
+    if (!(f[132] > 0.0f && f[132] < 100000.0f && f[133] > 0.0f && f[133] < 100000.0f)) return false;
+    if (!(fabsf(f[17]) < 0.01f && fabsf(f[18]) < 0.01f && fabsf(f[20]) < 0.01f && fabsf(f[22]) < 0.01f))
+        return false;
+    float x0 = f[19] + f[16] * f[134], x1 = f[19] + f[16] * (f[134] + f[132]);
+    if (x0 > x1) { float t = x0; x0 = x1; x1 = t; }
+    float y0 = f[23] + f[21] * (f[135] - f[133]), y1 = f[23] + f[21] * f[135];
+    if (y0 > y1) { float t = y0; y0 = y1; y1 = t; }
+    if (!isfinite(x0) || !isfinite(x1) || !isfinite(y0) || !isfinite(y1)) return false;
+    return (x1 - x0) >= 1279.5f && x0 < 639.5f && x1 > -639.5f && y0 <= -359.5f && y1 >= 359.5f;
+}
+
+static void tall_fit_proj(float *m, float g, bool vert_plus, bool fixed) {
+    if (vert_plus) {
+        if (fixed) { for (int i = 4; i < 8; i++) m[i] *= g; }
+    } else {
+        if (!fixed) { for (int i = 0; i < 4; i++) m[i] *= g; }
+        for (int i = 4; i < 8; i++) m[i] *= g;
+    }
 }
 
 // ... or a piece of a window that is (cb3[11]: the window's size): not clipped to the 16:9 part in the menus - the
@@ -5046,11 +5078,23 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             // the widescreen move out to the edge below, done here too
             extern float widescreen_hud_top(float x, float y);
             extern float widescreen_hud_shift(float x, float y);
+            extern bool widescreen_narrow_vert_plus(void);
+            extern bool widescreen_in_menu(void);
+            extern bool widescreen_cropped(void);
             bool centred = widescreen_ui_centred();
             float g = centred ? widescreen_factor() : 1.0f, a = fabsf(f[5] / f[0]);
-            bool pane = size >= 0x230 && f[15] == 0 && (fabsf(a - 16.0f / 9.0f * g) < 0.01f || fabsf(a - 16.0f / 9.0f) < 0.01f);
+            bool tall = centred && g >= 9.0f / 16.0f && g < 0.999f;
+            bool vert_plus = tall && widescreen_narrow_vert_plus();
+            bool adapted = fabsf(a - 16.0f / 9.0f * g) < 0.01f, fixed = fabsf(a - 16.0f / 9.0f) < 0.01f;
+            bool pane = size >= 0x230 && f[15] == 0 && (adapted || fixed);
             bool text = !pane && f[15] > 1.0f;
-            float lx = pane ? f[19] : text ? f[3] / f[15] * g * 640.0f : 0, ly = pane ? f[23] : text ? f[7] / f[15] * 360.0f : 0;
+            float lx = pane ? f[19]
+                     : text ? (vert_plus ? f[3] / f[15] * 640.0f
+                                         : f[3] / f[15] * (tall && fixed ? 1.0f : g) * 640.0f)
+                            : 0;
+            float ly = pane ? f[23]
+                     : text ? (vert_plus && !fixed ? f[7] / f[15] * 360.0f / g : f[7] / f[15] * 360.0f)
+                            : 0;
             if (pane && g_cur_fs_hash == 0xd1d87dfe0c81ad63ull && lx > 290.0f && ly < -140.0f) {
                 extern void widescreen_minimap_seen(void);  // (the minimap's disc, at 510, -240: it's on screen)
                 widescreen_minimap_seen();
@@ -5064,21 +5108,153 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
                 static bool told;
                 if (!told && fabsf(ly) < 80.0f) told = true, LOG("[widescreen] a message box in the middle (y %.0f)\n", ly);
             }
-            float dy = pane || text ? widescreen_hud_top(lx, ly) : 0;
-            if (dy != 0) {
-                VkSpan c = vk_transient_copy(f, size, 256);
-                extern float widescreen_hud_shift_text(float x, float y);
-                float *m = (float *)c.ptr, dx = !centred ? 0 : pane ? widescreen_hud_shift(lx, ly) : widescreen_hud_shift_text(lx, ly);
-                if (pane) m[23] += dy, m[19] += dx;
-                else {
-                    for (int i = 0; i < 4; i++) m[4 + i] += dy / 360.0f * m[12 + i];
-                    for (int i = 0; dx != 0 && i < 4; i++) m[i] += dx / (640.0f * g) * m[12 + i];
+            if (tall) {
+                if (pane && g_cur_fs_hash == 0x3911f651724ed296ull && fabsf(lx) < 1.0f &&
+                    fabsf(fabsf(ly) - 304.0f) < 1.0f) {
+                    extern void widescreen_scope_seen(void);  // (the scope's frame bars: keep 16:9 crop with bars)
+                    widescreen_scope_seen();
                 }
-                return ubo_span(c, size);
+                if (pane && g_cur_fs_hash == 0xe91b1fb6e1eb920bull && full_width_pane(f) && widescreen_in_menu())
+                    g_map_frame = renderer_present_count();  // (the map's terrain)
+                bool cropped = widescreen_cropped();
+                if (!cropped && widescreen_in_menu() && pane && g_cur_fs_hash == 0xe91b1fb6e1eb920bull && full_width_pane(f)) {
+                    // Stretch map terrain vertically to fill the narrow display (matching map_open markers/headers).
+                    panefix_log("tall-map-terrain", f);
+                    if (adapted) {
+                        VkSpan c = vk_transient_copy(f, size, 256);
+                        float *m = (float *)c.ptr;
+                        if (vert_plus) { for (int i = 4; i < 8; i++) m[i] /= g; }
+                        else { for (int i = 0; i < 4; i++) m[i] *= g; }
+                        return ubo_span(c, size);
+                    }
+                } else {
+                    // Preserve full-height covers (fades, blurred pause world, 4542-wide sliding dimmers) while
+                    // leaving title/scope unstretched so present_crop letterboxes them cleanly.
+                    bool is_backdrop = pane && g_wide_backdrop && fabsf(f[19]) < 1.0f &&
+                                       (g_cur_fs_hash == 0xc94630386244616eull || g_cur_fs_hash == 0xd4fa32dabc35066cull);
+                    bool is_cover = !cropped && pane && tall_full_cover(f);
+                    // Full-width edge bands (e.g. loading screen 1280x275 cream header) extend their outer screen-touching
+                    // edge to +-360/g while pinning their interior seam in place.
+                    float y_lo = 0, y_hi = 0, e_need = 0;
+                    bool band_cand = !cropped && !map_open(g) && pane && (adapted || fixed) && full_width_pane(f) &&
+                                     fabsf(f[20]) < 0.01f && f[21] > 0.01f && fabsf(f[22]) < 0.01f &&
+                                     f[133] >= 16.0f && f[133] < 719.5f;
+                    if (band_cand) {
+                        y_lo = f[23] + f[21] * (f[135] - f[133]);
+                        y_hi = f[23] + f[21] * f[135];
+                    }
+                    bool top_band = band_cand && isfinite(y_lo) && isfinite(y_hi) && y_hi >= 359.5f &&
+                                    y_lo > -359.5f && y_lo < 359.5f;
+                    bool bot_band = band_cand && isfinite(y_lo) && isfinite(y_hi) && y_lo <= -359.5f &&
+                                    y_hi < 359.5f && y_hi > -359.5f;
+                    if (top_band || bot_band) e_need = 360.0f / g - (top_band ? y_hi : -y_lo);
+                    if (pane && (adapted || fixed) && (is_backdrop || is_cover)) {
+                        panefix_log(is_cover ? "tall-full-cover" : "tall-backdrop", f);
+                        if (is_cover && !widescreen_in_menu()) {
+                            extern void widescreen_band_seen(void);
+                            widescreen_band_seen();
+                        }
+                        if (adapted) {
+                            VkSpan c = vk_transient_copy(f, size, 256);
+                            float *m = (float *)c.ptr;
+                            if (vert_plus) { for (int i = 4; i < 8; i++) m[i] /= g; }
+                            else { for (int i = 0; i < 4; i++) m[i] *= g; }
+                            return ubo_span(c, size);
+                        }
+                    } else if (top_band || bot_band) {
+                        if (!widescreen_in_menu()) {
+                            extern void widescreen_band_seen(void);
+                            widescreen_band_seen();
+                        }
+                        if (e_need > 0.5f || !vert_plus || fixed) {
+                            if (e_need > 0.5f) panefix_log(top_band ? "tall-top-band" : "tall-bot-band", f);
+                            VkSpan c = vk_transient_copy(f, size, 256);
+                            float *m = (float *)c.ptr;
+                            tall_fit_proj(m, g, vert_plus, fixed);
+                            if (e_need > 0.5f) {
+                                float s = 1.0f + e_need / (f[21] * f[133]);
+                                float pivot = top_band ? (f[135] - f[133]) : f[135];
+                                m[21] = f[21] * s;
+                                m[23] = f[23] - (pivot / f[133]) * e_need;
+                            }
+                            return ubo_span(c, size);
+                        }
+                    } else if (!cropped && map_open(g) && ((pane && (adapted || fixed)) || text)) {
+                        // Spread map panes/markers/texts vertically to match full-height terrain, keeping full-width
+                        // map headers/bars (height >= 607.5 or y beyond +-360.5) stretched with the terrain.
+                        panefix_log(pane ? "tall-map-pane" : "tall-map-text", f);
+                        VkSpan c = vk_transient_copy(f, size, 256);
+                        float *m = (float *)c.ptr;
+                        if (pane) {
+                            tall_fit_proj(m, g, vert_plus, fixed);
+                            bool stretch_y = full_width_pane(f) ||
+                                             (fabsf(f[23]) < 1.0f &&
+                                              (f[133] >= 607.5f || f[135] - f[133] < -360.5f || f[135] > 360.5f));
+                            if (stretch_y) {
+                                for (int i = 20; i < 24; i++) m[i] /= g;
+                            } else {
+                                m[23] = fabsf(f[23]) <= 360.0f ? f[23] / g
+                                                               : f[23] + copysignf(360.0f * (1.0f / g - 1.0f), f[23]);
+                            }
+                        } else {
+                            if (vert_plus) {
+                                if (fixed) { for (int i = 4; i < 7; i++) m[i] *= g; }
+                                else m[7] /= g;
+                            } else {
+                                if (!fixed) { for (int i = 0; i < 4; i++) m[i] *= g; }
+                                for (int i = 4; i < 7; i++) m[i] *= g;
+                            }
+                        }
+                        return ubo_span(c, size);
+                    } else if (pane || text) {
+                        // Fit regular 2D UI (including condensed !fixed text) and anchor perimeter HUD groups to edges.
+                        extern float widescreen_hud_anchor(float x, float y), widescreen_hud_anchor_text(float x, float y);
+                        float dy = widescreen_hud_top(lx, ly) +
+                                   (text ? widescreen_hud_anchor_text(lx, ly) : widescreen_hud_anchor(lx, ly));
+                        if (vert_plus) {
+                            if (!fixed) {
+                                if (dy != 0) {
+                                    VkSpan c = vk_transient_copy(f, size, 256);
+                                    float *m = (float *)c.ptr;
+                                    if (pane) m[23] += dy;
+                                    else for (int i = 0; i < 4; i++) m[4 + i] += dy * g / 360.0f * m[12 + i];
+                                    return ubo_span(c, size);
+                                }
+                            } else {
+                                VkSpan c = vk_transient_copy(f, size, 256);
+                                float *m = (float *)c.ptr;
+                                if (pane && dy != 0) m[23] += dy;
+                                if (text && dy != 0) for (int i = 0; i < 4; i++) m[4 + i] += dy / 360.0f * m[12 + i];
+                                for (int i = 4; i < 8; i++) m[i] *= g;
+                                return ubo_span(c, size);
+                            }
+                        } else {
+                            VkSpan c = vk_transient_copy(f, size, 256);
+                            float *m = (float *)c.ptr;
+                            if (pane && dy != 0) m[23] += dy;
+                            if (text && dy != 0) for (int i = 0; i < 4; i++) m[4 + i] += dy / 360.0f * m[12 + i];
+                            tall_fit_proj(m, g, false, fixed);
+                            return ubo_span(c, size);
+                        }
+                    }
+                }
+            } else {
+                float dy = pane || text ? widescreen_hud_top(lx, ly) : 0;
+                if (dy != 0) {
+                    VkSpan c = vk_transient_copy(f, size, 256);
+                    extern float widescreen_hud_shift_text(float x, float y);
+                    float *m = (float *)c.ptr, dx = !centred ? 0 : pane ? widescreen_hud_shift(lx, ly) : widescreen_hud_shift_text(lx, ly);
+                    if (pane) m[23] += dy, m[19] += dx;
+                    else {
+                        for (int i = 0; i < 4; i++) m[4 + i] += dy / 360.0f * m[12 + i];
+                        for (int i = 0; dx != 0 && i < 4; i++) m[i] += dx / (640.0f * g) * m[12 + i];
+                    }
+                    return ubo_span(c, size);
+                }
             }
         }
-        if (widescreen_ui_centred() && t0 && vk_texture_scale_group(t0) == RS_OUT && f[12] == 0 && f[13] == 0 && f[14] == -1.0f &&
-            f[1] == 0 && f[2] == 0) {
+        if (widescreen_ui_centred() && widescreen_factor() > 1.001f && t0 && vk_texture_scale_group(t0) == RS_OUT &&
+            f[12] == 0 && f[13] == 0 && f[14] == -1.0f && f[1] == 0 && f[2] == 0) {
             float g = widescreen_factor();
             extern bool framepace_in_menu(void);
             if (g_debug_frame && size >= 0x230 && f[15] == 0)
@@ -7714,7 +7890,7 @@ static void draw_(CmdRec *r, bool indexed) {
             if (widescreen_ui_centred() && rt && vk_texture_scale_group(rt) == RS_OUT && pr->fi && pr->fi->ntex &&
                 (t = shader_texture_object(1, &pr->fi->tex[0])) && t->target == 1) {
                 renderer_texture_scale(t, &sx, &sy);
-                g_wide_backdrop = sx > sy * 1.01f;
+                g_wide_backdrop = sx > sy * 1.01f || sx < sy * 0.99f;
             }
             // A menu layout's pane or text, clipped to the 16:9 screen's part (scissor_rect): the pages slide in and out
             // past its sides when the menu turns to another (Inventory, System), and on the wide screen those sides
@@ -8258,7 +8434,15 @@ static void draw_(CmdRec *r, bool indexed) {
         }
         bool composite = reads_scene || fade_fill || (fullscreen_fill && wide_frame == renderer_present_count());
         if (!composite) wide_frame = ~0ull;
-        if (!composite) {
+        extern bool widescreen_ui_centred(void);
+        extern float widescreen_factor(void);
+        float wf = widescreen_ui_centred() ? widescreen_factor() : 1.0f;
+        bool tall_ui = wf >= 9.0f / 16.0f && wf < 0.999f &&
+                       st.ubuf[0][0].addr && st.ubuf[0][0].size >= 64 &&
+                       ((const float *)(uintptr_t)st.ubuf[0][0].addr)[12] == 0 &&
+                       ((const float *)(uintptr_t)st.ubuf[0][0].addr)[13] == 0 &&
+                       ((const float *)(uintptr_t)st.ubuf[0][0].addr)[14] == -1.0f;
+        if (!composite && !tall_ui) {
             int pw, ph;
             pass_size(&pw, &ph);
             float u = fminf(pass_sx, pass_sy);

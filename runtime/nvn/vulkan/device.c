@@ -1708,8 +1708,19 @@ void backend_present(NvnTexture *t) {
         // Dynamic goes by the frame time and, on Android, the GPU's busy time per frame (exec.c; elsewhere -1)
         OutScale os;
         extern double vk_frame_gpu_ms(void);
-        extern void widescreen_set_shape(float f);  // (the window's: the game's cameras widen from the start)
-        widescreen_set_shape((float)((dw / dh) / (16.0 / 9.0)));
+        extern void widescreen_set_shape(float f);  // (the window's: the game's cameras reshape from the start)
+        static bool wt_init;
+        static double wide_test;
+        if (!wt_init) {
+            wt_init = true;
+            wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
+            if (!isfinite(wide_test) || wide_test <= 0 || wide_test > 16.0) wide_test = 0;
+        }
+        double eff_shape = wide_test > 0 ? wide_test : (dw > 0 && dh > 0 ? (dw / dh) / (16.0 / 9.0) : 1.0);
+        bool reshape_shape = isfinite(eff_shape) &&
+                             (eff_shape > 1.005 || (eff_shape < 0.995 && (wide_test > 0 ? eff_shape >= 9.0 / 16.0 : dw >= dh)));
+        if (!reshape_shape) eff_shape = 1.0;
+        widescreen_set_shape((float)eff_shape);
         {
             static double last_dw, last_dh;
             if (dw != last_dw || dh != last_dh)

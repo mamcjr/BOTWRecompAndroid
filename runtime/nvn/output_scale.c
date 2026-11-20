@@ -76,10 +76,20 @@ static void dyn_update(double now, double gpu_ms) {
 double output_scale_dynamic_factor(void) { return g_dyn; }
 
 void output_scale(double dw, double dh, bool reshape_allowed, double now, double gpu_ms, OutScale *o) {
+    if (!(dw > 0 && dh > 0 && isfinite(dw) && isfinite(dh))) {
+        *o = (OutScale){.sx = 0.1, .sy = 0.1, .scene_sx = 0.1, .scene_sy = 0.1, .shape = 1.0};
+        return;
+    }
     double fit = fmin(dw / 1920.0, dh / 1080.0);
-    static double forced = -1, wide_test = -1;
-    if (forced < 0) forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
-    if (wide_test < 0) wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
+    static bool env_init;
+    static double forced, wide_test;
+    if (!env_init) {
+        env_init = true;
+        forced = getenv("LARECOMP_SCALE") ? atof(getenv("LARECOMP_SCALE")) : 0;
+        if (!isfinite(forced) || forced <= 0) forced = 0;
+        wide_test = getenv("LARECOMP_WIDE_TEST") ? atof(getenv("LARECOMP_WIDE_TEST")) : 0;
+        if (!isfinite(wide_test) || wide_test <= 0 || wide_test > 16.0) wide_test = 0;
+    }
     double ox = 0, oy = 0;  // (LARECOMP_WIDE_TEST: a window of that shape in the middle of the real one, as a screen)
     if (wide_test > 0) {
         double ww = fmin(dw, dh * 16.0 / 9.0 * wide_test), wh = ww / (16.0 / 9.0 * wide_test);
@@ -87,11 +97,10 @@ void output_scale(double dw, double dh, bool reshape_allowed, double now, double
         fit = fmin(dw / 1920.0, dh / 1080.0);
     }
     double shape = (dw / dh) / (16.0 / 9.0);
-    // Only wider than 16:9: the game's cameras widen to the window (hle/widescreen.c rt_persp_update), and its HUD and
-    // menus move out to the sides. Narrower (4:3, 16:10), nothing narrows them: the 16:9 view went into a narrower
-    // image, squeezed from the sides (an Anbernic RG477M, 4:3). There the 16:9 image fits the window with bars above
-    // and below, as with Original.
-    bool reshape = reshape_allowed && shape > 1.005;
+    // Wider than 16:9 widens the view and HUD; narrow landscape (dw >= dh: 16:10, 3:2, 4:3, unfolded Fold) fills
+    // the screen via Vert+ FOV and fitted UI when camera hooks are active. Portrait (dw < dh) and unhooked versions
+    // (1.0.0, 1.6.0: reshape_allowed false) keep a centered 16:9 image with bars.
+    bool reshape = reshape_allowed && (shape > 1.005 || (shape < 0.995 && dw >= dh));
     if (!reshape) shape = 1.0;
     // the final image: the window's resolution, in units of the Switch's 1080 lines
     double h = fmax(reshape ? dh / 1080.0 : fit, 0.1);
