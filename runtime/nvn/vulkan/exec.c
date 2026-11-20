@@ -27,6 +27,9 @@
 #include "shaders.h"
 #include "shader_meta_cache.h"
 #include "vk.h"
+#define CBWIN_SPAN_TYPE
+typedef VkSpan CbwinSpan;
+#include "cbwin_snap.h"
 #if defined(__has_include)
 #if __has_include("benchmark_commit.h")
 #include "benchmark_commit.h"
@@ -301,7 +304,7 @@ static void cq_resolve_done(uint64_t done);
 static void wb_apply(uint64_t done);
 
 #ifdef __ANDROID__
-static bool gcopy_mode;   // (no heap import: global memory copied by the CPU, gcopy_prepare)
+static _Atomic bool gcopy_mode;   // (no heap import: global memory copied by the CPU, gcopy_prepare)
 #ifdef __ANDROID__
 static bool gwin_mode;    // (heap placed, larger than a storage buffer reaches: draws get a window of it, gwin_prepare)
 #endif
@@ -1353,7 +1356,7 @@ VkSpan vk_transient_copy(const void *data, uint64_t size, uint64_t align) {
 
 // Per-draw constants that usually repeat the previous draw's (scale table, tint, driver constants): reuse that copy
 // while it's identical, within one submission. slot: one per kind of data.
-enum { DEDUPE_RSCALE_V, DEDUPE_RSCALE_F, DEDUPE_TINT, DEDUPE_DRV_V, DEDUPE_DRV_F, DEDUPE_DRV_C, DEDUPE_CBP_V, DEDUPE_CBP_F, DEDUPE_SLOTS };
+enum { DEDUPE_RSCALE_V, DEDUPE_RSCALE_F, DEDUPE_TINT, DEDUPE_DRV_V, DEDUPE_DRV_F, DEDUPE_DRV_C, DEDUPE_SLOTS };
 #ifdef __ANDROID__
 // This draw's gmap table (gmap_tab) in transient memory, shared with the draws of the submission that have the same
 // one (the last 8 kept): the copy mode gives every draw that reaches global memory a table, and a new copy each time
@@ -1392,7 +1395,8 @@ static uint16_t gcopy_active[GCOPY_TAB];
 static int gcopy_nactive;
 static uint64_t gcopy_active_seq;
 static uint64_t gcopy_gen;  // bumped to drop every shared copy (guest memory written mid-list)
-static void guest_copy_flush(void) { gcopy_gen++; gcopy_nactive = 0; }
+static void cbwin_cache_drop(void);
+static void guest_copy_flush(void) { gcopy_gen++; gcopy_nactive = 0; cbwin_cache_drop(); }
 static void guest_copy_invalidate(uint64_t lo, uint64_t hi) {
     uint64_t seq = vk_pending_seq() + (gcopy_gen << 40);
     if (gcopy_active_seq != seq) return;
@@ -1412,6 +1416,39 @@ static VkSpan guest_copy(uint64_t addr, uint64_t size) {
     gcopy[slot].addr = addr; gcopy[slot].size = size; gcopy[slot].seq = seq; gcopy[slot].span = s;
     return s;
 }
+#ifdef __ANDROID__
+// Private seqlock for cbwin base snapshots only (zero gcopy_gen churn on non-cbwin copy-mode devices).
+static _Atomic uint64_t cbwin_retire_gen;
+static _Atomic uint32_t cbwin_retire_writing;
+static _Atomic bool cbwin_retire_armed;
+static inline void cbwin_write_begin(void) {
+    atomic_fetch_add_explicit(&cbwin_retire_writing, 1, memory_order_seq_cst);
+    atomic_fetch_add_explicit(&cbwin_retire_gen, 1, memory_order_seq_cst);
+    atomic_thread_fence(memory_order_seq_cst);
+}
+static inline void cbwin_write_end(void) {
+    atomic_thread_fence(memory_order_seq_cst);
+    atomic_fetch_add_explicit(&cbwin_retire_gen, 1, memory_order_seq_cst);
+    atomic_fetch_sub_explicit(&cbwin_retire_writing, 1, memory_order_seq_cst);
+}
+static inline uint64_t cbwin_read_begin(bool *can_cache) {
+    uint64_t g0 = atomic_load_explicit(&cbwin_retire_gen, memory_order_seq_cst);
+    uint32_t w = atomic_load_explicit(&cbwin_retire_writing, memory_order_seq_cst);
+    uint64_t g1 = atomic_load_explicit(&cbwin_retire_gen, memory_order_seq_cst);
+    *can_cache = (w == 0 && g0 == g1);
+    return g1;
+}
+static inline bool cbwin_read_end_ok(uint64_t g0, bool can_cache) {
+    if (!can_cache) return false;
+    atomic_thread_fence(memory_order_seq_cst);
+    uint64_t g1 = atomic_load_explicit(&cbwin_retire_gen, memory_order_seq_cst);
+    uint32_t w1 = atomic_load_explicit(&cbwin_retire_writing, memory_order_seq_cst);
+    return w1 == 0 && g1 == g0;
+}
+static inline uint64_t cbwin_seq_key(uint64_t rgen) {
+    return vk_pending_seq() + ((gcopy_gen + rgen) << 40);
+}
+#endif
 
 // ================================================================== worker threads (shader / pipeline builds)
 // First-use compiles run off the render thread; draws needing them are skipped until ready (as on Metal).
@@ -2229,6 +2266,10 @@ static void wb_apply(uint64_t done) {
         for (; k > 0 && wb_ent[ready[k - 1]].order > wb_ent[i].order; k--) ready[k] = ready[k - 1];
         ready[k] = i;
     }
+#ifdef __ANDROID__
+    bool cbwin_armed = nready > 0 && atomic_load_explicit(&cbwin_retire_armed, memory_order_acquire);
+    if (cbwin_armed) cbwin_write_begin();
+#endif
     for (int r = 0; r < nready; r++) {
         WbEntry *e = &wb_ent[ready[r]];
         vmaInvalidateAllocation(g_vk.vma, wb_mem, (VkDeviceSize)e->off, e->size);
@@ -2276,6 +2317,9 @@ static void wb_apply(uint64_t done) {
         }
         e->busy = false;
     }
+#ifdef __ANDROID__
+    if (cbwin_armed) cbwin_write_end();
+#endif
     pthread_mutex_unlock(&wb_lock);
 }
 
@@ -4760,7 +4804,8 @@ static bool gmem_placed_(void);
 static uint64_t cbwin_row_(uint64_t addr, uint64_t size);
 #endif
 // (cbwin) the patch buffers of the draw being bound, vertex and fragment: shader.h maxwell_cb_window
-static struct { uint32_t m[4], rows[64][4]; } cbw_patch[2];
+static CbpatchBuf cbw_patch[2];
+static CbpatchDedupe g_cbpatch_dedupe;
 
 // Constant buffer k of a stage (renderer.m bind_cbufs), copied into transient memory.
 // BOTW's half-size passes on a scaled scene (from SavageWindRecomp's up_fix, MIT): the draws that bring its half-size
@@ -5207,13 +5252,15 @@ static VkBuffer gmem_buf;
 static VkDeviceMemory gmem_mem;
 static uint64_t gmem_size;
 #ifdef __ANDROID__
-static bool gmem_placed;  // (gmem_buf is the guest heap itself, usable as a uniform buffer: vk_heap_place)
+static _Atomic bool gmem_placed;  // (gmem_buf is the guest heap itself, usable as a uniform buffer: vk_heap_place)
 
 static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
     static int on = -1;
     if (on < 0) on = getenv("LARECOMP_UBO_DIRECT") && atoi(getenv("LARECOMP_UBO_DIRECT"));
     extern int vk_ab(const char *what);
-    if (!(on || AB("ubo") == 1) || !gmem_placed || addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
+    if (!(on || AB("ubo") == 1) || !atomic_load_explicit(&gmem_placed, memory_order_relaxed) ||
+        addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size)
+        return false;
     uint64_t off = addr - HEAP_BASE;
     if ((off & (g_vk.props.limits.minUniformBufferOffsetAlignment - 1)) || size > g_vk.props.limits.maxUniformBufferRange)
         return false;
@@ -5223,27 +5270,38 @@ static bool ubo_direct(uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out
     return true;
 }
 
+static CbwinBaseCache g_cbwin_cache;
+static void cbwin_cache_drop(void) { cbwin_base_reset(&g_cbwin_cache); }
+static _Atomic int cbwin_env = -2;
+static _Atomic int cbwin_snap_env = -1;
+
 // Constant buffers patched per draw (shader.h maxwell_cb_window). BOTW binds a 64 KB constant buffer, always at the
 // same address and read with register indices, and rewrites 16 bytes of its first 656 (UpdateUniformBuffer, one row
-// or another of them) before nearly every draw. The updates keep it out of ubo_direct, and as each draw needs its own
-// snapshot, every draw copied all 64 KB (~14 MB a frame). Instead it is bound in place in the placed heap, and the draw
-// copies only the rows the updates write, as they are when it runs (the render thread wrote them through:
-// CMD_UPDATE_UNIFORM_BUFFER), into its stage's patch buffer, which its shaders read those rows from. Only for a buffer
-// whose updated rows fit in 64 in a row, one such buffer per stage; anything else is copied as before.
-// LARECOMP_CB_WINDOW=1: on (off by default, below); LARECOMP_AB=<frames>:cbwin alternates it (the shaders keep the test).
-// Off by default since 2026-10-27: in play (1.9.0) the water turned white and the terrain showed stretched "curtains",
-// and objects far away grew spikes on a hit - the buffer read in place while the CPU already writes the next frame's
-// rows there (the sync lag lets the CPU run a frame ahead). LARECOMP_CB_WINDOW=1: on (a test).
+// or another of them) before nearly every draw. Each draw receives a submission-scoped transient snapshot (or shares
+// the submission's snapshot when UpdateUniformBuffer only writes inside the patched row window) plus the 16..1040-byte
+// patch buffer for its rows, keeping sync_lag and CPU writes race-free on both placed-heap and copy-mode GPUs (Mali).
+// LARECOMP_CB_WINDOW=1 / 0: force on / off; default on for Mali copy mode; LARECOMP_AB=<frames>:cbwin alternates it.
 static bool cbwin_wanted(void) {
-    static int on = -1;
-    if (on < 0) on = getenv("LARECOMP_CB_WINDOW") && atoi(getenv("LARECOMP_CB_WINDOW"));
-    return on && gmem_placed;
+    int cur = atomic_load_explicit(&cbwin_env, memory_order_relaxed);
+    if (cur == -2) {
+        const char *e = getenv("LARECOMP_CB_WINDOW");
+        cur = e ? (atoi(e) != 0) : -1;
+        atomic_store_explicit(&cbwin_env, cur, memory_order_relaxed);
+    }
+    bool gp = atomic_load_explicit(&gmem_placed, memory_order_relaxed);
+    bool gc = atomic_load_explicit(&gcopy_mode, memory_order_relaxed);
+    bool on = cur >= 0 ? (cur && (gp || gc)) : (!gp && gc && vk_driver_is_mali());
+    if (on) atomic_store_explicit(&cbwin_retire_armed, true, memory_order_release);
+    return on;
 }
 // (the update marks are guest addresses: a reboot's game puts other things there)
 RT_ON_RESET(ubo_inline_reset) {
     memset((void *)ubo_inline, 0, sizeof ubo_inline);
     memset((void *)ubo_inline_span, 0, sizeof ubo_inline_span);
     atomic_fetch_add(&ubo_inline_gen, 1);
+    atomic_store_explicit(&cbwin_env, -2, memory_order_relaxed);
+    atomic_store_explicit(&cbwin_snap_env, -1, memory_order_relaxed);
+    cbwin_base_reset(&g_cbwin_cache);
 }
 
 // The rows updates write inside [addr, addr + size): the first one's guest address | (the row count (1..64) - 1) << 48,
@@ -5274,13 +5332,42 @@ static uint64_t cbwin_rows(uint64_t addr, uint64_t size) {
     return rows;
 }
 
+static VkSpan cbwin_base_copy(uint64_t addr, uint64_t size, uint64_t win_lo, uint64_t win_hi) {
+    bool can_cache = false;
+    uint64_t gen = cbwin_read_begin(&can_cache);
+    uint64_t seq = cbwin_seq_key(gen);
+    VkSpan s;
+    if (can_cache && cbwin_base_lookup(&g_cbwin_cache, seq, addr, size, win_lo, win_hi, &s)) return s;
+    s = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
+    stat_cb_copied += size;
+    if (cbwin_read_end_ok(gen, can_cache))
+        cbwin_base_insert(&g_cbwin_cache, seq, addr, size, win_lo, win_hi, s);
+    return s;
+}
+
 static bool cbwin_bind(int stage, int k, uint64_t addr, uint64_t size, VkDescriptorBufferInfo *out) {
-    if ((stage != 0 && stage != 1) || !gmem_placed || cbw_patch[stage].m[0] || AB("cbwin") == 1) return false;
-    if (addr < HEAP_BASE || addr + size > HEAP_BASE + gmem_size) return false;
-    uint64_t off = addr - HEAP_BASE;
-    if ((off & (g_vk.props.limits.minUniformBufferOffsetAlignment - 1)) || size > g_vk.props.limits.maxUniformBufferRange ||
-        off > 0xFFFFFFFFull)
-        return false;
+    if ((stage != 0 && stage != 1) || !cbwin_wanted() || cbw_patch[stage].m[0] || AB("cbwin") == 1) return false;
+    if (!size || (addr & 15) || size > g_vk.props.limits.maxUniformBufferRange) return false;
+    uint64_t off = 0;
+    bool placed_ok = false;
+    if (atomic_load_explicit(&gmem_placed, memory_order_relaxed) &&
+        addr >= HEAP_BASE && addr <= HEAP_BASE + gmem_size && size <= HEAP_BASE + gmem_size - addr) {
+        off = addr - HEAP_BASE;
+        uint64_t align_mask = g_vk.props.limits.minUniformBufferOffsetAlignment
+                                  ? g_vk.props.limits.minUniformBufferOffsetAlignment - 1
+                                  : 0;
+        placed_ok = !(off & align_mask) && off <= 0xFFFFFFFFull;
+    }
+    if (!placed_ok && !atomic_load_explicit(&gcopy_mode, memory_order_relaxed)) return false;
+    // The rest of the buffer from one copy per submission (LARECOMP_CBWIN_SNAPSHOT=0: read in place when placed).
+    int snap = atomic_load_explicit(&cbwin_snap_env, memory_order_relaxed);
+    if (snap < 0) {
+        const char *se = getenv("LARECOMP_CBWIN_SNAPSHOT");
+        snap = !se || atoi(se) != 0;
+        atomic_store_explicit(&cbwin_snap_env, snap, memory_order_relaxed);
+    }
+    bool use_snap = snap && AB("cbsnap") != 1;
+    if (!use_snap && !placed_ok) return false;
     uint64_t rows = cbwin_rows(addr, size), first = rows & ((1ull << 48) - 1), n = (rows >> 48) + 1;
     if (!rows) return false;
     memcpy(cbw_patch[stage].rows, (const void *)(uintptr_t)first, n * 16);
@@ -5288,22 +5375,8 @@ static bool cbwin_bind(int stage, int k, uint64_t addr, uint64_t size, VkDescrip
     cbw_patch[stage].m[1] = (uint32_t)((first - addr) >> 4);
     cbw_patch[stage].m[2] = (uint32_t)n;
     stat_cbwin++;
-    // The rest of the buffer from one copy per submission (LARECOMP_CBWIN_SNAPSHOT=0: read in place, as before). Read in
-    // place, the GPU saw the rows the CPU already wrote for the next frame (the sync lag): white water, terrain
-    // "curtains". The updates only write the window's rows, which the shaders take from the patch, so the copy outlives
-    // them (guest_copy's own entry is dropped by each update: a 64 KB copy a draw, ~14 MB a frame).
-    static int snap = -1;
-    if (snap < 0) snap = !getenv("LARECOMP_CBWIN_SNAPSHOT") || atoi(getenv("LARECOMP_CBWIN_SNAPSHOT"));
-    if (snap && AB("cbsnap") != 1) {
-        static struct { uint64_t addr, size, seq; VkSpan span; } base[8];
-        uint64_t seq = vk_pending_seq() + (gcopy_gen << 40);
-        uint32_t i = (uint32_t)((addr >> 8) ^ size) & 7;
-        if (base[i].seq != seq || base[i].addr != addr || base[i].size != size) {
-            base[i].span = vk_transient_copy((const void *)(uintptr_t)addr, size, 256);
-            base[i].addr = addr, base[i].size = size, base[i].seq = seq;
-            stat_cb_copied += size;
-        }
-        *out = ubo_span(base[i].span, size);
+    if (use_snap) {
+        *out = ubo_span(cbwin_base_copy(addr, size, first, first + n * 16), size);
         return true;
     }
     *out = (VkDescriptorBufferInfo){gmem_buf, off, size};
@@ -5311,6 +5384,8 @@ static bool cbwin_bind(int stage, int k, uint64_t addr, uint64_t size, VkDescrip
 }
 static bool gmem_placed_(void) { return gmem_placed; }
 static uint64_t cbwin_row_(uint64_t addr, uint64_t size) { return cbwin_rows(addr, size); }
+#else
+static void cbwin_cache_drop(void) {}
 #endif
 
 static bool gmem_import(uint64_t size) {
@@ -5734,6 +5809,13 @@ static pthread_mutex_t gc_lock = PTHREAD_MUTEX_INITIALIZER;
 
 static void gcopy_retire(uint64_t done) {
     pthread_mutex_lock(&gc_lock);
+    bool any_ready = false;
+    for (int i = 0; i < gc_nback; i++)
+        if (gc_back[i].seq <= done) { any_ready = true; break; }
+#ifdef __ANDROID__
+    bool cbwin_armed = any_ready && atomic_load_explicit(&cbwin_retire_armed, memory_order_acquire);
+    if (cbwin_armed) cbwin_write_begin();
+#endif
     int k = 0;
     for (int i = 0; i < gc_nback; i++) {
         if (gc_back[i].seq <= done) {
@@ -5760,6 +5842,9 @@ static void gcopy_retire(uint64_t done) {
         } else gc_back[k++] = gc_back[i];
     }
     gc_nback = k;
+#ifdef __ANDROID__
+    if (cbwin_armed) cbwin_write_end();
+#endif
     pthread_mutex_unlock(&gc_lock);
 }
 
@@ -6624,7 +6709,7 @@ static bool vcache_lookup(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceS
         }
     }
 #ifdef __ANDROID__
-    bool cpu_fill = !gmem_buf && gcopy_mode;  // (Qualcomm's driver: filled from the CPU - vc_flush)
+    bool cpu_fill = !gmem_buf && atomic_load_explicit(&gcopy_mode, memory_order_relaxed);  // (Qualcomm's driver: filled from the CPU - vc_flush)
 #else
     bool cpu_fill = false;
 #endif
@@ -6748,7 +6833,7 @@ static bool guest_direct(uint64_t addr, uint64_t size, VkBuffer *buf, VkDeviceSi
     if (copy < 0) copy = getenv("LARECOMP_VK_COPY_VERTICES") != NULL;
     if (copy || addr < HEAP_BASE) return false;
 #ifdef __ANDROID__
-    if (gcopy_mode && !gmem_buf) return addr + size <= HEAP_BASE + HEAP_MAX && vcache_lookup(addr, size, buf, off);  // (else copied)
+    if (atomic_load_explicit(&gcopy_mode, memory_order_relaxed) && !gmem_buf) return addr + size <= HEAP_BASE + HEAP_MAX && vcache_lookup(addr, size, buf, off);  // (else copied)
 #endif
     if (addr + size > HEAP_BASE + gmem_size && kernel_heap_size() != gmem_tried) { gmem_tried = kernel_heap_size(); gmem_info(); }
     if (!gmem_buf || addr + size > HEAP_BASE + gmem_size) return false;
@@ -6799,7 +6884,7 @@ void vk_exec_reset(void) {
     atomic_store(&pipeline_keys, 0);
     int nc = compute_reset();
     LOG("[vk] reboot: %d programs, %d pipelines and %d compute programs freed (%d kept)\n", np, ng, nc, kept);
-    gcopy_gen++;
+    guest_copy_flush();
     if (gmem_buf) {
         vkDestroyBuffer(g_vk.dev, gmem_buf, NULL);
         vkFreeMemory(g_vk.dev, gmem_mem, NULL);
@@ -6808,9 +6893,14 @@ void vk_exec_reset(void) {
     }
     gmem_size = gmem_tried = 0;
     g_inplace_copy = -1;  // (the next boot reads the setting again: resolve_feedback)
+    cbpatch_dedupe_reset(&g_cbpatch_dedupe);
 #ifdef __ANDROID__
     gwin_mode = false;
     gfast_win = (VkDescriptorBufferInfo){0};
+    atomic_store_explicit(&cbwin_env, -2, memory_order_relaxed);
+    atomic_store_explicit(&cbwin_snap_env, -1, memory_order_relaxed);
+    atomic_store_explicit(&cbwin_retire_armed, false, memory_order_release);
+    gmem_placed = false;
     gcopy_mode = !g_vk.host_import && !getenv("LARECOMP_VK_NO_GCOPY");  // (until the next heap is placed: vk_heap_place)
     gres_reset();  // (the arena's resident ranges: keyed by the old heap's addresses)
 #endif
@@ -7059,8 +7149,14 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
         w[n] = (VkWriteDescriptorSet){.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = b->binding,
                                       .descriptorCount = 1, .descriptorType = b->type};
         if (b->binding == CBPATCH_BUFFER_INDEX) {  // the rows cbwin_bind took for this stage (its cbuf_info calls: above)
-            bi[n] = ubo_span(copy_dedupe(sg ? DEDUPE_CBP_F : DEDUPE_CBP_V, &cbw_patch[sg], sizeof cbw_patch[sg], 256),
-                             sizeof cbw_patch[sg]);
+            uint64_t cbp_seq = vk_pending_seq();
+            uint32_t cbp_active = 0;
+            VkSpan cbp_sp;
+            if (!cbpatch_lookup(&g_cbpatch_dedupe, sg, cbp_seq, &cbw_patch[sg], &cbp_active, &cbp_sp)) {
+                cbp_sp = vk_transient(sizeof cbw_patch[sg], 256);
+                cbpatch_commit(&g_cbpatch_dedupe, sg, cbp_seq, &cbw_patch[sg], cbp_active, cbp_sp);
+            }
+            bi[n] = ubo_span(cbp_sp, sizeof cbw_patch[sg]);
         } else if (b->binding == GMAP_BUFFER_INDEX) {  // (compute) this dispatch's fast-copy table: gfast_prepare
 #ifdef __ANDROID__
             bi[n] = ubo_span(gmap_copy(), sizeof gmap_tab);
@@ -7362,7 +7458,7 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
         LOG("\n");
     }
 #ifdef __ANDROID__
-    if (gcopy_mode && cp->si->uses_gmem_map) gcopy_prepare(1u << 5, cp->si->uses_gmem_store);
+    if (atomic_load_explicit(&gcopy_mode, memory_order_relaxed) && cp->si->uses_gmem_map) gcopy_prepare(1u << 5, cp->si->uses_gmem_store);
     else
 #endif
     if (cp->si->uses_gmem_map) gfast_prepare(cb);
@@ -7924,7 +8020,7 @@ static void draw_(CmdRec *r, bool indexed) {
         }
     }
 #ifdef __ANDROID__
-    if (gcopy_mode && (pr->vi->uses_gmem_store || pr->fi->uses_gmem_store) && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map))
+    if (atomic_load_explicit(&gcopy_mode, memory_order_relaxed) && (pr->vi->uses_gmem_store || pr->fi->uses_gmem_store) && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map))
         gres_premerge((pr->vi->uses_gmem_map ? 1u : 0u) | (pr->fi->uses_gmem_map ? 2u : 0u));  // (before the pass opens)
 #endif
     begin_pass();
@@ -8197,7 +8293,7 @@ static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_dyn += SDL_GetTicksNS() - prof_td_;
     PROF_T0();
 #ifdef __ANDROID__
-    if (gcopy_mode && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map))  // (the table both stages' sets use)
+    if (atomic_load_explicit(&gcopy_mode, memory_order_relaxed) && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map))  // (the table both stages' sets use)
         gcopy_prepare((pr->vi->uses_gmem_map ? 1u : 0u) | (pr->fi->uses_gmem_map ? 2u : 0u),
                       pr->vi->uses_gmem_store || pr->fi->uses_gmem_store);
     else if (gwin_mode && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map)) {
@@ -8208,7 +8304,8 @@ static void draw_(CmdRec *r, bool indexed) {
     }
 #endif
     uint32_t dyn[64], ndv = 0, ndf = 0;  // (the sets' dynamic uniform buffer offsets: vertex, then fragment)
-    memset(cbw_patch, 0, sizeof cbw_patch);  // (cbwin_bind fills them while the sets are written)
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);  // (cbwin_bind fills them while the sets are written)
+    memset(cbw_patch[1].m, 0, sizeof cbw_patch[1].m);
     VkDescriptorSet vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndv);
     PROF_ADD(prof_sets);
     VkDescriptorImageInfo fii[64];
@@ -8232,7 +8329,8 @@ static void draw_(CmdRec *r, bool indexed) {
             up_fix.sx = (float)gb->width / (float)gt->width, up_fix.sy = (float)gb->height / (float)gt->height;
             up_fix.tw = gt->width, up_fix.th = gt->height, up_fix.aw = gb->width, up_fix.ah = gb->height;
             ndv = 0;  // (the vertex set again, with its constants patched)
-            memset(cbw_patch, 0, sizeof cbw_patch);
+            memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+            memset(cbw_patch[1].m, 0, sizeof cbw_patch[1].m);
             vset = stage_set(pr, pr->set_layout[0], 0, 0, pr->vi, NULL, NULL, 0, 0, 0, NULL, dyn, &ndv);
         }
     }
@@ -9590,6 +9688,12 @@ static void exec_list(uint64_t handle, int depth) {
             if (sz && memcmp((const void *)(uintptr_t)dst, x, sz)) {
                 memcpy((void *)(uintptr_t)dst, x, sz);
                 guest_copy_invalidate(dst, dst + sz);
+#ifdef __ANDROID__
+                if (cbwin_wanted())
+                    cbwin_invalidate_outside(&g_cbwin_cache,
+                                             cbwin_seq_key(atomic_load_explicit(&cbwin_retire_gen, memory_order_acquire)),
+                                             dst, dst + sz);
+#endif
             }
             break;
         }
@@ -9696,6 +9800,7 @@ static void exec_list(uint64_t handle, int depth) {
             }
             renderer_flush();
             memmove((void *)(uintptr_t)r->x[1], (void *)(uintptr_t)r->x[0], r->x[2]);
+            guest_copy_flush();
             break;
         default: break;
         }
