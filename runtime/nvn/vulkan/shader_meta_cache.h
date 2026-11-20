@@ -18,10 +18,11 @@
 #include "../maxwell/shader.h"
 
 #define MW_META_MAGIC   "MWSMET01"
-#define MW_META_VERSION 3u
+#define MW_META_VERSION 4u
 
-_Static_assert(sizeof(bool) == 1 && sizeof(ShaderKey) == 88 &&
-               offsetof(ShaderKey, soft_linear) == offsetof(ShaderKey, pad_) + sizeof(((ShaderKey *)0)->pad_),
+_Static_assert(sizeof(bool) == 1 && sizeof(ShaderKey) == 104 &&
+               offsetof(ShaderKey, soft_linear) == offsetof(ShaderKey, pad_) + sizeof(((ShaderKey *)0)->pad_) &&
+               offsetof(ShaderKey, local_read_slot) == offsetof(ShaderKey, soft_linear_rep_v) + sizeof(uint64_t),
                "ShaderKey layout changed; keep explicit padding zeroed and packed");
 
 enum {
@@ -81,9 +82,11 @@ typedef struct {
     uint8_t pad[3];
     uint32_t local_mem;
     uint32_t num_insts;
+    uint32_t screen_uv_mask;
+    uint32_t pad_lr;
     uint64_t payload_hash;
 } MwMetaHdr;
-_Static_assert(sizeof(MwMetaHdr) == 160, "MwMetaHdr must stay 160 bytes without padding");
+_Static_assert(sizeof(MwMetaHdr) == 168, "MwMetaHdr must stay 168 bytes without padding");
 
 typedef struct {
     uint32_t handle_offset;
@@ -91,7 +94,8 @@ typedef struct {
     uint32_t bindless_offset;
     uint8_t type;
     uint8_t flags;
-    uint8_t pad[2];
+    uint8_t local_read_var;
+    uint8_t pad;
 } MwMetaTex;
 _Static_assert(sizeof(MwMetaTex) == 16, "MwMetaTex must stay 16 bytes without padding");
 
@@ -163,7 +167,7 @@ static inline bool mw_stage_key(const uint8_t *blob, uint64_t cmax, size_t const
     mw_mix_u64(&h1, &h2, gmem_base);
     mw_mix_u64(&h1, &h2, gmem_size);
 
-    // Hash the entire 88-byte ShaderKey after zeroing pad_ and normalizing bools / opposite-stage fields so any future field is covered.
+    // Hash the entire 104-byte ShaderKey after zeroing pad_ and normalizing bools / opposite-stage fields so any future field is covered.
     ShaderKey k = *key;
     memset(k.pad_, 0, sizeof k.pad_);
     k.depth_minus_one = !!k.depth_minus_one;
@@ -176,6 +180,8 @@ static inline bool mw_stage_key(const uint8_t *blob, uint64_t cmax, size_t const
         memset(k.rt_kind, 0, sizeof k.rt_kind);
         k.no_ds_write = false;
         k.vs_out_mask = 0;
+        memset(k.local_read_slot, 0, sizeof k.local_read_slot);
+        memset(k.local_read_att, 0, sizeof k.local_read_att);
     } else {
         memset(k.attr_kind, 0, sizeof k.attr_kind);
         k.depth_minus_one = false;
@@ -259,6 +265,7 @@ static inline bool mw_meta_store(const char *dir, uint64_t h1, uint64_t h2, int 
     hdr.fs_gather = fs_gather;
     hdr.local_mem = si->local_mem;
     hdr.num_insts = si->num_insts;
+    hdr.screen_uv_mask = si->screen_uv_mask;
 
     MwMetaTex tex[64];
     memset(tex, 0, sizeof tex);
@@ -273,6 +280,7 @@ static inline bool mw_meta_store(const char *dir, uint64_t h1, uint64_t h2, int 
                                  (st->is_image ? 4u : 0u) |
                                  (st->bindless ? 8u : 0u) |
                                  (st->sampled ? 16u : 0u));
+        tex[i].local_read_var = st->local_read_var;
     }
     hdr.payload_hash = mw_meta_payload_hash(&hdr, tex, hdr.ntex);
 
@@ -338,6 +346,8 @@ static inline ShaderInfo *mw_meta_load(const char *dir, uint64_t want_h1, uint64
     MwMetaTex tex[64];
     if (hdr.ntex) memcpy(tex, buf + sizeof(MwMetaHdr), (size_t)hdr.ntex * sizeof(MwMetaTex));
     if (mw_meta_payload_hash(&hdr, tex, hdr.ntex) != hdr.payload_hash) return NULL;
+    for (uint32_t i = 0; i < hdr.ntex; i++)
+        if (tex[i].local_read_var > 32u) return NULL;
 
     ShaderInfo *si = (ShaderInfo *)calloc(1, sizeof *si);
     if (!si) return NULL;
@@ -358,6 +368,7 @@ static inline ShaderInfo *mw_meta_load(const char *dir, uint64_t want_h1, uint64
         si->tex[i].is_image = (tex[i].flags & 4u) != 0;
         si->tex[i].bindless = (tex[i].flags & 8u) != 0;
         si->tex[i].sampled = (tex[i].flags & 16u) != 0;
+        si->tex[i].local_read_var = tex[i].local_read_var;
     }
     si->attr_mask = hdr.attr_mask;
     si->out_mask = hdr.out_mask;
@@ -371,6 +382,7 @@ static inline ShaderInfo *mw_meta_load(const char *dir, uint64_t want_h1, uint64
     si->uses_rscale = (hdr.bool_flags & MW_BF_USES_RSCALE) != 0;
     si->local_mem = hdr.local_mem;
     si->num_insts = hdr.num_insts;
+    si->screen_uv_mask = hdr.screen_uv_mask;
 
     *out_spv_hash = hdr.spv_hash;
     if (out_vs_uses_vid) *out_vs_uses_vid = (hdr.bool_flags & MW_BF_VS_USES_VID) != 0;

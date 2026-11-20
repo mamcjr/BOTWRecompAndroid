@@ -623,6 +623,15 @@ static const char *alayer(Ctx *c, const char *r, int slot, char *buf) {
 }
 #define ALAYER(r, slot) alayer(c, (r), (slot), alloca(96))
 
+static int key_local_read_att(const ShaderKey *key, int slot) {
+    if (!key || slot < 0 || slot >= 64) return -1;
+    uint8_t want = (uint8_t)(slot + 1);
+    for (int i = 0; i < 8 && key->local_read_slot[i]; i++) {
+        if (key->local_read_slot[i] == want) return (int)key->local_read_att[i];
+    }
+    return -1;
+}
+
 // GLSL texture lookup on slot `slot` (its type is final here: a conflicting use fails in tex_slot).
 // co: coordinate expressions (1 for 1D, 2 for 2D, 3 for 3D / cube), layer: uint expression or NULL, dref: depth
 // reference or NULL, lod_kind 0 implicit / 1 level / 2 bias (lod), off: ivec2 texel offset or NULL.
@@ -648,6 +657,16 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
     t->sampled = true;
     bool soft_lin = c->key && slot >= 0 && slot < 64 && (c->key->soft_linear & (1ULL << slot)) &&
                     !t->shadow && (type == TEXTYPE_2D || type == TEXTYPE_2D_ARRAY);
+    if (c->stage == STAGE_FRAGMENT && c->key && key_local_read_att(c->key, slot) >= 0) {
+        if (type != TEXTYPE_2D || t->shadow || t->is_image || layer || dref || off || soft_lin ||
+            (lod_kind != 0 && !(lod_kind == 1 && lod && !strcmp(lod, "0.0f")))) {
+            fail(c, "local_read incompatible sample on slot %d", slot);
+            strcpy(out, "vec4(0.0f)");
+            return;
+        }
+        snprintf(out, 2000, "subpassLoad(t%d)", slot);
+        return;
+    }
     char L[600], xs[1600], P[2000];
     if (lod_kind == 1) snprintf(L, sizeof L, "int(%s)", lod); else strcpy(L, "0");
     if (n == 1) {
@@ -711,6 +730,11 @@ static void glsl_sample(Ctx *c, char *out, int slot, const char *const *co, cons
 static void glsl_gather(Ctx *c, char *out, int slot, const char *const *co, const char *layer, const char *dref,
                         const char *off, int comp) {
     if (c->fail) { strcpy(out, "vec4(0.0f)"); return; }
+    if (c->stage == STAGE_FRAGMENT && c->key && key_local_read_att(c->key, slot) >= 0) {
+        fail(c, "local_read incompatible gather on slot %d", slot);
+        strcpy(out, "vec4(0.0f)");
+        return;
+    }
     const ShaderTexture *t = &c->info->tex[slot];
     int type = t->type;
     bool cube = type == TEXTYPE_CUBE || type == TEXTYPE_CUBE_ARRAY;
@@ -806,6 +830,10 @@ static bool glsl_texs(Ctx *c, uint64_t w, bool fetch, int *slot_out, char *call,
         case 12: slot = tex_slot(c, index, TEXTYPE_2D, false, false);
             sprintf(call, "texelFetch(t%d, ivec2(%s), int(%s))", slot, RSC2(c, slot, "uint2(int2(%s, %s) + int2(int(%s << 28) >> 28, int(%s << 24) >> 28))", A, A1, B1, B1), Bv); break;
         default: fail(c, "tlds info %d", info); return false;
+        }
+        if (c->stage == STAGE_FRAGMENT && c->key && key_local_read_att(c->key, slot) >= 0) {
+            fail(c, "local_read incompatible fetch on slot %d", slot);
+            return false;
         }
     }
     *slot_out = slot;
@@ -1184,6 +1212,10 @@ static void emit_tmml(Ctx *c, uint64_t w, bool bindless, uint32_t pc) {
     else if (ncoord == 2) snprintf(coords, sizeof coords, "float2(%s, %s)", cs[0], cs[1]);
     else snprintf(coords, sizeof coords, "float3(%s, %s, %s)", cs[0], cs[1], cs[2]);
     if (c->glsl && c->stage == STAGE_FRAGMENT) {
+        if (c->key && key_local_read_att(c->key, slot) >= 0) {
+            fail(c, "local_read incompatible tmml on slot %d", slot);
+            return;
+        }
         // Both as unsigned 24.8, a negative LOD (a magnified texture) as 0 - yuzu's F2U.32 (2e478a66c, "TOTK flickering
         // clouds"; TOTKRecompAndroid c193510). Through int() a LOD of -0.5 became 0xffffff80, which the shader turns back
         // into a float as unsigned (I2F.U32): a LOD of ~16 million, clamped to the texture's last level - whatever the
@@ -1348,6 +1380,8 @@ static void emit_insn(Ctx *c, uint64_t w, uint32_t pc) {
         int qt = (int)bits(w, 22, 6);
         uint32_t mask = (uint32_t)bits(w, 31, 4);
         int slot = tex_slot(c, index, -1, false, false);  // the type comes from a sample, if any
+        if (c->glsl && c->stage == STAGE_FRAGMENT && key_local_read_att(c->key, slot) >= 0)
+            fail(c, "local_read incompatible txq on slot %d", slot);
         if (qt == 1 && c->glsl) {  // tsize<slot>() is emitted with the slot's final type (the guest size of scaled ones)
             c->uses_rscale = true;
             sp(&c->body, "    { uint lv = %s; uvec4 q = uvec4(uint(floor(float(tsize%d(int(lv)).x) / rscale[%d].x + 0.5f)), "
@@ -2945,6 +2979,12 @@ static ShaderInfo *glsl_finish(Ctx *c, bool any_branch, bool dbg) {
     }
     for (int i = 0; i < info->ntex; i++) {
         ShaderTexture *t = &info->tex[i];
+        int lr_att = (stage == STAGE_FRAGMENT) ? key_local_read_att(key, i) : -1;
+        if (lr_att >= 0) {
+            sp(&s, "layout(input_attachment_index = %d, set = %d, binding = %d) uniform subpassInput t%d;\n",
+               lr_att, set, 32 + i, i);
+            continue;
+        }
         sp(&s, "layout(set = %d, binding = %d) uniform %s t%d;\n", set, 32 + i, glsl_sampler_type(t), i);
         // size of level l as (width, height, depth or layers)
         switch (t->type) {
@@ -3144,6 +3184,581 @@ ShaderInfo *maxwell_translate(const uint8_t *blob, size_t max_size, int stage, c
     return maxwell_translate_bounded(blob, max_size, 0, stage, key);
 }
 
+// Conservative static proof of clip-aligned screen-UV varyings (vertex) and unmodified local-read texture slots (fragment).
+static inline bool opm64(uint64_t w, uint64_t val, uint64_t mask) { return (w & mask) == val; }
+
+static bool is_half_f32_bits(uint32_t u, int *sign_out) {
+    if (u == 0x3f000000u) { *sign_out = 1; return true; }
+    if (u == 0xbf000000u) { *sign_out = -1; return true; }
+    return false;
+}
+
+static uint32_t imm_f20_bits(uint64_t w, bool shift12) {
+    uint32_t v = (uint32_t)bits(w, 20, 19) | ((uint32_t)bits(w, 56, 1) << 19);
+    if (shift12) return v << 12;
+    if (v & 0x80000u) v |= 0xFFF00000u;
+    return v;
+}
+
+typedef enum { VS_OPAQUE = 0, VS_IMM = 1, VS_ADD = 2, VS_HALF = 3 } VsValKind;
+typedef struct {
+    uint8_t kind;
+    int8_t sa, sb;
+    uint32_t a, b, imm;
+} VsVal;
+
+static uint32_t vs_reg_val(uint32_t vs_reg[256], int r, uint32_t *next_opaque) {
+    if (r == RZ) return 0u;
+    if (!vs_reg[r]) vs_reg[r] = (*next_opaque)++;
+    return vs_reg[r];
+}
+
+static bool vs_is_imm_half(const VsVal *vals, uint32_t nvals, uint32_t id, int *sign_out) {
+    if (id == 0 || id >= nvals || vals[id].kind != VS_IMM) return false;
+    return is_half_f32_bits(vals[id].imm, sign_out);
+}
+
+static void vs_kill_reg(uint32_t vs_reg[256], int r, uint32_t *next_opaque) {
+    if (r >= 0 && r < RZ) vs_reg[r] = (*next_opaque)++;
+}
+
+static bool vs_is_half_node(const VsVal *vals, uint32_t nvals, uint32_t id, uint32_t *arg_out, int *sign_out) {
+    if (id == 0 || id >= nvals || vals[id].kind != VS_HALF) return false;
+    *arg_out = vals[id].a;
+    *sign_out = vals[id].sa;
+    return true;
+}
+
+// Match +/-0.5*target_a +/-0.5*target_b in either V_HALF(V_ADD(a, b)) or V_ADD(V_HALF(a), V_HALF(b)) form.
+static bool vs_match_half_lin(const VsVal *vals, uint32_t nvals, uint32_t eid, uint32_t tx, uint32_t tw,
+                              int want_sx, int want_sw) {
+    if (!eid || eid >= nvals || !tx || !tw) return false;
+    const VsVal *n = &vals[eid];
+    if (n->kind == VS_HALF) {
+        if (n->a == 0 || n->a >= nvals || vals[n->a].kind != VS_ADD) return false;
+        const VsVal *s = &vals[n->a];
+        int sx = n->sa * s->sa, sw = n->sa * s->sb;
+        if (s->a == tx && s->b == tw && sx == want_sx && sw == want_sw) return true;
+        if (s->a == tw && s->b == tx && sw == want_sx && sx == want_sw) return true;
+        return false;
+    }
+    if (n->kind == VS_ADD) {
+        uint32_t a1 = 0, a2 = 0;
+        int h1 = 0, h2 = 0;
+        if (!vs_is_half_node(vals, nvals, n->a, &a1, &h1) || !vs_is_half_node(vals, nvals, n->b, &a2, &h2))
+            return false;
+        int sx = n->sa * h1, sw = n->sb * h2;
+        if (a1 == tx && a2 == tw && sx == want_sx && sw == want_sw) return true;
+        int sw2 = n->sa * h1, sx2 = n->sb * h2;
+        if (a1 == tw && a2 == tx && sx2 == want_sx && sw2 == want_sw) return true;
+    }
+    return false;
+}
+
+static bool insn_has_no_gpr_dst(uint64_t w) {
+    return opm64(w, 0xe300000000000000ull, 0xfff0000000000000ull) || /* EXIT */
+           opm64(w, 0xe330000000000000ull, 0xfff0000000000000ull) || /* KIL */
+           opm64(w, 0xe240000000000000ull, 0xfff0000000000020ull) || /* BRA */
+           opm64(w, 0xe250000000000000ull, 0xfff0000000000020ull) || /* BRX */
+           opm64(w, 0xe290000000000000ull, 0xfff0000000000020ull) || /* SSY */
+           opm64(w, 0xe2a0000000000000ull, 0xfff0000000000020ull) || /* PBK */
+           opm64(w, 0xe2b0000000000000ull, 0xfff0000000000020ull) || /* PCNT */
+           opm64(w, 0xf0f8000000000000ull, 0xfff8000000000000ull) || /* SYNC */
+           opm64(w, 0xe340000000000000ull, 0xfff0000000000000ull) || /* BRK */
+           opm64(w, 0xe350000000000000ull, 0xfff0000000000000ull) || /* CONT */
+           opm64(w, 0xf0f0000000000000ull, 0xfff8000000000000ull) || /* DEPBAR */
+           opm64(w, 0x50b0000000000000ull, 0xfff8000000000000ull) || /* NOP */
+           opm64(w, 0xef98000000000000ull, 0xfff8000000000000ull) || /* MEMBAR */
+           opm64(w, 0xeff0000000000000ull, 0xfff8000000000000ull) || /* ST attr */
+           opm64(w, 0x5bb0000000000000ull, 0xfff0000000000000ull) || /* FSETP */
+           opm64(w, 0x4bb0000000000000ull, 0xfff0000000000000ull) ||
+           opm64(w, 0x36b0000000000000ull, 0xfef0000000000000ull) ||
+           opm64(w, 0x5b60000000000000ull, 0xffe0000000000000ull) || /* ISETP */
+           opm64(w, 0x4b60000000000000ull, 0xffe0000000000000ull) ||
+           opm64(w, 0x3660000000000000ull, 0xfee0000000000000ull) ||
+           opm64(w, 0x50a0000000000000ull, 0xfff8000000000000ull) || /* CSETP */
+           opm64(w, 0x38f0000000000000ull, 0xfef8000000000000ull) || /* R2P */
+           opm64(w, 0x5cf0000000000000ull, 0xfff8000000000000ull) ||
+           opm64(w, 0x4cf0000000000000ull, 0xfff8000000000000ull) ||
+           opm64(w, 0xf0a8000000000000ull, 0xfff8000000000000ull);   /* BAR */
+}
+
+static bool insn_guarded(uint64_t w, bool *never_runs) {
+    int pr = (int)bits(w, 16, 3);
+    bool prn = bits(w, 19, 1);
+    uint64_t top12 = w & 0xfff0000000000000ull;
+    if (top12 == 0xe290000000000000ull || top12 == 0xe2a0000000000000ull ||
+        top12 == 0xe2b0000000000000ull || top12 == 0xe270000000000000ull) {
+        pr = PT;
+        prn = false;
+    }
+    *never_runs = (pr == PT && prn);
+    return !(pr == PT && !prn);
+}
+
+static bool insn_ends_vs_blk(uint64_t w) {
+    return opm64(w, 0xe240000000000000ull, 0xfff0000000000020ull) || /* BRA */
+           opm64(w, 0xe250000000000000ull, 0xfff0000000000020ull) || /* BRX */
+           opm64(w, 0xf0f8000000000000ull, 0xfff8000000000000ull) || /* SYNC */
+           opm64(w, 0xe340000000000000ull, 0xfff0000000000000ull) || /* BRK */
+           opm64(w, 0xe350000000000000ull, 0xfff0000000000000ull) || /* CONT */
+           opm64(w, 0xe300000000000000ull, 0xfff0000000000000ull);   /* EXIT */
+}
+
+static uint32_t texs_mask(uint64_t w, int d1) {
+    int msel = (int)bits(w, 50, 3);
+    if (d1 == RZ) {
+        static const uint32_t m2[] = {1, 2, 4, 8, 3, 9, 10, 12};
+        return m2[msel];
+    }
+    static const uint32_t m4[] = {7, 11, 13, 14, 15, 15, 15, 15};
+    return m4[msel];
+}
+
+// Mirror write_tex_result() register destination slots so static liveness does not kill untouched neighbor GPRs.
+static int tex_written_regs(uint32_t mask, int d0, int d1, bool texs, bool f16, int out_regs[4]) {
+    int count = 0;
+    if (f16) {
+        if (d0 >= 0 && d0 < RZ) out_regs[count++] = d0;
+        if (d1 >= 0 && d1 < RZ) out_regs[count++] = d1;
+        return count;
+    }
+    int slots[4];
+    if (texs) {
+        slots[0] = d0;
+        slots[1] = (d0 == RZ) ? RZ : d0 + 1;
+        slots[2] = d1;
+        slots[3] = (d1 == RZ) ? RZ : d1 + 1;
+    } else {
+        for (int i = 0; i < 4; i++) slots[i] = (d0 == RZ) ? RZ : d0 + i;
+    }
+    int k = 0;
+    for (int comp = 0; comp < 4; comp++) {
+        if (!(mask & (1u << comp))) continue;
+        int r = slots[k++];
+        if (r >= 0 && r < RZ) out_regs[count++] = r;
+    }
+    return count;
+}
+
+static void analyze_vs_local_read(Ctx *c, const uint64_t *code, size_t end, const uint8_t *label) {
+    if ((c->key && c->key->flip_x) || c->info->writes_point_size || !end) return;
+    size_t val_cap = end * 2 + 16;
+    VsVal *vals = calloc(val_cap, sizeof *vals);
+    if (!vals) return;
+    vals[0] = (VsVal){.kind = VS_IMM, .imm = 0u};
+    uint32_t nvals = 1;
+    uint32_t next_opaque = 0x80000000u;
+    uint32_t cur_blk = 1u;
+    uint32_t vs_reg[256] = {0};
+    uint32_t pos_val[4] = {0}, v_val[32][4] = {{0}};
+    uint32_t pos_cnt[4] = {0}, v_cnt[32][4] = {{0}};
+    uint32_t pos_blk[4] = {0}, v_blk[32][4] = {{0}};
+
+    for (size_t i = 0; i < end; i++) {
+        if (i % 4 == 0) continue;
+        if (label[i]) {
+            cur_blk++;
+            for (int r = 0; r < RZ; r++) vs_reg[r] = next_opaque++;
+        }
+        uint64_t w = code[i];
+        bool never = false;
+        bool guarded = insn_guarded(w, &never);
+        if (never) continue;
+
+        int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
+        if (opm64(w, 0xeff0000000000000ull, 0xfff8000000000000ull)) {  // ST attribute
+            int n = 1 + (int)bits(w, 47, 2);
+            uint32_t addr = (uint32_t)bits(w, 20, 10);
+            for (int k = 0; k < n; k++) {
+                uint32_t ak = addr + 4u * (uint32_t)k;
+                uint32_t sv = (d + k == RZ || d + k > RZ) ? 0u : vs_reg_val(vs_reg, d + k, &next_opaque);
+                if (ak >= 0x70u && ak < 0x80u) {
+                    int comp = (int)((ak >> 2) & 3u);
+                    pos_cnt[comp] += guarded ? 2u : 1u;
+                    if (!guarded && pos_cnt[comp] == 1u) { pos_val[comp] = sv; pos_blk[comp] = cur_blk; }
+                } else if (ak >= 0x80u && ak < 0x280u) {
+                    int attr = (int)((ak - 0x80u) >> 4);
+                    int comp = (int)((ak >> 2) & 3u);
+                    v_cnt[attr][comp] += guarded ? 2u : 1u;
+                    if (!guarded && v_cnt[attr][comp] == 1u) { v_val[attr][comp] = sv; v_blk[attr][comp] = cur_blk; }
+                }
+            }
+            continue;
+        }
+        if (opm64(w, 0xd000000000000000ull, 0xf600000000000000ull) ||
+            opm64(w, 0xd200000000000000ull, 0xf600000000000000ull) ||
+            opm64(w, 0xdf00000000000000ull, 0xff40000000000000ull)) {  // TEXS / TLDS / TLD4S
+            int d1 = (int)bits(w, 28, 8);
+            bool tld4s = opm64(w, 0xdf00000000000000ull, 0xff40000000000000ull);
+            uint32_t mask = tld4s ? 0xfu : texs_mask(w, d1);
+            bool f16 = tld4s ? bits(w, 55, 1) : !bits(w, 59, 1);
+            int wregs[4];
+            int nw = tex_written_regs(mask, d, d1, true, f16, wregs);
+            for (int k = 0; k < nw; k++) vs_kill_reg(vs_reg, wregs[k], &next_opaque);
+            continue;
+        }
+        if (opm64(w, 0xc038000000000000ull, 0xfc38000000000000ull) ||
+            opm64(w, 0xc838000000000000ull, 0xfc38000000000000ull) ||
+            opm64(w, 0xdf48000000000000ull, 0xfff8000000000000ull)) {  // TEX / TLD4 / TXQ
+            int wregs[4];
+            int nw = tex_written_regs((uint32_t)bits(w, 31, 4), d, RZ, false, false, wregs);
+            for (int k = 0; k < nw; k++) vs_kill_reg(vs_reg, wregs[k], &next_opaque);
+            continue;
+        }
+        if (opm64(w, 0xdeb8000000000000ull, 0xfff8000000000000ull) ||
+            opm64(w, 0xdf58000000000000ull, 0xfff8000000000000ull) ||
+            opm64(w, 0xdf60000000000000ull, 0xfff8000000000000ull)) {  // TEX.B / TMML / TMML.B
+            for (int k = 0; k < 4; k++) vs_kill_reg(vs_reg, d + k, &next_opaque);
+            continue;
+        }
+        if (opm64(w, 0xefd8000000000000ull, 0xfff8000000000000ull)) {  // LD attr
+            int n = 1 + (int)bits(w, 47, 2);
+            for (int k = 0; k < n; k++) vs_kill_reg(vs_reg, d + k, &next_opaque);
+            continue;
+        }
+        if (opm64(w, 0xef90000000000000ull, 0xfff8000000000000ull) && bits(w, 48, 3) == 5) {  // LDC.64
+            vs_kill_reg(vs_reg, d, &next_opaque);
+            vs_kill_reg(vs_reg, d + 1, &next_opaque);
+            continue;
+        }
+        if ((opm64(w, 0xeed0000000000000ull, 0xfff8000000000000ull) ||
+             opm64(w, 0xeed8000000000000ull, 0xfff8000000000000ull)) && !bits(w, 51, 1)) {  // LDG
+            for (int k = 0; k < 4; k++) vs_kill_reg(vs_reg, d + k, &next_opaque);
+            continue;
+        }
+        if ((opm64(w, 0xef40000000000000ull, 0xfff8000000000000ull) ||
+             opm64(w, 0xef50000000000000ull, 0xfff8000000000000ull) ||
+             opm64(w, 0xef48000000000000ull, 0xfff8000000000000ull) ||
+             opm64(w, 0xef58000000000000ull, 0xfff8000000000000ull)) && !bits(w, 52, 1)) {  // LDL / LDS
+            for (int k = 0; k < 4; k++) vs_kill_reg(vs_reg, d + k, &next_opaque);
+            continue;
+        }
+        if (!guarded && d < RZ && nvals + 2 <= val_cap) {
+            if (opm64(w, 0x0100000000000000ull, 0xfff0000000000000ull)) {  // MOV32I
+                uint32_t id = nvals++;
+                vals[id] = (VsVal){.kind = VS_IMM, .imm = (uint32_t)bits(w, 20, 32)};
+                vs_reg[d] = id;
+                continue;
+            }
+            if (opm64(w, 0x5c98000000000000ull, 0xfff8000000000000ull) ||
+                opm64(w, 0x3898000000000000ull, 0xfef8000000000000ull)) {  // MOV
+                BForm bf = b_form(w);
+                if (bf == B_REG) {
+                    vs_reg[d] = vs_reg_val(vs_reg, (int)bits(w, 20, 8), &next_opaque);
+                    continue;
+                } else if (bf == B_IMM) {
+                    uint32_t id = nvals++;
+                    vals[id] = (VsVal){.kind = VS_IMM, .imm = imm_f20_bits(w, false)};
+                    vs_reg[d] = id;
+                    continue;
+                }
+            }
+            if (opm64(w, 0x5c58000000000000ull, 0xfff8000000000000ull) &&
+                b_form(w) == B_REG && !bits(w, 50, 1) && !bits(w, 46, 1) && !bits(w, 49, 1)) {  // FADD
+                uint32_t va = vs_reg_val(vs_reg, a, &next_opaque);
+                uint32_t vb = vs_reg_val(vs_reg, (int)bits(w, 20, 8), &next_opaque);
+                uint32_t id = nvals++;
+                vals[id] = (VsVal){.kind = VS_ADD, .sa = bits(w, 48, 1) ? -1 : 1,
+                                   .sb = bits(w, 45, 1) ? -1 : 1, .a = va, .b = vb};
+                vs_reg[d] = id;
+                continue;
+            }
+            if (opm64(w, 0x1e00000000000000ull, 0xff00000000000000ull) && !bits(w, 55, 1)) {  // FMUL32I
+                int hs = 0;
+                if (is_half_f32_bits((uint32_t)bits(w, 20, 32), &hs)) {
+                    uint32_t va = vs_reg_val(vs_reg, a, &next_opaque);
+                    uint32_t id = nvals++;
+                    vals[id] = (VsVal){.kind = VS_HALF, .sa = (int8_t)hs, .a = va};
+                    vs_reg[d] = id;
+                    continue;
+                }
+            }
+            if ((opm64(w, 0x5c68000000000000ull, 0xfff8000000000000ull) ||
+                 opm64(w, 0x3868000000000000ull, 0xfef8000000000000ull)) && !bits(w, 50, 1)) {  // FMUL
+                int sc = (int)bits(w, 41, 3);
+                int sneg = bits(w, 48, 1) ? -1 : 1;
+                BForm bf = b_form(w);
+                uint32_t arg = 0;
+                int hs = 0;
+                bool ok = false;
+                if (bf == B_IMM) {
+                    uint32_t ib = imm_f20_bits(w, true);
+                    int is = 0;
+                    if (sc == 0 && is_half_f32_bits(ib, &is)) { arg = vs_reg_val(vs_reg, a, &next_opaque); hs = is * sneg; ok = true; }
+                    else if (sc == 1 && ib == 0x3f800000u) { arg = vs_reg_val(vs_reg, a, &next_opaque); hs = sneg; ok = true; }
+                } else if (bf == B_REG && sc == 0) {
+                    uint32_t va = vs_reg_val(vs_reg, a, &next_opaque);
+                    uint32_t vb = vs_reg_val(vs_reg, (int)bits(w, 20, 8), &next_opaque);
+                    int is = 0;
+                    if (vs_is_imm_half(vals, nvals, vb, &is)) { arg = va; hs = is * sneg; ok = true; }
+                    else if (vs_is_imm_half(vals, nvals, va, &is)) { arg = vb; hs = is * sneg; ok = true; }
+                }
+                if (ok) {
+                    uint32_t id = nvals++;
+                    vals[id] = (VsVal){.kind = VS_HALF, .sa = (int8_t)hs, .a = arg};
+                    vs_reg[d] = id;
+                    continue;
+                }
+            }
+            if ((opm64(w, 0x5980000000000000ull, 0xff80000000000000ull) ||
+                 opm64(w, 0x3280000000000000ull, 0xfe80000000000000ull)) &&
+                ((w >> 56) & 0xF8u) != 0x50u && !bits(w, 50, 1)) {  // FFMA reg/imm (unswapped)
+                uint32_t va = vs_reg_val(vs_reg, a, &next_opaque);
+                uint32_t vc = vs_reg_val(vs_reg, (int)bits(w, 39, 8), &next_opaque);
+                int sneg_b = bits(w, 48, 1) ? -1 : 1, sneg_c = bits(w, 49, 1) ? -1 : 1;
+                int hs = 0;
+                uint32_t mul_arg = 0;
+                bool ok = false;
+                if (b_form(w) == B_IMM) {
+                    if (is_half_f32_bits(imm_f20_bits(w, true), &hs)) { mul_arg = va; hs *= sneg_b; ok = true; }
+                } else if (b_form(w) == B_REG) {
+                    uint32_t vb = vs_reg_val(vs_reg, (int)bits(w, 20, 8), &next_opaque);
+                    if (vs_is_imm_half(vals, nvals, vb, &hs)) { mul_arg = va; hs *= sneg_b; ok = true; }
+                    else if (vs_is_imm_half(vals, nvals, va, &hs)) { mul_arg = vb; hs *= sneg_b; ok = true; }
+                }
+                if (ok) {
+                    uint32_t hid = nvals++;
+                    vals[hid] = (VsVal){.kind = VS_HALF, .sa = (int8_t)hs, .a = mul_arg};
+                    uint32_t sid = nvals++;
+                    vals[sid] = (VsVal){.kind = VS_ADD, .sa = 1, .sb = (int8_t)sneg_c, .a = hid, .b = vc};
+                    vs_reg[d] = sid;
+                    continue;
+                }
+            }
+        }
+        if (!insn_has_no_gpr_dst(w)) vs_kill_reg(vs_reg, d, &next_opaque);
+        if (insn_ends_vs_blk(w)) cur_blk++;
+    }
+
+    if (pos_cnt[0] == 1u && pos_cnt[1] == 1u && pos_cnt[3] == 1u &&
+        pos_blk[0] != 0u && pos_blk[0] == pos_blk[1] && pos_blk[0] == pos_blk[3]) {
+        uint32_t px = pos_val[0], py = pos_val[1], pw = pos_val[3];
+        bool pw_zero = pw == 0u || (pw < nvals && vals[pw].kind == VS_IMM && (vals[pw].imm & 0x7FFFFFFFu) == 0u);
+        int want_sy = (c->key && c->key->flip_y) ? 1 : -1;
+        for (int attr = 0; !pw_zero && attr < 32; attr++) {
+            if (v_cnt[attr][0] == 1u && v_cnt[attr][1] == 1u && v_cnt[attr][3] == 1u &&
+                v_blk[attr][0] == pos_blk[0] && v_blk[attr][1] == pos_blk[0] && v_blk[attr][3] == pos_blk[0] &&
+                v_val[attr][3] == pw &&
+                vs_match_half_lin(vals, nvals, v_val[attr][0], px, pw, 1, 1) &&
+                vs_match_half_lin(vals, nvals, v_val[attr][1], py, pw, want_sy, 1)) {
+                c->info->screen_uv_mask |= 1u << attr;
+            }
+        }
+    }
+    free(vals);
+}
+
+typedef enum { FS_UNK = 0, FS_IPA = 1, FS_RCP_V3 = 2, FS_SUV = 3 } FsKind;
+typedef struct {
+    uint8_t kind, attr, comp, ipa_mode;
+    uint32_t mul_ver;
+} FsReg;
+
+static void fs_kill_reg(FsReg fs_reg[256], uint32_t reg_ver[256], int r, uint32_t *next_ver) {
+    if (r >= 0 && r < RZ) {
+        fs_reg[r] = (FsReg){0};
+        reg_ver[r] = (*next_ver)++;
+    }
+}
+
+static void fs_mark_local(uint8_t verdict[64], int slot, uint8_t attr) {
+    if (slot < 0 || slot >= 64) return;
+    uint8_t tag = (uint8_t)(attr + 1u);
+    if (verdict[slot] == 0) verdict[slot] = tag;
+    else if (verdict[slot] != tag) verdict[slot] = 0xFFu;
+}
+
+static void fs_mark_nonlocal(uint8_t verdict[64], int slot) {
+    if (slot >= 0 && slot < 64) verdict[slot] = 0xFFu;
+}
+
+static void analyze_fs_local_read(Ctx *c, const uint64_t *code, size_t end, const uint8_t *label) {
+    if (!end || !c->info->ntex) return;
+    FsReg fs_reg[256] = {{0}};
+    uint32_t reg_ver[256] = {0};
+    uint32_t next_ver = 1;
+    uint8_t verdict[64] = {0};
+    for (int r = 0; r < RZ; r++) reg_ver[r] = next_ver++;
+
+    for (size_t i = 0; i < end; i++) {
+        if (i % 4 == 0) continue;
+        if (label[i]) {
+            memset(fs_reg, 0, sizeof fs_reg);
+            for (int r = 0; r < RZ; r++) reg_ver[r] = next_ver++;
+        }
+        uint64_t w = code[i];
+        bool never = false;
+        bool guarded = insn_guarded(w, &never);
+        if (never) continue;
+
+        int d = (int)bits(w, 0, 8), a = (int)bits(w, 8, 8);
+        if (opm64(w, 0xd000000000000000ull, 0xf600000000000000ull)) {  // TEXS
+            int d1 = (int)bits(w, 28, 8), b = (int)bits(w, 20, 8);
+            uint32_t index = (uint32_t)bits(w, 36, 13);
+            int info = (int)bits(w, 53, 4);
+            int slot = index < 8192 ? c->tex_slot[index] - 1 : -1;
+            if (slot >= 0) {
+                if ((info == 1 || info == 2) && a < RZ && b < RZ &&
+                    fs_reg[a].kind == FS_SUV && fs_reg[a].comp == 0 &&
+                    fs_reg[b].kind == FS_SUV && fs_reg[b].comp == 1 &&
+                    fs_reg[a].attr == fs_reg[b].attr) {
+                    fs_mark_local(verdict, slot, fs_reg[a].attr);
+                } else {
+                    fs_mark_nonlocal(verdict, slot);
+                }
+            }
+            int wregs[4];
+            int nw = tex_written_regs(texs_mask(w, d1), d, d1, true, !bits(w, 59, 1), wregs);
+            for (int k = 0; k < nw; k++) fs_kill_reg(fs_reg, reg_ver, wregs[k], &next_ver);
+            continue;
+        }
+        if (opm64(w, 0xd200000000000000ull, 0xf600000000000000ull) ||
+            opm64(w, 0xdf00000000000000ull, 0xff40000000000000ull)) {  // TLDS / TLD4S
+            uint32_t index = (uint32_t)bits(w, 36, 13);
+            int d1 = (int)bits(w, 28, 8);
+            if (index < 8192) fs_mark_nonlocal(verdict, c->tex_slot[index] - 1);
+            bool tld4s = opm64(w, 0xdf00000000000000ull, 0xff40000000000000ull);
+            uint32_t mask = tld4s ? 0xfu : texs_mask(w, d1);
+            bool f16 = tld4s ? bits(w, 55, 1) : !bits(w, 59, 1);
+            int wregs[4];
+            int nw = tex_written_regs(mask, d, d1, true, f16, wregs);
+            for (int k = 0; k < nw; k++) fs_kill_reg(fs_reg, reg_ver, wregs[k], &next_ver);
+            continue;
+        }
+        if (opm64(w, 0xc038000000000000ull, 0xfc38000000000000ull)) {  // TEX
+            uint32_t index = (uint32_t)bits(w, 36, 13);
+            int target = (int)bits(w, 29, 2), lod_mode = (int)bits(w, 55, 3);
+            bool array = bits(w, 28, 1), dc = bits(w, 50, 1), aoffi = bits(w, 54, 1);
+            int slot = index < 8192 ? c->tex_slot[index] - 1 : -1;
+            if (slot >= 0) {
+                if (target == 1 && !array && !dc && !aoffi && (lod_mode == 0 || lod_mode == 1) && a < 254 &&
+                    fs_reg[a].kind == FS_SUV && fs_reg[a].comp == 0 &&
+                    fs_reg[a + 1].kind == FS_SUV && fs_reg[a + 1].comp == 1 &&
+                    fs_reg[a].attr == fs_reg[a + 1].attr) {
+                    fs_mark_local(verdict, slot, fs_reg[a].attr);
+                } else {
+                    fs_mark_nonlocal(verdict, slot);
+                }
+            }
+            int wregs[4];
+            int nw = tex_written_regs((uint32_t)bits(w, 31, 4), d, RZ, false, false, wregs);
+            for (int k = 0; k < nw; k++) fs_kill_reg(fs_reg, reg_ver, wregs[k], &next_ver);
+            continue;
+        }
+        if (opm64(w, 0xc838000000000000ull, 0xfc38000000000000ull) ||
+            opm64(w, 0xdf48000000000000ull, 0xfff8000000000000ull)) {  // TLD4 / TXQ
+            uint32_t index = (uint32_t)bits(w, 36, 13);
+            if (index < 8192) fs_mark_nonlocal(verdict, c->tex_slot[index] - 1);
+            int wregs[4];
+            int nw = tex_written_regs((uint32_t)bits(w, 31, 4), d, RZ, false, false, wregs);
+            for (int k = 0; k < nw; k++) fs_kill_reg(fs_reg, reg_ver, wregs[k], &next_ver);
+            continue;
+        }
+        if (opm64(w, 0xdf58000000000000ull, 0xfff8000000000000ull) ||
+            opm64(w, 0xdf60000000000000ull, 0xfff8000000000000ull) ||
+            opm64(w, 0xdeb8000000000000ull, 0xfff8000000000000ull)) {  // TMML / TMML.B / TEX.B
+            bool bindless = !opm64(w, 0xdf58000000000000ull, 0xfff8000000000000ull);
+            uint32_t index = bindless ? 0u : (uint32_t)bits(w, 36, 13);
+            if (!bindless && index < 8192 && c->tex_slot[index] > 0) fs_mark_nonlocal(verdict, c->tex_slot[index] - 1);
+            else memset(verdict, 0xFF, sizeof verdict);
+            for (int k = 0; k < 4; k++) fs_kill_reg(fs_reg, reg_ver, d + k, &next_ver);
+            continue;
+        }
+        if (opm64(w, 0xefd8000000000000ull, 0xfff8000000000000ull)) {  // LD attr
+            int n = 1 + (int)bits(w, 47, 2);
+            for (int k = 0; k < n; k++) fs_kill_reg(fs_reg, reg_ver, d + k, &next_ver);
+            continue;
+        }
+        if (opm64(w, 0xef90000000000000ull, 0xfff8000000000000ull) && bits(w, 48, 3) == 5) {  // LDC.64
+            fs_kill_reg(fs_reg, reg_ver, d, &next_ver);
+            fs_kill_reg(fs_reg, reg_ver, d + 1, &next_ver);
+            continue;
+        }
+        if ((opm64(w, 0xeed0000000000000ull, 0xfff8000000000000ull) ||
+             opm64(w, 0xeed8000000000000ull, 0xfff8000000000000ull)) && !bits(w, 51, 1)) {
+            for (int k = 0; k < 4; k++) fs_kill_reg(fs_reg, reg_ver, d + k, &next_ver);
+            continue;
+        }
+        if ((opm64(w, 0xef40000000000000ull, 0xfff8000000000000ull) ||
+             opm64(w, 0xef50000000000000ull, 0xfff8000000000000ull) ||
+             opm64(w, 0xef48000000000000ull, 0xfff8000000000000ull) ||
+             opm64(w, 0xef58000000000000ull, 0xfff8000000000000ull)) && !bits(w, 52, 1)) {
+            for (int k = 0; k < 4; k++) fs_kill_reg(fs_reg, reg_ver, d + k, &next_ver);
+            continue;
+        }
+        if (!guarded && d < RZ) {
+            if ((opm64(w, 0xe00000000000ff00ull, 0xff0000400000ff00ull) ||
+                 opm64(w, 0xe000004000000000ull, 0xff00004000000000ull)) &&
+                !bits(w, 38, 1) && !bits(w, 51, 1)) {  // IPA (!idx, !sat)
+                uint32_t addr = (uint32_t)bits(w, 28, 10);
+                int mode = (int)bits(w, 54, 2);
+                int mul = (int)bits(w, 20, 8);
+                int at = (addr >= 0x80u && addr < 0x280u) ? (int)((addr - 0x80u) >> 4) : -1;
+                int comp = (int)((addr >> 2) & 3u);
+                if (at >= 0 && !(((c->noperspective_mask | c->flat_mask) >> at) & 1u) && (mode == 0 || (mode == 1 && mul < RZ))) {
+                    if (mode == 1 && (comp == 0 || comp == 1) && fs_reg[mul].kind == FS_RCP_V3 &&
+                        fs_reg[mul].attr == (uint8_t)at && fs_reg[mul].ipa_mode == 0) {
+                        fs_reg[d] = (FsReg){FS_SUV, (uint8_t)at, (uint8_t)comp, 0, 0};
+                    } else {
+                        uint32_t mver = (mode == 1) ? reg_ver[mul] : 0u;
+                        fs_reg[d] = (FsReg){FS_IPA, (uint8_t)at, (uint8_t)comp, (uint8_t)mode, mver};
+                    }
+                    reg_ver[d] = next_ver++;
+                    continue;
+                }
+            }
+            if (opm64(w, 0x5080000000000000ull, 0xfff8000000000000ull) &&
+                bits(w, 20, 4) == 4 && !bits(w, 48, 1) && !bits(w, 46, 1) && !bits(w, 50, 1) && a < RZ) {  // MUFU.RCP
+                FsReg sa = fs_reg[a];
+                if (sa.kind == FS_IPA && sa.comp == 3) {
+                    fs_reg[d] = (FsReg){FS_RCP_V3, sa.attr, 3, sa.ipa_mode, sa.mul_ver};
+                    reg_ver[d] = next_ver++;
+                    continue;
+                }
+            }
+            if (opm64(w, 0x5c68000000000000ull, 0xfff8000000000000ull) &&
+                b_form(w) == B_REG && !bits(w, 50, 1) && !bits(w, 48, 1) && bits(w, 41, 3) == 0 &&
+                a < RZ && (int)bits(w, 20, 8) < RZ) {  // FMUL reg-reg
+                FsReg sa = fs_reg[a], sb = fs_reg[(int)bits(w, 20, 8)], out = {0};
+                if (sa.kind == FS_IPA && (sa.comp == 0 || sa.comp == 1) && sb.kind == FS_RCP_V3 &&
+                    sa.attr == sb.attr && sa.ipa_mode == sb.ipa_mode && sa.mul_ver == sb.mul_ver) {
+                    out = (FsReg){FS_SUV, sa.attr, sa.comp, 0, 0};
+                } else if (sb.kind == FS_IPA && (sb.comp == 0 || sb.comp == 1) && sa.kind == FS_RCP_V3 &&
+                           sb.attr == sa.attr && sb.ipa_mode == sa.ipa_mode && sb.mul_ver == sa.mul_ver) {
+                    out = (FsReg){FS_SUV, sb.attr, sb.comp, 0, 0};
+                }
+                if (out.kind == FS_SUV) {
+                    fs_reg[d] = out;
+                    reg_ver[d] = next_ver++;
+                    continue;
+                }
+            }
+            if (opm64(w, 0x5c98000000000000ull, 0xfff8000000000000ull) &&
+                b_form(w) == B_REG && (int)bits(w, 20, 8) < RZ) {  // MOV reg-reg
+                fs_reg[d] = fs_reg[(int)bits(w, 20, 8)];
+                reg_ver[d] = next_ver++;
+                continue;
+            }
+        }
+        if (!insn_has_no_gpr_dst(w)) fs_kill_reg(fs_reg, reg_ver, d, &next_ver);
+    }
+
+    for (int s = 0; s < c->info->ntex && s < 64; s++) {
+        ShaderTexture *t = &c->info->tex[s];
+        if (t->type == TEXTYPE_2D && !t->shadow && !t->is_array && !t->is_image && !t->bindless &&
+            verdict[s] >= 1u && verdict[s] <= 32u) {
+            t->local_read_var = verdict[s];
+        }
+    }
+}
+
+static void mw_analyze_local_read(Ctx *c, const uint64_t *code, size_t end, const uint8_t *label) {
+    if (!c || !c->glsl || c->fail) return;
+    if (c->stage == STAGE_VERTEX) analyze_vs_local_read(c, code, end, label);
+    else if (c->stage == STAGE_FRAGMENT) analyze_fs_local_read(c, code, end, label);
+}
+
 ShaderInfo *maxwell_translate_bounded(const uint8_t *blob, size_t max_size, size_t const_size, int stage, const ShaderKey *key) {
     ShaderInfo *info = calloc(1, sizeof *info);
     info->stage = stage;
@@ -3257,6 +3872,8 @@ ShaderInfo *maxwell_translate_bounded(const uint8_t *blob, size_t max_size, size
     }
     if (us && ue && !c->fail && !(maxwell_no_local_struct && c->uses_local))
         c->structured = structure(c, (const uint64_t *)code, end, label, us, ue);
+    if (c->glsl && !c->fail && stage != STAGE_COMPUTE)
+        mw_analyze_local_read(c, (const uint64_t *)code, end, label);
     free(us);
     free(ue);
     free(label);

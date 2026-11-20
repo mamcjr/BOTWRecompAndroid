@@ -70,7 +70,7 @@ typedef struct {
 static struct {
     VkDevice dev;
     VkPhysicalDeviceProperties props;
-    bool dyn_render, eds, eds2, divisor, exec_stats, dyn_vi;
+    bool dyn_render, eds, eds2, divisor, exec_stats, dyn_vi, local_read, raster_order_color;
 } g_vk = {
     .props = {.vendorID = 0x13b5, .deviceID = 0xd8300010, .driverVersion = 49,
               .pipelineCacheUUID = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16}},
@@ -284,6 +284,14 @@ int main(void) {
     hdr = (PwHeader *)work;
     hdr->payload_hash = hash_words(0xcbf29ce484222325ull, recs, 4 * sizeof(PwRecord));
     assert(prewarm_parse_and_validate(work, raw_n) == 0);
+
+    // Toggling local_read or raster_order_color invalidates cached prewarm header via vk_flags bits 32/64
+    g_vk.local_read = true;
+    assert(prewarm_parse_and_validate(raw, raw_n) == 0);
+    g_vk.local_read = false;
+    g_vk.raster_order_color = true;
+    assert(prewarm_parse_and_validate(raw, raw_n) == 0);
+    g_vk.raster_order_color = false;
 
     // Valid reload from file
     prewarm_reset();

@@ -143,12 +143,14 @@ static uint64_t shader_texture_handle(int stage, const ShaderTexture *t_) {
 }
 ''' + '\n' + resolve_fn + '\n' + view_fn + '\n' + is_int_fn + '\n' + mask_fn + r'''
 
-_Static_assert(sizeof(ShaderKey) == 88, "ShaderKey must be 88 bytes with explicit padding");
+_Static_assert(sizeof(ShaderKey) == 104, "ShaderKey must be 104 bytes with explicit padding");
 _Static_assert(offsetof(ShaderKey, pad_) == 50, "ShaderKey pad_ offset");
 _Static_assert(offsetof(ShaderKey, soft_linear) == 56, "ShaderKey soft_linear offset");
 _Static_assert(offsetof(ShaderKey, soft_linear_mip) == 64, "ShaderKey soft_linear_mip offset");
 _Static_assert(offsetof(ShaderKey, soft_linear_rep_u) == 72, "ShaderKey soft_linear_rep_u offset");
 _Static_assert(offsetof(ShaderKey, soft_linear_rep_v) == 80, "ShaderKey soft_linear_rep_v offset");
+_Static_assert(offsetof(ShaderKey, local_read_slot) == 88, "ShaderKey local_read_slot offset");
+_Static_assert(offsetof(ShaderKey, local_read_att) == 96, "ShaderKey local_read_att offset");
 
 static int cases;
 #define CHECK(cond) do { cases++; if (!(cond)) return -cases; } while (0)
@@ -164,7 +166,7 @@ int check(void) {
     k1.soft_linear_rep_v = 1ULL;
     const uint8_t *b0 = (const uint8_t *)&k0;
     for (int i = 0; i < 6; i++) CHECK(k0.pad_[i] == 0 && b0[50 + i] == 0);
-    CHECK(sizeof(ShaderKey) == 88);
+    CHECK(sizeof(ShaderKey) == 104);
 
     // 2. vk_sampled_format: backend present vs absent, views, fixed_fmt, BC fallback
     FormatInfo bc_fi = {.bpb = 8, .bw = 4, .bh = 4};
