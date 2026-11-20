@@ -114,6 +114,55 @@ static void *probe_main(void *arg) {
     return NULL;
 }
 
+// Core 0 (kernel.c): who holds it, since when, who waits for it - and where the holder is. In #401's 0.4.7 logs the
+// main thread held core 0 in no SVC and no marked wait while a 100 ms sleep on core 0 had waited 10 s behind it: its
+// pc and frames (asked twice, 5 s apart: the same place = stuck there, a different one = a loop) tell a spin in the
+// game's code (guest addresses, 0x1_0000_0000 and up in native mode) from a host call (named through dladdr).
+#include <dlfcn.h>
+static void where(char *out, size_t cap, uint64_t a) {
+    Dl_info di;
+    if (a && dladdr((void *)(uintptr_t)a, &di) && di.dli_fname) {
+        const char *f = strrchr(di.dli_fname, '/');
+        if (di.dli_sname && di.dli_saddr)
+            snprintf(out, cap, "%llx (%s+%llx, %s)", (unsigned long long)a, di.dli_sname,
+                     (unsigned long long)(a - (uint64_t)(uintptr_t)di.dli_saddr), f ? f + 1 : di.dli_fname);
+        else
+            snprintf(out, cap, "%llx (%s+%llx)", (unsigned long long)a, f ? f + 1 : di.dli_fname,
+                     (unsigned long long)(a - (uint64_t)(uintptr_t)di.dli_fbase));
+    } else
+        snprintf(out, cap, "%llx%s", (unsigned long long)a, a >= 0x100000000ull && a < 0x8000000000ull ? " (guest?)" : "");
+}
+static void log_core0(uint64_t now) {
+    (void)now;
+    extern bool kernel_core0_info(uint64_t *id, uint64_t *held_ns, uint64_t *waiters, int max, int *nwaiters);
+    extern bool kernel_core0_where(uint64_t *pc, uint64_t *lr, uint64_t *frames, int max, int *nframes);
+    uint64_t id = 0, held = 0, w[16];
+    int nw = 0;
+    char line[512];
+    if (!kernel_core0_info(&id, &held, w, 16, &nw)) {
+        LOG("[watchdog]   core 0: nobody holds it (%d queued)\n", nw);
+        return;
+    }
+    int n = snprintf(line, sizeof line, "[watchdog]   core 0: t%llu holds it for %.1f s; queued:", (unsigned long long)id, held / 1e9);
+    for (int i = 0; i < nw && n > 0 && (size_t)n < sizeof line - 24; i++)
+        n += snprintf(line + n, sizeof line - (size_t)n, " t%llu", (unsigned long long)w[i]);
+    if (!nw && n > 0 && (size_t)n < sizeof line - 8) snprintf(line + n, sizeof line - (size_t)n, " none");
+    LOG("%s\n", line);
+    uint64_t pc = 0, lr = 0, fr[16];
+    int nf = 0;
+    if (!kernel_core0_where(&pc, &lr, fr, 16, &nf)) {
+        LOG("[watchdog]   core 0's holder did not answer the signal\n");
+        return;
+    }
+    char a[200], b[200];
+    where(a, sizeof a, pc), where(b, sizeof b, lr);
+    LOG("[watchdog]   t%llu is at pc %s, lr %s\n", (unsigned long long)id, a, b);
+    for (int i = 0; i < nf; i++) {
+        where(a, sizeof a, fr[i]);
+        LOG("[watchdog]     #%d %s\n", i, a);
+    }
+}
+
 static void report(uint64_t now, double stalled, bool second) {
     uint64_t done = vk_wd_frames_done(), asked = vk_wd_frames_asked(), q = 0, qd = 0, sub = 0, gdone = 0, age = 0;
     int presents = 0;
@@ -144,6 +193,7 @@ static void report(uint64_t now, double stalled, bool second) {
     // of #401 the render thread waited for the game and the GPU was done: the game's own threads had stopped.
     extern void kernel_log_threads(uint64_t svc_ns);
     kernel_log_threads(2000000000ull);
+    log_core0(now);
     fflush(stderr);  // (the log pump reads the pipe: nothing stays in stdio)
 }
 
@@ -152,14 +202,18 @@ static void *watch_main(void *arg) {
     const char *e = getenv("LARECOMP_WATCHDOG_S");
     double limit = e && atof(e) > 0 ? atof(e) : 5.0;
     uint64_t last_frames = 0, since = plat_now_ns();  // (since: when the frame count last moved, as seen here)
-    bool reported = false, second = false;
+    bool reported = false, second = false, rebooting = false;
     for (;;) {
         struct timespec ts = {1, 0};
         nanosleep(&ts, NULL);
         uint64_t now = plat_now_ns(), frames = vk_wd_frames_done();
+        // (an in-place reboot - Restart, back to the start screen - stops the frames on purpose until the new boot draws:
+        // two 0.4.6 reports, #488 and #489, came from that, 5 s after "[reboot] requested")
+        if (rt_reboot_requested() || g_rt_unwind) rebooting = true;
+        else if (rebooting && frames != last_frames) rebooting = false;
         // (nothing to judge before the first frame: the start - shader compiles, the load - is the game's own time;
         // and in the background the game stops at its present on purpose, nvn_background)
-        if (!frames || frames != last_frames || nvn_background_paused()) {
+        if (!frames || frames != last_frames || nvn_background_paused() || rebooting) {
             if (reported && frames != last_frames)
                 LOG("[watchdog] frames resumed after %.1f s (frame %llu)\n", (now - since) / 1e9, (unsigned long long)frames), fflush(stderr);
             if (reported && frames == last_frames) continue;  // (paused during a stall: keep the state until frames come)
