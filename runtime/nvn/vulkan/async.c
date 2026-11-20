@@ -153,23 +153,38 @@ static uint64_t push(int type, uint64_t a, void *p) {
 }
 
 // Until the render thread has finished request `id` (0: nothing to wait for).
+// Both waits hand core 0 to the game's other threads while they wait (kernel_blocking_begin, as push's queue-full wait
+// does): a texture destroyed or registered drains the queue on the game's thread, and with core 0 kept, a core-0 thread
+// whose sleep ended waited behind it for the render thread's whole backlog (#497: a 100 ms sleep 10 s long).
 void vk_async_wait_id(uint64_t id) {
     if (!id || !g_vk_render_started || vk_async_is_render_thread()) return;
+    pthread_mutex_lock(&q_lock);
+    bool done = q_done >= id;
+    pthread_mutex_unlock(&q_lock);
+    if (done) return;
     WdMark wm = vk_wd_enter(WD_G_WAIT_ID, id);
+    kernel_blocking_begin();
     pthread_mutex_lock(&q_lock);
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
     pthread_mutex_unlock(&q_lock);
+    kernel_blocking_end();
     vk_wd_leave(wm);
 }
 
 // Until every request queued so far has run (the render thread is idle after it).
 void vk_async_drain(void) {
     if (!g_vk_render_started || vk_async_is_render_thread()) return;
-    WdMark wm = vk_wd_enter(WD_G_DRAIN, q_tail);
     pthread_mutex_lock(&q_lock);
     uint64_t id = q_tail;
+    bool done = q_done >= id;
+    pthread_mutex_unlock(&q_lock);
+    if (done) return;
+    WdMark wm = vk_wd_enter(WD_G_DRAIN, id);
+    kernel_blocking_begin();
+    pthread_mutex_lock(&q_lock);
     while (q_done < id) pthread_cond_wait(&q_less, &q_lock);
     pthread_mutex_unlock(&q_lock);
+    kernel_blocking_end();
     vk_wd_leave(wm);
 }
 

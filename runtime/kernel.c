@@ -86,20 +86,42 @@ uint64_t rt_ticks(void) {
     return (uint64_t)((__uint128_t)ns * 192 / 10000);
 }
 
+// The kernel's timed waits (sleeps, timed waits on objects, condvars, arbiters) run on CLOCK_MONOTONIC: a deadline on the
+// wall clock (CLOCK_REALTIME, the default of pthread_cond_timedwait) moves when Android sets the time - a network time
+// correction or a time zone change backwards made a game thread's 100 ms sleep last until the clock caught up, minutes
+// (seen as a freeze; peanuts-native dm/host/hle_thread.c wait_cv_init does the same, MIT). Every condition the
+// kernel waits on with a deadline is made by kcond_init, so the clock it reads and the one it waits on agree.
+#if defined(__linux__) || defined(__ANDROID__)
+#define KCLOCK CLOCK_MONOTONIC
+static void kcond_init(pthread_cond_t *c) {
+    pthread_condattr_t a;
+    pthread_condattr_init(&a);
+    pthread_condattr_setclock(&a, CLOCK_MONOTONIC);
+    pthread_cond_init(c, &a);
+    pthread_condattr_destroy(&a);
+}
+#else
+#define KCLOCK CLOCK_REALTIME  // (macOS: no pthread_condattr_setclock)
+static void kcond_init(pthread_cond_t *c) { pthread_cond_init(c, NULL); }
+#endif
+
 static void deadline(struct timespec *ts, int64_t timeout_ns) {
-    clock_gettime(CLOCK_REALTIME, ts);
+    clock_gettime(KCLOCK, ts);
     ts->tv_sec += timeout_ns / 1000000000;
     ts->tv_nsec += timeout_ns % 1000000000;
     if (ts->tv_nsec >= 1000000000) { ts->tv_sec++; ts->tv_nsec -= 1000000000; }
 }
 
 // Sleep on the current thread's condition. Returns false on timeout. Caller holds g_klock.
-static pthread_cond_t g_nothread_cond = PTHREAD_COND_INITIALIZER;
+static pthread_cond_t g_nothread_cond;  // (kcond_init, once: nothread_cond_init)
+static pthread_once_t g_nothread_once = PTHREAD_ONCE_INIT;
+static void nothread_cond_init(void) { kcond_init(&g_nothread_cond); }
 // Time this thread spent blocked in the kernel (waits, sleeps): idle, not work. Frame pacing (exec.c vk_pace_frame)
 // takes the presenting thread's: a frame's busy time is its period minus this.
 __thread uint64_t g_blocked_ns;
 
 static bool kwait(int64_t timeout_ns, const struct timespec *ts) {
+    if (!t_cur) pthread_once(&g_nothread_once, nothread_cond_init);
     pthread_cond_t *cv = t_cur ? &t_cur->cond : &g_nothread_cond;
     uint64_t t0 = plat_now_ns();
     bool r = true;
@@ -352,15 +374,89 @@ static bool svc_blocks(uint32_t imm) {
 
 // The host's own long waits on a guest thread (the GPU, the render thread): core 0 goes to its other threads meanwhile
 // (the wait counts as blocked, as a kernel wait: the frame pacer measures the presenting thread's own work)
+// Nested pairs count: only the outermost hands core 0 on and takes it back (vulkan/async.c's waits run inside
+// objects.c's GPU waits - taking core 0 back at the inner end would hold it through the rest of the outer wait).
 static __thread uint64_t blocking_t0;
+static __thread int blocking_depth;
 void kernel_blocking_begin(void) {
+    if (blocking_depth++) return;
     blocking_t0 = plat_now_ns();
     core0_release(t_cur);
 }
 void kernel_blocking_end(void) {
+    if (blocking_depth <= 0 || --blocking_depth) return;
     core0_acquire(t_cur);
     if (blocking_t0) g_blocked_ns += plat_now_ns() - blocking_t0;
     blocking_t0 = 0;
+}
+
+// ---- for the freeze watchdog (vulkan/watchdog.c): who has core 0, and where it is.
+// The first 0.4.7 logs of #401 (Mali-G1, native mode): every thread waiting, a 100 ms sleep 10 s old, and the main
+// thread "running" with core 0 - in no SVC and no marked host wait. Whether it spins in the game's code or sits in a
+// host call nobody marked is what the fix depends on, so the watchdog asks: SIGUSR2 to the holder, whose handler
+// keeps where it was (pc, lr, and the frame-pointer chain), read back by the watchdog. Async-signal-safe: plain
+// stores into a static record, no locks, no allocation. No lock on the watchdog's side either (racy reads: a stale
+// value is only a worse diagnostic).
+#include <signal.h>
+#include <ucontext.h>
+#define C0_FRAMES 16
+static struct { volatile uint64_t seq; uint64_t pc, lr, sp, fp, frames[C0_FRAMES]; int nframes; } c0_where;
+static void c0_where_handler(int sig, siginfo_t *si, void *ctx) {
+    (void)sig, (void)si;
+    ucontext_t *uc = ctx;
+    uint64_t sp = uc->uc_mcontext.sp, fp = uc->uc_mcontext.regs[29];
+    c0_where.pc = uc->uc_mcontext.pc, c0_where.lr = uc->uc_mcontext.regs[30], c0_where.sp = sp, c0_where.fp = fp;
+    int n = 0;
+    // (the frame-pointer chain: [fp] = caller's fp, [fp+8] = return address; only inside this stack, upwards)
+    for (uint64_t f = fp; n < C0_FRAMES && f >= sp && f < sp + (8u << 20) && !(f & 7); n++) {
+        uint64_t next = ((const uint64_t *)(uintptr_t)f)[0], ret = ((const uint64_t *)(uintptr_t)f)[1];
+        c0_where.frames[n] = ret;
+        if (next <= f) { n++; break; }
+        f = next;
+    }
+    c0_where.nframes = n;
+    __atomic_add_fetch(&c0_where.seq, 1, __ATOMIC_RELEASE);
+}
+
+// Core 0's holder (id, for how long) and the threads queued for it; false when nobody holds it.
+bool kernel_core0_info(uint64_t *id, uint64_t *held_ns, uint64_t *waiters, int max, int *nwaiters) {
+    KThread *h = c0_holder;
+    *nwaiters = 0;
+    for (KThread *w = c0_head; w && *nwaiters < max; w = w->core0_next) waiters[(*nwaiters)++] = w->id;
+    if (!h) return false;
+    *id = h->id;
+    uint64_t since = c0_since, now = plat_now_ns();
+    *held_ns = now > since ? now - since : 0;
+    return true;
+}
+
+// Where core 0's holder is right now (its host registers and frames); false if there is none or it didn't answer
+// within ~200 ms (a thread stuck in the kernel with signals blocked).
+bool kernel_core0_where(uint64_t *pc, uint64_t *lr, uint64_t *frames, int max, int *nframes) {
+    static bool installed;
+    if (!installed) {
+        struct sigaction sa;
+        memset(&sa, 0, sizeof sa);
+        sa.sa_sigaction = c0_where_handler;
+        sa.sa_flags = SA_SIGINFO | SA_RESTART;
+        sigemptyset(&sa.sa_mask);
+        if (sigaction(SIGUSR2, &sa, NULL)) return false;
+        installed = true;
+    }
+    KThread *h = c0_holder;
+    if (!h) return false;
+    uint64_t before = __atomic_load_n(&c0_where.seq, __ATOMIC_ACQUIRE);
+    if (pthread_kill(h->host, SIGUSR2)) return false;
+    for (int i = 0; i < 40 && __atomic_load_n(&c0_where.seq, __ATOMIC_ACQUIRE) == before; i++) {
+        struct timespec ts = {0, 5000000};
+        nanosleep(&ts, NULL);
+    }
+    if (__atomic_load_n(&c0_where.seq, __ATOMIC_ACQUIRE) == before) return false;
+    *pc = c0_where.pc, *lr = c0_where.lr;
+    int n = c0_where.nframes < max ? c0_where.nframes : max;
+    for (int i = 0; i < n; i++) frames[i] = c0_where.frames[i];
+    *nframes = n;
+    return true;
 }
 #endif
 
@@ -393,7 +489,7 @@ static void *thread_main(void *arg) {
 
 static KThread *thread_new(uint64_t entry, uint64_t arg, uint64_t stack_top, int prio, int core) {
     KThread *t = calloc(1, sizeof *t);
-    pthread_cond_init(&t->cond, NULL);
+    kcond_init(&t->cond);
     t->obj.type = KOBJ_THREAD;
     t->entry = entry;
     t->prio = prio;
@@ -549,12 +645,10 @@ static uint32_t block_current(int64_t timeout_ns) {
             t->wait_result = R_CANCELLED;
             break;
         }
-        if (t->cancel) {
-            t->cancel = false;
-            t->wait_kind = WAIT_NONE;
-            t->wait_result = R_CANCELLED;
-            break;
-        }
+        // (no CancelSynchronization here: on Horizon it ends only a WaitSynchronization - svc_wait_synchronization's own
+        // loop - and otherwise stays pending for the thread's next one. Taken here it ended mutex, condition-variable
+        // and arbiter waits too: ArbitrateLock's caller then went on as if it held the lock (peanuts-native
+        // hle_thread.c applies it to WaitSynchronization only, as here now))
         if (!kwait(timeout_ns, &ts)) {
 #ifdef __ANDROID__
             // the wait ended while the timeout fired: a waker got there first (woken: wait_kind is NONE and the
@@ -1273,6 +1367,7 @@ void kernel_stop_threads(void (*idle)(void)) {
         pthread_mutex_lock(&g_klock);
         for (KThread *t = g_threads; t; t = t->anext)
             if (t->started && !t->finished) { live++; wake(t); }
+        pthread_once(&g_nothread_once, nothread_cond_init);
         pthread_cond_broadcast(&g_nothread_cond);
         pthread_mutex_unlock(&g_klock);
 #ifdef __ANDROID__
