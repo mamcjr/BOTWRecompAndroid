@@ -68,7 +68,7 @@ typedef struct {
     // (vulkan/device.c vk_adreno_8xx); 1 on, 0 off.
     int gpu_heap;         // Turnip: the game's memory mapped as GPU memory (vulkan/exec.c vk_heap_place); off: CPU copies
                           // (its Automatic: on for any Turnip that can place it - vulkan/device.c vk_turnip_heap_on)
-    int inplace_reads;    // Turnip: draws sample targets they write as they are (vulkan/exec.c resolve_feedback); off: copies
+    int inplace_reads;    // Turnip (Automatic on 8xx) and Mali (manual On): draws sample targets they write as they are (vulkan/exec.c resolve_feedback); off: copies
     int turnip_lrz;       // Turnip's low-resolution Z; off: TU_DEBUG=nolrz before the driver loads (vulkan/device.c)
     bool log_file;        // the log in a file as well (platform/android.c), to send with a report
     char gpu_model[64];   // the GPU of the last start ("Adreno (TM) 830v1"): turnip_lrz's Automatic, before the driver
