@@ -77,7 +77,8 @@ static uint32_t prewarm_vk_flags(void) {
                       (g_vk.eds ? 2u : 0u) |
                       (g_vk.eds2 ? 4u : 0u) |
                       (g_vk.divisor ? 8u : 0u) |
-                      (g_vk.dyn_vi ? 16u : 0u));
+                      (g_vk.dyn_vi ? 16u : 0u) |
+                      (g_vk.local_read ? 32u : 0u));
 }
 
 static bool prewarm_supported(void) {
