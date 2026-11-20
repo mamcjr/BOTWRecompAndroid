@@ -1037,6 +1037,10 @@ void vk_gpuprof_report(void) {
 }
 
 // Submit the pending work (if any). wait/signal: binary semaphores for presentation (may be null).
+static bool dchain;              // the last GPU work recorded was a dispatch; since then only binds and state
+static VkCommandBuffer dchain_cb;
+static bool dchain_after;        // that dispatch's barrier after it is still owed
+
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra) {
     (void)extra;
     vk_end_pass();
@@ -1054,6 +1058,11 @@ void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra
         cbs[n++] = (VkCommandBufferSubmitInfo){.sType = VK_STRUCTURE_TYPE_COMMAND_BUFFER_SUBMIT_INFO, .commandBuffer = s->upload};
     }
     vk_cmd();  // (an empty main buffer still carries the semaphores)
+    if (dchain_after) {
+        vk_full_barrier(s->main);
+        dchain_after = false;
+    }
+    dchain = false;
 #ifdef __ANDROID__
     if (vk_counter_mode() == 2 && cq[cur_sub].pool) {  // the submission's end (cq_resolve: the idle between submissions)
         vkCmdWriteTimestamp2(s->main, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, cq[cur_sub].pool, CQ_MAX + 1);
@@ -5665,6 +5674,7 @@ static void gfast_prepare(VkCommandBuffer cb) {
             LOG("\n");
         }
     }
+    if (dchain_after) { vk_full_barrier(cb); dchain_after = false; }
     copy_buffer(cb, gmem_buf, gfast_buf, (uint32_t)m, cp);
     vk_full_barrier(cb);
     gmap_tab[GMAP_MAX * 4] = (uint32_t)m;
@@ -5677,15 +5687,12 @@ static void gfast_prepare(VkCommandBuffer cb) {
 // the GPU (from TOTKRecompAndroid: ~60 dispatches a frame there, most 1x1x1, GPU -1.3 ms). Between such dispatches no
 // barrier then; the one owed after a storing dispatch comes before the next thing that isn't a dispatch, a bind or
 // state. LARECOMP_VK_DISPATCH_CHAIN=0: a barrier before every dispatch, as before; LARECOMP_AB=<n>:dbar alternates.
-static bool dchain;              // the last GPU work recorded was a dispatch; since then only binds and state
-static VkCommandBuffer dchain_cb;
-static bool dchain_after;        // that dispatch's barrier after it is still owed
+static int dchain_env = -1;
 static bool dchain_ok(void) {
     int ab = AB("dbar");
     if (ab >= 0) return ab == 1;
-    static int on = -1;
-    if (on < 0) on = !getenv("LARECOMP_VK_DISPATCH_CHAIN") || atoi(getenv("LARECOMP_VK_DISPATCH_CHAIN")) != 0;
-    return on;
+    if (dchain_env < 0) dchain_env = !getenv("LARECOMP_VK_DISPATCH_CHAIN") || atoi(getenv("LARECOMP_VK_DISPATCH_CHAIN")) != 0;
+    return dchain_env;
 }
 static bool dchain_keeps(uint32_t op) {  // (records no GPU work: binds, state, the CPU's uniform updates, list jumps)
     return (op >= CMD_BIND_PROGRAM && op <= CMD_SET_RENDER_ENABLE) || op == CMD_END || op == CMD_JUMP || op == CMD_CALL ||
@@ -5708,6 +5715,7 @@ static void gfast_finish(VkCommandBuffer cb) {
     vk_full_barrier(cb);
     copy_buffer(cb, gfast_buf, gmem_buf, (uint32_t)gfast_n, back);
     vk_full_barrier(cb);
+    dchain_after = false;
     gfast_n = 0;
 }
 
@@ -6019,6 +6027,7 @@ static GaRes *gres_get(uint64_t lo, uint64_t hi, bool create) {
             e->live = false, e->dead_seq = vk_pending_seq();  // (its space and index back once that's done: gres_reclaim)
         }
         vk_full_barrier(cb);
+        dchain_after = false;
     }
     return n;
 }
@@ -6402,6 +6411,9 @@ static int gcopy_ranges(unsigned stage_mask, bool store, GcRange *r) {
 static void gcopy_prepare(unsigned stage_mask, bool store) {
     memset(gmap_tab, 0, sizeof gmap_tab);
     gfast_n = 0;
+#ifdef __ANDROID__
+    gfast_win = (VkDescriptorBufferInfo){0};
+#endif
     gc_size = 0;
     GcRange r[6 * 16];
     int m = gcopy_ranges(stage_mask, store, r);
@@ -6797,6 +6809,8 @@ void vk_exec_reset(void) {
     gmem_size = gmem_tried = 0;
     g_inplace_copy = -1;  // (the next boot reads the setting again: resolve_feedback)
 #ifdef __ANDROID__
+    gwin_mode = false;
+    gfast_win = (VkDescriptorBufferInfo){0};
     gcopy_mode = !g_vk.host_import && !getenv("LARECOMP_VK_NO_GCOPY");  // (until the next heap is placed: vk_heap_place)
     gres_reset();  // (the arena's resident ranges: keyed by the old heap's addresses)
 #endif
@@ -6814,6 +6828,10 @@ void vk_exec_reset(void) {
     vc_bytes = 0;
     if (vc_page_gpu) memset(vc_page_gpu, 0, HEAP_MAX / VC_PAGE);
     vc_epoch++;
+    dchain = false;
+    dchain_after = false;
+    dchain_cb = VK_NULL_HANDLE;
+    dchain_env = -1;
     st_defaults();
 }
 
@@ -7260,6 +7278,14 @@ static int compute_reset(void) {
     return n;
 }
 
+#ifdef __ANDROID__
+static bool cs_writes_image(const ShaderInfo *si) {
+    for (int i = 0; si && i < si->ntex; i++)
+        if (si->tex[i].is_image) return true;
+    return false;
+}
+#endif
+
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     snap_reason = "compute"; snapshots_invalidate(NULL);
     if (!st.program || !gx || !gy || !gz) return;
@@ -7318,10 +7344,11 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
 #endif
     VkCommandBuffer cb = vk_cmd();
     bool chained = dchain && cb == dchain_cb && dchain_ok();
+    bool owe_after = chained && dchain_after;
     if (chained) stat_dchained++;
     else vk_full_barrier(cb);
     dchain = false;
-    dchain_after = false;
+    dchain_after = owe_after;
     gp_mark(cb, "dispatch %ux%ux%u (local %ux%ux%u) cs %llx gmem %d", gx, gy, gz, cp->local[0], cp->local[1], cp->local[2],
             (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
     dl_note("dispatch %ux%ux%u cs %llx gmem %d", gx, gy, gz, (unsigned long long)st.program->stages[5].code_addr, cp->si->uses_gmem);
@@ -7343,11 +7370,29 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pipe);
     vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p.layout, 0, 1, &ds, 0, NULL);
     vkCmdDispatch(cb, gx, gy, gz);
-    if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) gfast_finish(cb);
+    if (cp->si->uses_gmem_map && cp->si->uses_gmem_store) {
+#ifdef __ANDROID__
+        bool gfast_handled = gfast_n > 0 || gfast_win.buffer != VK_NULL_HANDLE;
+#endif
+        gfast_finish(cb);
+#ifdef __ANDROID__
+        if (!gfast_handled && (cp->si->uses_gmem_store || cs_writes_image(cp->si))) {
+            if (dchain_ok()) dchain_after = true;
+            else vk_full_barrier(cb);
+        }
+#endif
+    } else {
+#ifdef __ANDROID__
+        if (cp->si->uses_gmem_store || cs_writes_image(cp->si)) {
+            if (dchain_ok()) dchain_after = true;
+            else vk_full_barrier(cb);
+        }
+#endif
+    }
     if (cp->si->uses_gmem_store) vc_mark_sbufs(5), note_gmem_store(5);
     stat_dispatches++;
 #ifdef __ANDROID__
-    dchain = !gcopy_mode && !gfast_n;  // (a copy mode's ranges go through gfast_buf: those keep their barriers)
+    dchain = !gfast_n && vk_cmd() == cb && dchain_ok();
 #endif
     dchain_cb = cb;
 }
@@ -9352,7 +9397,7 @@ static void exec_list(uint64_t handle, int depth) {
         g_cur_rec = r;
         if (nlclear && r->op != CMD_CLEAR_COLOR && r->op != CMD_CLEAR_DEPTH_STENCIL) nlclear = 0;  // (begin_pass's, used up)
         if (r->op < CMD_COUNT) op_counts[r->op]++;
-        if (dchain && r->op != CMD_DISPATCH && !dchain_keeps(r->op)) {  // (the dispatches' run ends)
+        if ((dchain || dchain_after) && r->op != CMD_DISPATCH && !dchain_keeps(r->op)) {  // (the dispatches' run ends)
             dchain = false;
             if (dchain_after) vk_full_barrier(vk_cmd());
             dchain_after = false;
