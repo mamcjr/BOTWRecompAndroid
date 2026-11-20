@@ -40,6 +40,8 @@ static uint8_t mock_dirty[4096];
 void rt_fatal_trace(void) { abort(); }
 void rt_fatal_message(const char *fmt, ...) { (void)fmt; abort(); }
 void vk_device_fault_report(void) {}
+WdMark vk_wd_enter(uint32_t stage, uint64_t arg) { (void)stage, (void)arg; return (WdMark){0}; }
+void vk_wd_leave(WdMark m) { (void)m; }
 bool vk_driver_is_qualcomm(void) { return false; }
 bool vk_driver_is_radv(void) { return false; }
 bool vk_driver_is_turnip(void) { return mock_turnip; }
@@ -97,16 +99,35 @@ void vk_frame_resume(void) {}
 VkRenderPass vk_rp_compat(uint32_t n, const VkFormat *c, VkFormat d, VkFormat s, VkSampleCountFlagBits sm) { (void)n, (void)c, (void)d, (void)s, (void)sm; return VK_NULL_HANDLE; }
 void vk_shaders_init(void) {}
 uint32_t *vk_glsl_to_spirv(const char *s, int stg, const char *n, size_t *nw) { (void)s, (void)stg, (void)n, (void)nw; return NULL; }
+uint32_t *vk_glsl_to_spirv_ex(const char *s, int stg, const char *n, size_t *nw, uint64_t *oh) { (void)s, (void)stg, (void)n, (void)nw, (void)oh; return NULL; }
+uint32_t *vk_spirv_load_cached(uint64_t h, size_t *nw) { (void)h, (void)nw; return NULL; }
+void vk_shader_cache_ensure_dirs(void) {}
+const uint8_t *maxwell_dbg_code = NULL;
+const uint8_t *maxwell_dbg_vs = NULL;
 VkShaderModule vk_module(const uint32_t *spv, size_t n) { (void)spv, (void)n; return VK_NULL_HANDLE; }
 int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *o, int m) { (void)spv, (void)n, (void)o, (void)m; return 0; }
 VkDescriptorSetLayout vk_set_layout(const VkBindingInfo *b, int n, uint32_t s, VkShaderStageFlags stg) { (void)b, (void)n, (void)s, (void)stg; return VK_NULL_HANDLE; }
 void maxwell_free(ShaderInfo *s) { (void)s; }
 ShaderInfo *maxwell_translate(const uint8_t *c, size_t m, int s, const ShaderKey *k) { (void)c, (void)m, (void)s, (void)k; return NULL; }
+ShaderInfo *maxwell_translate_bounded(const uint8_t *c, size_t m, size_t cz, int s, const ShaderKey *k) { (void)c, (void)m, (void)cz, (void)s, (void)k; return NULL; }
+uint64_t maxwell_gmem_size = 0;
+unsigned maxwell_gmem_miss_stages = ~0u;
+bool maxwell_no_int64 = false, maxwell_gmem_map_all = false, maxwell_gmem_miss_log = false, maxwell_brx_window = true;
+bool maxwell_static_stacks = true, maxwell_structured = true, maxwell_struct_skips = true, maxwell_no_switch = false;
+bool maxwell_no_local_struct = false, maxwell_native_half = true, maxwell_fast_minmax = true, maxwell_cb_window = false;
+int g_game_version = 0x190;
+volatile int g_debug_frame_request = 0;
 VkShaderModule vk_builtin_shader(const char *name) { (void)name; return VK_NULL_HANDLE; }
 uint64_t plat_now_ns(void) { return 0; }
 uint64_t SDL_GetTicksNS(void) { return 0; }
+void SDL_DelayPrecise(uint64_t ns) { (void)ns; }
+int SDL_GetNumLogicalCPUCores(void) { return 4; }
 bool SDL_GetWindowSizeInPixels(SDL_Window *w, int *pw, int *ph) { (void)w; if (pw) *pw = 1280; if (ph) *ph = 720; return true; }
 const char *paths_cache_dir(void) { return "/tmp"; }
+const char *rt_data_root(void) { return "/tmp"; }
+bool framepace_on_title(void) { return false; }
+void widescreen_minimap_seen(void) {}
+void widescreen_talk_seen(void) {}
 const Settings *settings_get(void) { return &g_settings; }
 int64_t plat_avail_ram_mb(void) { return 8192; }
 int64_t plat_total_ram_mb(void) { return 12288; }
@@ -145,7 +166,7 @@ typedef struct {
 typedef struct { VkCommandBuffer handle; MockOp ops[512]; int nops; } MockCb;
 
 static MockImg m_imgs[128]; static MockBuf m_bufs[128]; static MockView m_views[256]; static MockCb m_cbs[64];
-static int n_imgs, n_bufs, n_views, n_cbs, stat_b2i, stat_in_up, stat_in_main, stat_bar, stat_up_bar, stat_sc_bar, mock_hazards;
+static int n_imgs, n_bufs, n_views, n_cbs, stat_b2i, stat_in_up, stat_in_main, stat_bar, stat_up_bar, stat_sc_bar, stat_dispatch, stat_cbuf, cbuf_bars[8], mock_hazards;
 static MockCb *act_cb; static MockImg *act_att0; static VkAttachmentLoadOp last_lop[8];
 static MockImg *find_img(VkImage im) { for (int i = 0; i < n_imgs; i++) if (m_imgs[i].handle == im) return &m_imgs[i]; return NULL; }
 static MockBuf *find_buf(VkBuffer b) { for (int i = 0; i < n_bufs; i++) if (m_bufs[i].handle == b) return &m_bufs[i]; return NULL; }
@@ -333,13 +354,14 @@ static VKAPI_ATTR VkResult VKAPI_CALL m_submit2(VkQueue q, uint32_t nsub, const 
 }
 static VKAPI_ATTR void VKAPI_CALL n_vp(VkCommandBuffer c, uint32_t f, uint32_t n, const VkViewport *v) { (void)c, (void)f, (void)n, (void)v; }
 static VKAPI_ATTR void VKAPI_CALL n_sc(VkCommandBuffer c, uint32_t f, uint32_t n, const VkRect2D *r) { (void)c, (void)f, (void)n, (void)r; }
-static VKAPI_ATTR void VKAPI_CALL n_cbuf(VkCommandBuffer c, VkBuffer s, VkBuffer d, uint32_t n, const VkBufferCopy *r) { (void)c, (void)s, (void)d, (void)n, (void)r; }
+static VKAPI_ATTR void VKAPI_CALL n_cbuf(VkCommandBuffer c, VkBuffer s, VkBuffer d, uint32_t n, const VkBufferCopy *r) { (void)c, (void)s, (void)d, (void)n, (void)r; cbuf_bars[stat_cbuf++ & 7] = stat_bar; }
 static VKAPI_ATTR void VKAPI_CALL n_blit(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageBlit *r, VkFilter f) { (void)c, (void)s, (void)sl, (void)d, (void)dl, (void)n, (void)r, (void)f; }
 static VKAPI_ATTR void VKAPI_CALL n_res(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageResolve *r) { (void)c, (void)s, (void)sl, (void)d, (void)dl, (void)n, (void)r; }
 static VKAPI_ATTR void VKAPI_CALL n_pipe(VkCommandBuffer c, VkPipelineBindPoint p, VkPipeline pi) { (void)c, (void)p, (void)pi; }
 static VKAPI_ATTR void VKAPI_CALL n_sets(VkCommandBuffer c, VkPipelineBindPoint p, VkPipelineLayout l, uint32_t f, uint32_t nc, const VkDescriptorSet *s, uint32_t nd, const uint32_t *d) { (void)c, (void)p, (void)l, (void)f, (void)nc, (void)s, (void)nd, (void)d; }
 static VKAPI_ATTR void VKAPI_CALL n_push(VkCommandBuffer c, VkPipelineLayout l, VkShaderStageFlags s, uint32_t o, uint32_t z, const void *v) { (void)c, (void)l, (void)s, (void)o, (void)z, (void)v; }
 static VKAPI_ATTR void VKAPI_CALL n_draw(VkCommandBuffer c, uint32_t v, uint32_t i, uint32_t fv, uint32_t fi) { (void)c, (void)v, (void)i, (void)fv, (void)fi; }
+static VKAPI_ATTR void VKAPI_CALL n_dispatch(VkCommandBuffer c, uint32_t x, uint32_t y, uint32_t z) { (void)c, (void)x, (void)y, (void)z; stat_dispatch++; }
 static VKAPI_ATTR void VKAPI_CALL n_cat(VkCommandBuffer c, uint32_t na, const VkClearAttachment *ca, uint32_t nr, const VkClearRect *cr) { (void)c, (void)na, (void)ca, (void)nr, (void)cr; }
 static VKAPI_ATTR void VKAPI_CALL n_rqp(VkCommandBuffer c, VkQueryPool q, uint32_t f, uint32_t n) { (void)c, (void)q, (void)f, (void)n; }
 static VKAPI_ATTR void VKAPI_CALL n_ts2(VkCommandBuffer c, VkPipelineStageFlags2 s, VkQueryPool q, uint32_t n) { (void)c, (void)s, (void)q, (void)n; }
@@ -355,6 +377,28 @@ static VKAPI_ATTR void VKAPI_CALL n_dsm(VkDevice d, VkShaderModule m, const VkAl
 static VKAPI_ATTR void VKAPI_CALL n_dpl(VkDevice d, VkPipelineLayout l, const VkAllocationCallbacks *a) { (void)d, (void)l, (void)a; }
 static VKAPI_ATTR void VKAPI_CALL n_ddsl(VkDevice d, VkDescriptorSetLayout l, const VkAllocationCallbacks *a) { (void)d, (void)l, (void)a; }
 static VKAPI_ATTR VkResult VKAPI_CALL n_csmp(VkDevice d, const VkSamplerCreateInfo *c, const VkAllocationCallbacks *a, VkSampler *s) { (void)d, (void)c, (void)a; *s = VK_NULL_HANDLE; return VK_SUCCESS; }
+static VKAPI_ATTR void VKAPI_CALL n_mp(VkPhysicalDevice p, VkPhysicalDeviceMemoryProperties *m) { (void)p; memset(m, 0, sizeof *m); }
+static VKAPI_ATTR PFN_vkVoidFunction VKAPI_CALL n_gpa(VkDevice d, const char *n) { (void)d, (void)n; return NULL; }
+static VKAPI_ATTR VkResult VKAPI_CALL n_am(VkDevice d, const VkMemoryAllocateInfo *a, const VkAllocationCallbacks *c, VkDeviceMemory *m) { (void)d, (void)a, (void)c; *m = VK_NULL_HANDLE; return VK_SUCCESS; }
+static VKAPI_ATTR void VKAPI_CALL n_fm(VkDevice d, VkDeviceMemory m, const VkAllocationCallbacks *c) { (void)d, (void)m, (void)c; }
+static VKAPI_ATTR VkResult VKAPI_CALL n_bbm(VkDevice d, VkBuffer b, VkDeviceMemory m, VkDeviceSize o) { (void)d, (void)b, (void)m, (void)o; return VK_SUCCESS; }
+static VKAPI_ATTR VkResult VKAPI_CALL n_crbuf(VkDevice d, const VkBufferCreateInfo *ci, const VkAllocationCallbacks *c, VkBuffer *b) { (void)d, (void)ci, (void)c; *b = VK_NULL_HANDLE; return VK_SUCCESS; }
+static VKAPI_ATTR void VKAPI_CALL n_dbuf(VkDevice d, VkBuffer b, const VkAllocationCallbacks *c) { (void)d, (void)b, (void)c; }
+static VKAPI_ATTR void VKAPI_CALL n_db(VkCommandBuffer c, float k, float cl, float s) { (void)c, (void)k, (void)cl, (void)s; }
+static VKAPI_ATTR void VKAPI_CALL n_bc(VkCommandBuffer c, const float b[4]) { (void)c, (void)b; }
+static VKAPI_ATTR void VKAPI_CALL n_scm(VkCommandBuffer c, VkStencilFaceFlags f, uint32_t m) { (void)c, (void)f, (void)m; }
+static VKAPI_ATTR void VKAPI_CALL n_bib(VkCommandBuffer c, VkBuffer b, VkDeviceSize o, VkIndexType t) { (void)c, (void)b, (void)o, (void)t; }
+static VKAPI_ATTR void VKAPI_CALL n_bvb(VkCommandBuffer c, uint32_t f, uint32_t n, const VkBuffer *b, const VkDeviceSize *o) { (void)c, (void)f, (void)n, (void)b, (void)o; }
+static VKAPI_ATTR void VKAPI_CALL n_di(VkCommandBuffer c, uint32_t ic, uint32_t nc, uint32_t fi, int32_t vo, uint32_t fn) { (void)c, (void)ic, (void)nc, (void)fi, (void)vo, (void)fn; }
+static VKAPI_ATTR void VKAPI_CALL n_cm(VkCommandBuffer c, VkCullModeFlags m) { (void)c, (void)m; }
+static VKAPI_ATTR void VKAPI_CALL n_ff(VkCommandBuffer c, VkFrontFace f) { (void)c, (void)f; }
+static VKAPI_ATTR void VKAPI_CALL n_pt(VkCommandBuffer c, VkPrimitiveTopology t) { (void)c, (void)t; }
+static VKAPI_ATTR void VKAPI_CALL n_b32(VkCommandBuffer c, VkBool32 e) { (void)c, (void)e; }
+static VKAPI_ATTR void VKAPI_CALL n_dco(VkCommandBuffer c, VkCompareOp o) { (void)c, (void)o; }
+static VKAPI_ATTR void VKAPI_CALL n_sop(VkCommandBuffer c, VkStencilFaceFlags f, VkStencilOp a, VkStencilOp b, VkStencilOp d, VkCompareOp o) { (void)c, (void)f, (void)a, (void)b, (void)d, (void)o; }
+static VKAPI_ATTR void VKAPI_CALL n_svi(VkCommandBuffer c, uint32_t nb, const VkVertexInputBindingDescription2EXT *b, uint32_t na, const VkVertexInputAttributeDescription2EXT *a) { (void)c, (void)nb, (void)b, (void)na, (void)a; }
+static VKAPI_ATTR VkResult VKAPI_CALL n_pep(VkDevice d, const VkPipelineInfoKHR *p, uint32_t *n, VkPipelineExecutablePropertiesKHR *o) { (void)d, (void)p, (void)o; if (n) *n = 0; return VK_SUCCESS; }
+static VKAPI_ATTR VkResult VKAPI_CALL n_pes(VkDevice d, const VkPipelineExecutableInfoKHR *p, uint32_t *n, VkPipelineExecutableStatisticKHR *o) { (void)d, (void)p, (void)o; if (n) *n = 0; return VK_SUCCESS; }
 
 PFN_vkCreateDescriptorPool vkCreateDescriptorPool = n_cdp; PFN_vkAllocateDescriptorSets vkAllocateDescriptorSets = n_ads;
 PFN_vkUpdateDescriptorSets vkUpdateDescriptorSets = n_uds; PFN_vkCreateDescriptorSetLayout vkCreateDescriptorSetLayout = n_dsl;
@@ -378,8 +422,27 @@ PFN_vkCmdCopyBuffer vkCmdCopyBuffer = n_cbuf; PFN_vkCmdCopyImage vkCmdCopyImage 
 PFN_vkCmdBlitImage vkCmdBlitImage = n_blit; PFN_vkCmdResolveImage vkCmdResolveImage = n_res;
 PFN_vkCmdBindPipeline vkCmdBindPipeline = n_pipe; PFN_vkCmdBindDescriptorSets vkCmdBindDescriptorSets = n_sets;
 PFN_vkCmdPushConstants vkCmdPushConstants = n_push; PFN_vkCmdDraw vkCmdDraw = n_draw;
+PFN_vkCmdDispatch vkCmdDispatch = n_dispatch;
 PFN_vkCmdClearAttachments vkCmdClearAttachments = n_cat; PFN_vkCmdResetQueryPool vkCmdResetQueryPool = n_rqp;
 PFN_vkCmdWriteTimestamp2 vkCmdWriteTimestamp2 = n_ts2; PFN_vkGetQueryPoolResults vkGetQueryPoolResults = n_gqp;
+PFN_vkGetPhysicalDeviceMemoryProperties vkGetPhysicalDeviceMemoryProperties = n_mp;
+PFN_vkGetDeviceProcAddr vkGetDeviceProcAddr = n_gpa; PFN_vkAllocateMemory vkAllocateMemory = n_am;
+PFN_vkFreeMemory vkFreeMemory = n_fm; PFN_vkBindBufferMemory vkBindBufferMemory = n_bbm;
+PFN_vkCreateBuffer vkCreateBuffer = n_crbuf; PFN_vkDestroyBuffer vkDestroyBuffer = n_dbuf;
+PFN_vkCmdSetDepthBias vkCmdSetDepthBias = n_db; PFN_vkCmdSetBlendConstants vkCmdSetBlendConstants = n_bc;
+PFN_vkCmdSetStencilCompareMask vkCmdSetStencilCompareMask = n_scm;
+PFN_vkCmdSetStencilWriteMask vkCmdSetStencilWriteMask = n_scm;
+PFN_vkCmdSetStencilReference vkCmdSetStencilReference = n_scm;
+PFN_vkCmdBindIndexBuffer vkCmdBindIndexBuffer = n_bib; PFN_vkCmdBindVertexBuffers vkCmdBindVertexBuffers = n_bvb;
+PFN_vkCmdDrawIndexed vkCmdDrawIndexed = n_di; PFN_vkCmdSetCullMode vkCmdSetCullMode = n_cm;
+PFN_vkCmdSetFrontFace vkCmdSetFrontFace = n_ff; PFN_vkCmdSetPrimitiveTopology vkCmdSetPrimitiveTopology = n_pt;
+PFN_vkCmdSetDepthTestEnable vkCmdSetDepthTestEnable = n_b32; PFN_vkCmdSetDepthWriteEnable vkCmdSetDepthWriteEnable = n_b32;
+PFN_vkCmdSetDepthCompareOp vkCmdSetDepthCompareOp = n_dco; PFN_vkCmdSetStencilTestEnable vkCmdSetStencilTestEnable = n_b32;
+PFN_vkCmdSetStencilOp vkCmdSetStencilOp = n_sop; PFN_vkCmdSetDepthBiasEnable vkCmdSetDepthBiasEnable = n_b32;
+PFN_vkCmdSetPrimitiveRestartEnable vkCmdSetPrimitiveRestartEnable = n_b32;
+PFN_vkCmdSetVertexInputEXT vkCmdSetVertexInputEXT = n_svi;
+PFN_vkGetPipelineExecutablePropertiesKHR vkGetPipelineExecutablePropertiesKHR = n_pep;
+PFN_vkGetPipelineExecutableStatisticsKHR vkGetPipelineExecutableStatisticsKHR = n_pes;
 
 // ---- guest texture & test helpers
 static uint8_t *guest_mem; static size_t guest_off; static NvnPool g_pool;
@@ -535,6 +598,143 @@ int main(void) {
     backend_texture_destroyed(&td1);
     check("undiscard lowers tex_discarded_bytes on re-upload and destroy_image (0 drift)",
           d_after_up == 131072 && d_after_reup == 0 && d_before_del == 131072 && disc == 0);
+
+    // 8. Integration: compute dispatch chaining in gcopy_mode, cs_writes_image barrier deferral, and vk_submit_extra flush.
+    gcopy_mode = false; dchain = false; dchain_after = false; dchain_env = -1;
+    unsetenv("LARECOMP_VK_DISPATCH_CHAIN");
+    renderer_flush();
+
+    ShaderInfo si_plain = {.stage = STAGE_COMPUTE};
+    ShaderInfo si_img = {.stage = STAGE_COMPUTE, .ntex = 1, .tex = {[0] = {.type = TEXTYPE_2D, .is_image = true}}};
+    ShaderInfo si_gstore = {.stage = STAGE_COMPUTE, .uses_gmem_map = true, .uses_gmem_store = true};
+    CsProg *cp_plain = calloc(1, sizeof *cp_plain);
+    CsProg *cp_img = calloc(1, sizeof *cp_img);
+    CsProg *cp_gstore = calloc(1, sizeof *cp_gstore);
+    assert(cp_plain && cp_img && cp_gstore);
+    cp_plain->si = cp_plain->p.vi = &si_plain;
+    atomic_store(&cp_plain->p.state, 1);
+    cp_img->si = cp_img->p.vi = &si_img;
+    atomic_store(&cp_img->p.state, 1);
+    cp_gstore->si = cp_gstore->p.vi = &si_gstore;
+    atomic_store(&cp_gstore->p.state, 1);
+
+    NvnProgram prog_plain = {.stages = {[5] = {.code_addr = 0x90000100ull}}};
+    NvnProgram prog_img = {.stages = {[5] = {.code_addr = 0x90000200ull}}};
+    NvnProgram prog_gstore = {.stages = {[5] = {.code_addr = 0x90000300ull}}};
+    VkObjectEntry *e_plain = vk_object_slot(&compute_cache, prog_plain.stages[5].code_addr);
+    VkObjectEntry *e_img = vk_object_slot(&compute_cache, prog_img.stages[5].code_addr);
+    VkObjectEntry *e_gstore = vk_object_slot(&compute_cache, prog_gstore.stages[5].code_addr);
+    e_plain->object = cp_plain;
+    e_img->object = cp_img;
+    e_gstore->object = cp_gstore;
+
+    int bar0 = stat_bar, disp0 = stat_dispatch; uint64_t dc0 = stat_dchained;
+    _Alignas(CmdRec) CmdRec dcmds[8];
+    memset(dcmds, 0, sizeof dcmds);
+    dcmds[0] = (CmdRec){.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&prog_img}};
+    dcmds[1] = (CmdRec){.op = CMD_DISPATCH, .size = sizeof(CmdRec), .x = {1, 1, 1}};
+    dcmds[2] = (CmdRec){.op = CMD_UPDATE_UNIFORM_BUFFER, .size = sizeof(CmdRec)};  // dchain_keeps, sz=0
+    dcmds[3] = (CmdRec){.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&prog_plain}};
+    dcmds[4] = (CmdRec){.op = CMD_DISPATCH, .size = sizeof(CmdRec), .x = {1, 1, 1}};
+    dcmds[5] = (CmdRec){.op = CMD_BARRIER, .size = sizeof(CmdRec)};  // non-dchain_keeps: flushes dchain_after
+    dcmds[6] = (CmdRec){.op = CMD_END, .size = sizeof(CmdRec)};
+    exec_list((uint64_t)(uintptr_t)dcmds, 0);
+    bool ok_dchain_seq = (stat_dispatch - disp0 == 2) && (stat_dchained - dc0 == 1) &&
+                         (stat_bar - bar0 == 2) && !dchain && !dchain_after;
+
+    // gcopy_mode storing dispatch chains with subsequent dispatch and arms dchain_after.
+    gcopy_mode = true;
+    int barg0 = stat_bar, dispg0 = stat_dispatch; uint64_t dcg0 = stat_dchained;
+    dcmds[0].x[0] = (uint64_t)(uintptr_t)&prog_gstore;
+    exec_list((uint64_t)(uintptr_t)dcmds, 0);
+    bool ok_gcopy_chain = (stat_dispatch - dispg0 == 2) && (stat_dchained - dcg0 == 1) &&
+                          (stat_bar - barg0 == 2) && !dchain && !dchain_after;
+    gcopy_mode = false;
+
+    // Non-dchain_keeps op when dchain == false && dchain_after == true (e.g. gfast_n > 0) must still flush barrier.
+    _Alignas(CmdRec) CmdRec bar_end[2] = {
+        {.op = CMD_BARRIER, .size = sizeof(CmdRec)},
+        {.op = CMD_END, .size = sizeof(CmdRec)},
+    };
+    int bar1 = stat_bar;
+    dchain = false; dchain_after = true;
+    exec_list((uint64_t)(uintptr_t)bar_end, 0);
+    bool ok_dchain_after_only = (stat_bar - bar1 == 1) && !dchain && !dchain_after;
+
+    // vk_submit_extra flushes owed dchain_after before vkEndCommandBuffer.
+    _Alignas(CmdRec) CmdRec tail_cmds[3] = {
+        {.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&prog_img}},
+        {.op = CMD_DISPATCH, .size = sizeof(CmdRec), .x = {1, 1, 1}},
+        {.op = CMD_END, .size = sizeof(CmdRec)},
+    };
+    int bar2 = stat_bar;
+    exec_list((uint64_t)(uintptr_t)tail_cmds, 0);
+    bool armed_before_sub = dchain && dchain_after && (stat_bar - bar2 == 1);
+    vk_submit_extra(VK_NULL_HANDLE, VK_NULL_HANDLE, VK_NULL_HANDLE);
+    bool ok_submit_flush = armed_before_sub && (stat_bar - bar2 == 2) && !dchain && !dchain_after;
+
+    // LARECOMP_VK_DISPATCH_CHAIN=0 negative control: barriers before every dispatch and immediately after storing dispatch.
+    setenv("LARECOMP_VK_DISPATCH_CHAIN", "0", 1); dchain_env = -1;
+    int bar_off0 = stat_bar, disp_off0 = stat_dispatch; uint64_t dc_off0 = stat_dchained;
+    dcmds[0].x[0] = (uint64_t)(uintptr_t)&prog_img;
+    exec_list((uint64_t)(uintptr_t)dcmds, 0);
+    bool ok_chain_off = (stat_dispatch - disp_off0 == 2) && (stat_dchained == dc_off0) &&
+                        (stat_bar - bar_off0 == 3) && !dchain && !dchain_after;
+    unsetenv("LARECOMP_VK_DISPATCH_CHAIN"); dchain_env = -1;
+
+    // Plain read-only dispatches chained together + CMD_BARRIER -> 1 pre-dispatch barrier total, 0 barriers at CMD_BARRIER.
+    _Alignas(CmdRec) CmdRec plain_cmds[6] = {
+        {.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&prog_plain}},
+        {.op = CMD_DISPATCH, .size = sizeof(CmdRec), .x = {1, 1, 1}},
+        {.op = CMD_DISPATCH, .size = sizeof(CmdRec), .x = {1, 1, 1}},
+        {.op = CMD_BARRIER, .size = sizeof(CmdRec)},
+        {.op = CMD_END, .size = sizeof(CmdRec)},
+    };
+    int bar_pl0 = stat_bar, disp_pl0 = stat_dispatch; uint64_t dc_pl0 = stat_dchained;
+    exec_list((uint64_t)(uintptr_t)plain_cmds, 0);
+    bool ok_plain_zero_bar = (stat_dispatch - disp_pl0 == 2) && (stat_dchained - dc_pl0 == 1) &&
+                             (stat_bar - bar_pl0 == 1) && !dchain && !dchain_after;
+
+    // !gcopy_mode fallback (m==0 -> gfast_handled==false) MUST arm dchain_after, and chained gfast_n>0 MUST flush
+    // dchain_after BEFORE copy_buffer(gmem_buf -> gfast_buf), then copy back + barrier.
+    gcopy_mode = false;
+    g_vk.host_import = true;
+    uint8_t *gf_guest = alloc_guest(4096);
+    gmem_buf = (VkBuffer)(uintptr_t)0xCAFE0002ull;
+    uint64_t need_gmem = (uint64_t)((uintptr_t)guest_mem - HEAP_BASE) + (8u << 20);
+    gmem_size = need_gmem > kernel_heap_size() ? need_gmem : kernel_heap_size();
+    memset(st.sbuf, 0, sizeof st.sbuf);
+    _Alignas(CmdRec) CmdRec gstore_one[3] = {
+        {.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&prog_gstore}},
+        {.op = CMD_DISPATCH, .size = sizeof(CmdRec), .x = {1, 1, 1}},
+        {.op = CMD_END, .size = sizeof(CmdRec)},
+    };
+    int bar_gf0 = stat_bar; stat_cbuf = 0; uint64_t dc_gf0 = stat_dchained;
+    exec_list((uint64_t)(uintptr_t)gstore_one, 0);
+    bool ok_gstore_fallback = dchain && dchain_after && (stat_bar - bar_gf0 == 1);
+    st.sbuf[5][0].addr = (uint64_t)(uintptr_t)gf_guest;
+    st.sbuf[5][0].size = 4096;
+    exec_list((uint64_t)(uintptr_t)gstore_one, 0);
+    bool ok_gfast_pre_flush = (stat_dchained - dc_gf0 == 1) && stat_cbuf == 2 &&
+                              cbuf_bars[0] == bar_gf0 + 2 && cbuf_bars[1] == bar_gf0 + 4 &&
+                              stat_bar == bar_gf0 + 5 && !dchain_after;
+    memset(st.sbuf, 0, sizeof st.sbuf);
+
+    e_plain->object = NULL; e_img->object = NULL; e_gstore->object = NULL;
+    free(cp_plain); free(cp_img); free(cp_gstore);
+    st.program = NULL;
+
+    // vk_exec_reset() clears dchain*, gwin_mode, and gfast_win across reboots.
+    dchain = true; dchain_after = true; dchain_cb = vk_cmd(); dchain_env = 1;
+    gwin_mode = true; gfast_win = (VkDescriptorBufferInfo){gmem_buf, 0, 4096};
+    gmem_buf = VK_NULL_HANDLE; gmem_size = 0; g_vk.host_import = false;
+    vk_exec_reset();
+    bool ok_reset = !dchain && !dchain_after && dchain_cb == VK_NULL_HANDLE && dchain_env == -1 &&
+                    !gwin_mode && gfast_win.buffer == VK_NULL_HANDLE;
+
+    check("dchain integration: dispatch chaining, gcopy_mode, chain=0, plain 0-bar, gfast pre-flush, and reset",
+          ok_dchain_seq && ok_gcopy_chain && ok_dchain_after_only && ok_submit_flush &&
+          ok_chain_off && ok_plain_zero_bar && ok_gstore_fallback && ok_gfast_pre_flush && ok_reset);
 
     check("Vulkan mock synchronization validator recorded 0 hazards", !mock_hazards);
     printf("test_rt_load_upload: %s (%d failure(s))\n", failures ? "FAILED" : "all passed", failures);
