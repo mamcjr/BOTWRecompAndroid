@@ -1,6 +1,8 @@
 // Regression test for write-back render targets first drawn into with LOAD_OP_LOAD (#296 / #438).
 // Replays recorded upload/main command buffers against byte-backed mock images and validates Vulkan hazards.
 #include <assert.h>
+#include <pthread.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -45,6 +47,8 @@ void vk_wd_leave(WdMark m) { (void)m; }
 bool vk_driver_is_qualcomm(void) { return false; }
 bool vk_driver_is_radv(void) { return false; }
 bool vk_driver_is_turnip(void) { return mock_turnip; }
+static uint32_t mock_mali_calls = 0;
+bool vk_driver_is_mali(void) { mock_mali_calls++; return g_vk.props.vendorID == 0x13B5; }
 bool vk_turnip_path_on(int s) { (void)s; return mock_turnip; }
 bool vk_turnip_heap_on(int s) { (void)s; return false; }
 bool vk_async_on(void) { return false; }
@@ -492,6 +496,22 @@ static void reset_pass(NvnTexture *c0, NvnTexture *c1, uint32_t chmask, const Cm
 static int failures;
 static void check(const char *name, bool ok) { printf("%s %s\n", ok ? "ok  " : "FAIL", name); failures += !ok; }
 
+typedef struct {
+    uint8_t buf[64];
+    _Atomic bool stop;
+} SeqStressCtx;
+
+static void *seqlock_writer_fn(void *arg) {
+    SeqStressCtx *ctx = (SeqStressCtx *)arg;
+    for (int i = 0; i < 4000; i++) {
+        cbwin_write_begin();
+        memset(ctx->buf, (i & 1) ? 0xA1 : 0xB2, sizeof ctx->buf);
+        cbwin_write_end();
+    }
+    atomic_store_explicit(&ctx->stop, true, memory_order_release);
+    return NULL;
+}
+
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
     setenv("LARECOMP_TEX_DISCARD", "1", 1); setenv("LARECOMP_WRITEBACK_MAX", "262144", 1);
@@ -599,7 +619,8 @@ int main(void) {
     check("undiscard lowers tex_discarded_bytes on re-upload and destroy_image (0 drift)",
           d_after_up == 131072 && d_after_reup == 0 && d_before_del == 131072 && disc == 0);
 
-    // 8. Integration: compute dispatch chaining in gcopy_mode, cs_writes_image barrier deferral, and vk_submit_extra flush.
+    {
+        // 8. Integration: compute dispatch chaining in gcopy_mode, cs_writes_image barrier deferral, and vk_submit_extra flush.
     gcopy_mode = false; dchain = false; dchain_after = false; dchain_env = -1;
     unsetenv("LARECOMP_VK_DISPATCH_CHAIN");
     renderer_flush();
@@ -735,6 +756,269 @@ int main(void) {
     check("dchain integration: dispatch chaining, gcopy_mode, chain=0, plain 0-bar, gfast pre-flush, and reset",
           ok_dchain_seq && ok_gcopy_chain && ok_dchain_after_only && ok_submit_flush &&
           ok_chain_off && ok_plain_zero_bar && ok_gstore_fallback && ok_gfast_pre_flush && ok_reset);
+    }
+    {
+        // 9. Integration: cbwin_bind, g_cbwin_cache, cbpatch dedupe, #453 snapshot=0 paths, isolated seqlock, and flushes.
+    g_vk.props.vendorID = 0x13B5;
+    g_vk.props.limits.maxUniformBufferRange = 65536;
+    g_vk.props.limits.minUniformBufferOffsetAlignment = 256;
+    gcopy_mode = true; gmem_placed = false;
+    atomic_store_explicit(&cbwin_env, -2, memory_order_relaxed);
+    atomic_store_explicit(&cbwin_snap_env, -1, memory_order_relaxed);
+    unsetenv("LARECOMP_CB_WINDOW");
+    unsetenv("LARECOMP_CBWIN_SNAPSHOT");
+    cbwin_base_reset(&g_cbwin_cache);
+    cbpatch_dedupe_reset(&g_cbpatch_dedupe);
+
+    uint8_t *ubo = alloc_guest(4096), *src_cpy = alloc_guest(256);
+    uint64_t ubo_addr = (uint64_t)(uintptr_t)ubo;
+    memset(ubo, 0x11, 4096);
+    memset(src_cpy, 0x44, 256);
+    vk_ubo_inline_mark(ubo_addr + 0x40, 16);
+
+    VkDescriptorBufferInfo cbi1 = {0}, cbi2 = {0}, cbi3 = {0};
+    assert(!cbwin_bind(0, 2, ubo_addr + 4, 256, &cbi1));  // unaligned address rejected
+    memset(&cbw_patch, 0, sizeof cbw_patch);
+    stat_cbwin = 0; uint64_t cbc0 = stat_cb_copied;
+    bool ok_cb1 = cbwin_bind(0, 2, ubo_addr, 4096, &cbi1) && cbw_patch[0].m[0] == 3u && cbw_patch[0].m[1] == 4u &&
+                  cbw_patch[0].m[2] == 1u && stat_cbwin == 1 && stat_cb_copied == cbc0 + 4096;
+    // Simulate draw_() up_fix retry: zero m[0..3] with non-zero stale rows[], check 16B active prefix dedupe.
+    cbw_patch[0].rows[10][0] = 0xDEADBEEFu;
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    uint32_t act_0 = cbpatch_active_bytes(&cbw_patch[0]);
+    VkSpan sp_zero = {0};
+    assert(act_0 == 16u && !cbpatch_lookup(&g_cbpatch_dedupe, 0, vk_pending_seq(), &cbw_patch[0], &act_0, &sp_zero));
+    VkSpan sp_commit = vk_transient_copy(&cbw_patch[0], sizeof cbw_patch[0], 256);
+    cbpatch_commit(&g_cbpatch_dedupe, 0, vk_pending_seq(), &cbw_patch[0], act_0, sp_commit);
+    cbw_patch[0].rows[10][0] = 0xCAFEBABEu;
+    assert(cbpatch_lookup(&g_cbpatch_dedupe, 0, vk_pending_seq(), &cbw_patch[0], &act_0, &sp_zero) && sp_zero.off == sp_commit.off);
+
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_cb_hit = cbwin_bind(0, 2, ubo_addr, 4096, &cbi2) && cbi2.buffer == cbi1.buffer &&
+                     cbi2.offset == cbi1.offset && stat_cb_copied == cbc0 + 4096;
+
+    // CMD_UPDATE_UNIFORM_BUFFER inside [ubo_addr+0x40, ubo_addr+0x50) keeps base snapshot; outside invalidates it.
+    _Alignas(CmdRec) uint8_t ubo_cmds[256];
+    memset(ubo_cmds, 0, sizeof ubo_cmds);
+    CmdRec *u_in = (CmdRec *)ubo_cmds;
+    u_in->op = CMD_UPDATE_UNIFORM_BUFFER;
+    u_in->size = (uint32_t)((sizeof(CmdRec) + 16u + 7u) & ~7u);
+    u_in->x[0] = ubo_addr; u_in->x[2] = 0x40; u_in->x[3] = 16;
+    memset(u_in->extra, 0x22, 16);
+    CmdRec *u_end = (CmdRec *)(ubo_cmds + u_in->size);
+    u_end->op = CMD_END; u_end->size = sizeof(CmdRec);
+    exec_list((uint64_t)(uintptr_t)ubo_cmds, 0);
+
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_cb_in = cbwin_bind(0, 2, ubo_addr, 4096, &cbi3) && cbi3.buffer == cbi1.buffer &&
+                    cbi3.offset == cbi1.offset && stat_cb_copied == cbc0 + 4096 && cbw_patch[0].rows[0][0] == 0x22222222u;
+
+    memset(ubo_cmds, 0, sizeof ubo_cmds);
+    CmdRec *u_out = (CmdRec *)ubo_cmds;
+    u_out->op = CMD_UPDATE_UNIFORM_BUFFER;
+    u_out->size = (uint32_t)((sizeof(CmdRec) + 16u + 7u) & ~7u);
+    u_out->x[0] = ubo_addr; u_out->x[2] = 0x100; u_out->x[3] = 16;
+    memset(u_out->extra, 0x33, 16);
+    u_end = (CmdRec *)(ubo_cmds + u_out->size);
+    u_end->op = CMD_END; u_end->size = sizeof(CmdRec);
+    exec_list((uint64_t)(uintptr_t)ubo_cmds, 0);
+
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_cb_out = cbwin_bind(0, 2, ubo_addr, 4096, &cbi3) && stat_cb_copied == cbc0 + 8192;
+
+    // CMD_COPY_BUFFER_TO_BUFFER flushes g_cbwin_cache via guest_copy_flush(); seqlock write window bypasses & drops it.
+    memset(ubo_cmds, 0, sizeof ubo_cmds);
+    CmdRec *b2b = (CmdRec *)ubo_cmds;
+    b2b->op = CMD_COPY_BUFFER_TO_BUFFER;
+    b2b->size = sizeof(CmdRec);
+    b2b->x[0] = (uint64_t)(uintptr_t)src_cpy; b2b->x[1] = ubo_addr + 0x40; b2b->x[2] = 64;
+    u_end = (CmdRec *)(ubo_cmds + b2b->size);
+    u_end->op = CMD_END; u_end->size = sizeof(CmdRec);
+    exec_list((uint64_t)(uintptr_t)ubo_cmds, 0);
+
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_b2b = memcmp(ubo + 0x40, src_cpy, 64) == 0 && cbwin_bind(0, 2, ubo_addr, 4096, &cbi3) &&
+                  stat_cb_copied == cbc0 + 12288;
+    // Active cbwin_write_begin/end seqlock window: reader sees !can_cache (no stale cache insert), then end bumps cbwin_retire_gen.
+    cbwin_write_begin();
+    bool seqlock_can_cache = true;
+    (void)cbwin_read_begin(&seqlock_can_cache);
+    memset(ubo + 0x100, 0x55, 64);
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    VkDescriptorBufferInfo cbi_mid = {0}, cbi_post = {0};
+    bool ok_mid_write = !seqlock_can_cache && cbwin_bind(0, 2, ubo_addr, 4096, &cbi_mid) &&
+                        stat_cb_copied == cbc0 + 16384;
+    cbwin_write_end();
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_post_copy = ok_mid_write && cbwin_bind(0, 2, ubo_addr, 4096, &cbi_post) &&
+                        stat_cb_copied == cbc0 + 20480;
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_async_drop = ok_post_copy && cbwin_bind(0, 2, ubo_addr, 4096, &cbi3) &&
+                         cbi3.offset == cbi_post.offset && stat_cb_copied == cbc0 + 20480;
+
+    // Upstream #453 compatibility: LARECOMP_CBWIN_SNAPSHOT=0 and AB("cbsnap")==1 fallback/placed behavior.
+    setenv("LARECOMP_CBWIN_SNAPSHOT", "0", 1);
+    atomic_store_explicit(&cbwin_snap_env, -1, memory_order_relaxed);
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_nosnap_gcopy = !cbwin_bind(0, 2, ubo_addr, 4096, &cbi3);
+    VkBuffer saved_gbuf = gmem_buf;
+    uint64_t saved_gsize = gmem_size;
+    setenv("LARECOMP_CB_WINDOW", "1", 1);
+    atomic_store_explicit(&cbwin_env, -2, memory_order_relaxed);
+    gmem_placed = true;
+    gmem_buf = (VkBuffer)(uintptr_t)0xCAFE0001ull;
+    gmem_size = (uint64_t)(ubo_addr - HEAP_BASE) + 8192ull;
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_nosnap_placed = cbwin_bind(0, 2, ubo_addr, 4096, &cbi3) &&
+                            cbi3.buffer == gmem_buf && cbi3.offset == ubo_addr - HEAP_BASE && cbi3.range == 4096;
+    unsetenv("LARECOMP_CBWIN_SNAPSHOT");
+    atomic_store_explicit(&cbwin_snap_env, -1, memory_order_relaxed);
+
+    // AB("cbsnap") == 1 disables snapshots just like LARECOMP_CBWIN_SNAPSHOT=0.
+    setenv("LARECOMP_AB", "1:cbsnap", 1); ab_n = -1;
+    uint64_t saved_frame = s_frame_counter;
+    s_frame_counter = 1;
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_ab_placed = cbwin_bind(0, 2, ubo_addr, 4096, &cbi3) && cbi3.buffer == gmem_buf;
+    gmem_placed = false; gmem_buf = saved_gbuf; gmem_size = saved_gsize;
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_ab_gcopy = !cbwin_bind(0, 2, ubo_addr, 4096, &cbi3);
+    unsetenv("LARECOMP_AB"); ab_n = -1; s_frame_counter = saved_frame;
+
+    // Non-Mali negative control (vendorID 0x5143) with LARECOMP_CB_WINDOW unset stays off.
+    unsetenv("LARECOMP_CB_WINDOW");
+    atomic_store_explicit(&cbwin_env, -2, memory_order_relaxed);
+    g_vk.props.vendorID = 0x5143;
+    bool ok_non_mali_off = !cbwin_wanted() && !cbwin_bind(0, 2, ubo_addr, 4096, &cbi3);
+
+    // Turnip placed-heap short-circuit negative control (gmem_placed=true, gcopy_mode=false, unset LARECOMP_CB_WINDOW):
+    // cbwin_wanted() must return false on !gmem_placed with 0 invocations of vk_driver_is_mali().
+    g_vk.props.vendorID = 0x13B5;
+    gmem_placed = true;
+    atomic_store_explicit(&gcopy_mode, false, memory_order_relaxed);
+    atomic_store_explicit(&cbwin_env, -2, memory_order_relaxed);
+    uint32_t mali_calls0 = mock_mali_calls;
+    bool ok_placed_shortcircuit = !cbwin_wanted() && (mock_mali_calls == mali_calls0);
+    gmem_placed = false;
+    atomic_store_explicit(&gcopy_mode, true, memory_order_relaxed);
+    atomic_store_explicit(&cbwin_env, -2, memory_order_relaxed);
+
+    // Real gcopy_retire() + wb_apply() integration: when cbwin_retire_armed is true, retiring writebacks copy into guest UBO,
+    // bump cbwin_retire_gen (not gcopy_gen), and drop g_cbwin_cache so the next cbwin_bind() re-copies.
+    uint8_t retire_src[64], mock_wb_buf[128];
+    uint8_t *saved_wb_ptr = wb_ptr;
+    memset(retire_src, 0x77, sizeof retire_src);
+    memset(mock_wb_buf, 0x88, sizeof mock_wb_buf);
+    memset(ubo + 0x180, 0x11, sizeof retire_src);
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    uint64_t ggen_before_retire = gcopy_gen;
+    bool ok_retire_prime = cbwin_bind(0, 2, ubo_addr, 4096, &cbi3);
+    uint64_t cb_pre_retire = stat_cb_copied;
+    pthread_mutex_lock(&gc_lock);
+    gc_back[0] = (GcBack){.src = retire_src, .addr = ubo_addr + 0x180, .len = sizeof retire_src, .seq = vk_pending_seq(), .shadow = NULL};
+    gc_nback = 1;
+    pthread_mutex_unlock(&gc_lock);
+    gcopy_retire(vk_pending_seq());
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_gc_drop = ok_retire_prime && gcopy_gen == ggen_before_retire &&
+                      memcmp(ubo + 0x180, retire_src, sizeof retire_src) == 0 &&
+                      cbwin_bind(0, 2, ubo_addr, 4096, &cbi3) && stat_cb_copied == cb_pre_retire + 4096;
+    wb_ptr = mock_wb_buf;
+    pthread_mutex_lock(&wb_lock);
+    wb_ent[0] = (WbEntry){.seq = vk_pending_seq(), .addr = ubo_addr + 0x1C0, .wb = 16, .hb = 1, .bpb = 4, .pitch = 64, .off = 0, .size = 64, .order = ++wb_order, .busy = true};
+    pthread_mutex_unlock(&wb_lock);
+    wb_apply(vk_pending_seq());
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_retire_drop = ok_gc_drop && gcopy_gen == ggen_before_retire &&
+                          memcmp(ubo + 0x1C0, mock_wb_buf, 64) == 0 &&
+                          cbwin_bind(0, 2, ubo_addr, 4096, &cbi3) && stat_cb_copied == cb_pre_retire + 8192;
+    wb_ptr = saved_wb_ptr;
+
+    // 2-thread pthread seqlock stress test: reader never observes torn bytes when cbwin_read_end_ok() returns true.
+    SeqStressCtx sctx;
+    memset(sctx.buf, 0xA1, sizeof sctx.buf);
+    atomic_init(&sctx.stop, false);
+    pthread_t sth;
+    bool ok_th = pthread_create(&sth, NULL, seqlock_writer_fn, &sctx) == 0;
+    uint32_t valid_reads = 0;
+    bool ok_no_tear = ok_th;
+    while (ok_th && (!atomic_load_explicit(&sctx.stop, memory_order_acquire) || valid_reads < 10)) {
+        bool sc = false;
+        uint64_t sg0 = cbwin_read_begin(&sc);
+        uint8_t snap[64];
+        memcpy(snap, sctx.buf, sizeof snap);
+        if (cbwin_read_end_ok(sg0, sc)) {
+            valid_reads++;
+            uint8_t first = snap[0];
+            if (first != 0xA1 && first != 0xB2) ok_no_tear = false;
+            for (size_t b = 1; b < sizeof snap; b++)
+                if (snap[b] != first) ok_no_tear = false;
+        }
+    }
+    if (ok_th) pthread_join(sth, NULL);
+    bool ok_seqlock_mt = ok_no_tear && valid_reads >= 10;
+
+    // LARECOMP_CB_WINDOW=0 disables Mali default.
+    setenv("LARECOMP_CB_WINDOW", "0", 1);
+    atomic_store_explicit(&cbwin_env, -2, memory_order_relaxed);
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    bool ok_cbwin_off = !cbwin_wanted() && !cbwin_bind(0, 2, ubo_addr, 4096, &cbi3);
+    unsetenv("LARECOMP_CB_WINDOW");
+
+    // vk_exec_reset() clears cbwin_env, cbwin_snap_env, cbwin_retire_armed, gmem_placed, and g_cbpatch_dedupe across reboots.
+    atomic_store_explicit(&cbwin_env, 1, memory_order_relaxed);
+    atomic_store_explicit(&cbwin_snap_env, 0, memory_order_relaxed);
+    atomic_store_explicit(&cbwin_retire_armed, true, memory_order_relaxed);
+    gmem_placed = true;
+    memset(cbw_patch[0].m, 0, sizeof cbw_patch[0].m);
+    uint32_t act_pre = cbpatch_active_bytes(&cbw_patch[0]);
+    cbpatch_commit(&g_cbpatch_dedupe, 0, vk_pending_seq(), &cbw_patch[0], act_pre, sp_commit);
+    vk_exec_reset();
+    uint32_t act_post = 0; VkSpan sp_post = {0};
+    bool ok_reset = atomic_load_explicit(&cbwin_env, memory_order_relaxed) == -2 &&
+                    atomic_load_explicit(&cbwin_snap_env, memory_order_relaxed) == -1 &&
+                    !atomic_load_explicit(&cbwin_retire_armed, memory_order_relaxed) &&
+                    !gmem_placed &&
+                    !cbpatch_lookup(&g_cbpatch_dedupe, 0, vk_pending_seq(), &cbw_patch[0], &act_post, &sp_post);
+
+    // Non-cbwin copy-mode negative control: after reset (cbwin disarmed) on Qualcomm/unmatched vendor, gcopy_retire/wb_apply
+    // leave gcopy_gen & cbwin_retire_gen unchanged and guest_copy() keeps 100% cache hits (0 extra bytes copied).
+    g_vk.props.vendorID = 0x5143;
+    gcopy_mode = true; gmem_placed = false;
+    uint8_t *noncb_buf = alloc_guest(256);
+    uint64_t noncb_addr = (uint64_t)(uintptr_t)noncb_buf;
+    memset(noncb_buf, 0x3C, 256);
+    uint64_t rgen0 = atomic_load_explicit(&cbwin_retire_gen, memory_order_relaxed);
+    uint64_t ggen0 = gcopy_gen;
+    VkSpan gc1 = guest_copy(noncb_addr, 256);
+    uint64_t cb_noncb = stat_cb_copied;
+    pthread_mutex_lock(&gc_lock);
+    gc_back[0] = (GcBack){.src = retire_src, .addr = ubo_addr + 0x180, .len = sizeof retire_src, .seq = vk_pending_seq(), .shadow = NULL};
+    gc_nback = 1;
+    pthread_mutex_unlock(&gc_lock);
+    gcopy_retire(vk_pending_seq());
+    wb_ptr = mock_wb_buf;
+    pthread_mutex_lock(&wb_lock);
+    wb_ent[0] = (WbEntry){.seq = vk_pending_seq(), .addr = ubo_addr + 0x1C0, .wb = 16, .hb = 1, .bpb = 4, .pitch = 64, .off = 0, .size = 64, .order = ++wb_order, .busy = true};
+    pthread_mutex_unlock(&wb_lock);
+    wb_apply(vk_pending_seq());
+    wb_ptr = saved_wb_ptr;
+    VkSpan gc2 = guest_copy(noncb_addr, 256);
+    bool ok_non_cbwin_zero_churn = gc1.off == gc2.off && stat_cb_copied == cb_noncb && gcopy_gen == ggen0 &&
+                                   atomic_load_explicit(&cbwin_retire_gen, memory_order_relaxed) == rgen0;
+
+    g_vk.props.vendorID = 0;
+    bool ok_cb_all = ok_cb1 && ok_cb_hit && ok_cb_in && ok_cb_out && ok_b2b && ok_async_drop &&
+                     ok_nosnap_gcopy && ok_nosnap_placed && ok_ab_placed && ok_ab_gcopy &&
+                     ok_non_mali_off && ok_placed_shortcircuit && ok_retire_drop && ok_seqlock_mt &&
+                     ok_cbwin_off && ok_reset && ok_non_cbwin_zero_churn;
+    if (!ok_cb_all)
+        printf("  cbwin fail breakdown: cb1=%d hit=%d in=%d out=%d b2b=%d seqlock=%d(mid=%d) nosnap=(%d,%d) ab=(%d,%d) nonmali=%d short=%d retire=%d mt=%d off=%d rst=%d nochurn=%d\n",
+               ok_cb1, ok_cb_hit, ok_cb_in, ok_cb_out, ok_b2b, ok_async_drop, ok_mid_write,
+               ok_nosnap_gcopy, ok_nosnap_placed, ok_ab_placed, ok_ab_gcopy, ok_non_mali_off,
+               ok_placed_shortcircuit, ok_retire_drop, ok_seqlock_mt, ok_cbwin_off, ok_reset, ok_non_cbwin_zero_churn);
+    check("cbwin integration: base reuse, in/out updates, b2b/seqlock, retire, mt stress, #453, short-circuit, non-Mali off, zero non-cbwin churn, and reset", ok_cb_all);
+    }
 
     check("Vulkan mock synchronization validator recorded 0 hazards", !mock_hazards);
     printf("test_rt_load_upload: %s (%d failure(s))\n", failures ? "FAILED" : "all passed", failures);
