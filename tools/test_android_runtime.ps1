@@ -22,9 +22,9 @@ try {
     & $adbPath @deviceArgs shell mkdir -p $deviceDir
     if ($LASTEXITCODE -ne 0) { throw 'Could not create the device test directory.' }
     # (tests including the Vulkan backend need the headers the app build puts in android/deps/out)
-    $vulkanTests = @('test_bc_shadow', 'test_buffer_copy', 'test_rt_load_upload')
+    $vulkanTests = @('test_bc_shadow', 'test_buffer_copy', 'test_mali_rp_default', 'test_rt_load_upload')
     $haveVulkanHeaders = Test-Path -LiteralPath 'android/deps/out/volk/volk.h'
-    foreach ($testName in @('test_kernel_affinity', 'test_bc_shadow', 'test_buffer_copy', 'test_rt_load_upload', 'test_cbwin_snap', 'test_nvn_lifetime', 'test_object_cache', 'test_benchmark_trace')) {
+    foreach ($testName in @('test_kernel_affinity', 'test_bc_shadow', 'test_buffer_copy', 'test_mali_rp_default', 'test_rt_load_upload', 'test_cbwin_snap', 'test_nvn_lifetime', 'test_object_cache', 'test_benchmark_trace')) {
         if (-not $haveVulkanHeaders -and $vulkanTests -contains $testName) { Write-Host "SKIP: $testName (no android/deps/out: build the app once)"; continue }
         & $compilerPath --target=aarch64-linux-android30 -O1 -g -ffunction-sections -fdata-sections '-Wl,--gc-sections' -Wno-format -Iruntime -Iruntime/nvn -Iandroid/deps/out/include -Iandroid/deps/out/volk -DVK_NO_PROTOTYPES "tools/$testName.c" -lm -o "android/out/$testName"
         if ($LASTEXITCODE -ne 0) { throw "Compilation failed: $testName" }
