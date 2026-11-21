@@ -2115,8 +2115,28 @@ bool vk_turnip_path_on(int setting) { return setting < 0 ? vk_adreno_8xx(g_vk.pr
 // 128 MB storage range) read as zeros - every menu, dialogue and item name blank. Only the heap: 0.2.5 widened
 // vk_turnip_path_on itself, and with it the in-place target reads it also gates, checked on the Adreno 830 only - the
 // likely cause of the terrain striped on an Adreno 750 (issue #129: BOTW's terrain decals read the targets they write).
+// Automatic on an Adreno 6xx: only with more than 8 GB of RAM. The placed heap (~3.1 GB for BOTW, committed at once)
+// left an 8 GB OnePlus 7 Pro (Adreno 640, 7.3 GB visible, RAM saving on) without device memory for the driver: after
+// 8-28 minutes vkCreateGraphicsPipelines failed with VK_ERROR_OUT_OF_DEVICE_MEMORY and the game crashed soon after;
+// with CPU copies, 2 hours without a crash, text and all, and 13-16 fps instead of 10-14 (#520). Not the 7xx (their
+// text, above, untried with copies since). On stays on by hand.
+static int adreno_number(const char *name) {
+    const char *a = name ? strstr(name, "Adreno") : NULL;
+    if (!a) return 0;
+    while (*a && (*a < '0' || *a > '9')) a++;
+    return atoi(a);
+}
+bool vk_turnip_heap_ram_off(void) {  // (also the start screen's note under the setting)
+    int n = adreno_number(g_vk.props.deviceName);
+    if (n < 600 || n >= 700) return false;
+    extern bool vk_low_ram_auto(long *total_mb);
+    long total_mb = 0;
+    vk_low_ram_auto(&total_mb);
+    return total_mb && total_mb < 9 * 1024;  // (8 GB phones report ~7.3-7.7 GB, 12 GB ones ~11)
+}
 bool vk_turnip_heap_on(int setting) {
     if (setting >= 0 || vk_adreno_8xx(g_vk.props.deviceName)) return vk_turnip_path_on(setting);
+    if (vk_turnip_heap_ram_off()) return false;
     return g_vk.map_placed && vk_driver_is_turnip();
 }
 static bool g_lrz_at_start = true;

@@ -189,6 +189,8 @@
  "Police du jeu"},
 {"Game memory on the GPU (Turnip)",
  "Mémoire du jeu sur le GPU (Turnip)"},
+{"Automatic is off on this phone: an Adreno 6xx with 8 GB of RAM or less runs out of GPU memory with it after a few minutes, and the game closes.",
+ "Automatique est désactivé sur ce téléphone : une Adreno 6xx avec 8 Go de RAM ou moins manque de mémoire GPU avec cette option après quelques minutes, et le jeu se ferme."},
 {"Game version",
  "Version du jeu"},
 {"Game version: %s",

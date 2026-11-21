@@ -189,6 +189,8 @@
  "Lettertype van het spel"},
 {"Game memory on the GPU (Turnip)",
  "Spelgeheugen op de GPU (Turnip)"},
+{"Automatic is off on this phone: an Adreno 6xx with 8 GB of RAM or less runs out of GPU memory with it after a few minutes, and the game closes.",
+ "Automatisch staat uit op deze telefoon: een Adreno 6xx met 8 GB RAM of minder heeft er na een paar minuten geen GPU-geheugen meer mee, en het spel sluit."},
 {"Game version",
  "Spelversie"},
 {"Game version: %s",

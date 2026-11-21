@@ -189,6 +189,8 @@
  "ゲームのフォント"},
 {"Game memory on the GPU (Turnip)",
  "ゲームのメモリーを GPU に置く (Turnip)"},
+{"Automatic is off on this phone: an Adreno 6xx with 8 GB of RAM or less runs out of GPU memory with it after a few minutes, and the game closes.",
+ "このスマートフォンでは「自動」はオフです。RAM 8 GB 以下の Adreno 6xx では、数分後に GPU メモリが不足してゲームが終了します。"},
 {"Game version",
  "ゲームのバージョン"},
 {"Game version: %s",

@@ -189,6 +189,8 @@
  "게임 글꼴"},
 {"Game memory on the GPU (Turnip)",
  "GPU의 게임 메모리 (Turnip)"},
+{"Automatic is off on this phone: an Adreno 6xx with 8 GB of RAM or less runs out of GPU memory with it after a few minutes, and the game closes.",
+ "이 휴대폰에서는 자동이 꺼져 있습니다. RAM 8GB 이하의 Adreno 6xx는 몇 분 뒤 GPU 메모리가 부족해져 게임이 종료됩니다."},
 {"Game version",
  "게임 버전"},
 {"Game version: %s",

@@ -190,6 +190,8 @@
  "Fonte do jogo"},
 {"Game memory on the GPU (Turnip)",
  "Memória do jogo na GPU (Turnip)"},
+{"Automatic is off on this phone: an Adreno 6xx with 8 GB of RAM or less runs out of GPU memory with it after a few minutes, and the game closes.",
+ "O Automático fica desligado neste celular: uma Adreno 6xx com 8 GB de RAM ou menos fica sem memória de GPU com ela depois de alguns minutos, e o jogo fecha."},
 {"Game version",
  "Versão do jogo"},
 {"Game version: %s",

@@ -189,6 +189,8 @@
  "遊戲字型"},
 {"Game memory on the GPU (Turnip)",
  "遊戲記憶體放在 GPU 上（Turnip）"},
+{"Automatic is off on this phone: an Adreno 6xx with 8 GB of RAM or less runs out of GPU memory with it after a few minutes, and the game closes.",
+ "此手機上「自動」為關閉：RAM 為 8 GB 或更少的 Adreno 6xx 開啟它後，幾分鐘內 GPU 記憶體會耗盡，遊戲會關閉。"},
 {"Game version",
  "遊戲版本"},
 {"Game version: %s",

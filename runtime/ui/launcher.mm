@@ -621,6 +621,7 @@ static bool android_copy_document(const std::string &uri, const std::string &dst
 extern "C" void android_log_file(bool on);
 extern "C" bool vk_adreno_8xx(const char *name);  // (Driver compatibility's Automatic: runtime/nvn/vulkan/device.c)
 extern "C" bool vk_turnip_heap_on(int setting);
+extern "C" bool vk_turnip_heap_ram_off(void);  // (an Adreno 6xx with 8 GB or less: #520)
 extern "C" bool vk_lrz_at_start(void);
 extern "C" const char *vk_driver_env_at_start(void);
 extern "C" bool vk_heap_file_possible(void);
@@ -1819,6 +1820,9 @@ static void prelaunch_tab(float sc) {
                                   "runs at about half the frame rate (15 fps instead of 35 on an Adreno 830). Automatic: on "
                                   "wherever Turnip can map it - without it an Adreno 7xx shows no text. Applies when the "
                                   "game starts."));
+        if (vk_driver_is_turnip() && vk_turnip_heap_ram_off())  // (vulkan/device.c: #520)
+            ImGui::TextDisabled("%s", tr("Automatic is off on this phone: an Adreno 6xx with 8 GB of RAM or less runs out of "
+                                      "GPU memory with it after a few minutes, and the game closes."));
         ImGui::Spacing();
         changed |= ImGui::Checkbox(tr("Game memory through a shared file (experimental)"), &g_settings.heap_file);
         ImGui::TextDisabled("%s", tr("For GPUs where the option above can't work (Mali, Xclipse): the game's memory is shared "
