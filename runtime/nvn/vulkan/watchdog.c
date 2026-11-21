@@ -88,6 +88,7 @@ static const char *const stage_name[WD_STAGES] = {
     [WD_G_WAIT_ID] = "waiting for the render thread to reach a request",
     [WD_G_DRAIN] = "waiting for the render thread to empty its queue",
     [WD_G_SYNCWAIT] = "nvnSyncWait",
+    [WD_R_BC_DECODE] = "waiting for parallel BC texture decode",
 };
 
 static const char *name(uint32_t s) { return s < WD_STAGES && stage_name[s] ? stage_name[s] : "?"; }

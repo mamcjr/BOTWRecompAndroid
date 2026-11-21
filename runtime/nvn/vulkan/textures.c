@@ -17,6 +17,9 @@
 #include "../astc.h"
 #include "../renderer.h"
 #include "../texpatch.h"
+#ifdef __ANDROID__
+#include "bc_parallel.h"
+#endif
 
 // ================================================================== formats
 typedef struct { VkFormat vf; uint8_t expand_rgb, alpha_one; } VkFmt;
@@ -237,12 +240,20 @@ static VkFormat bc_target(VkFormat bc, uint32_t *bpp) {
 static bool is_bc(VkFormat f) { return f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_BC7_SRGB_BLOCK; }
 
 // wb x hb blocks (bsize bytes each, rows of blocks) -> texels, rows of wb * 4 texels of bpp bytes
-static void bc_decode(VkFormat bc, const uint8_t *blocks, uint32_t wb, uint32_t hb, uint32_t bsize, uint8_t *out, uint32_t bpp) {
-    int pitch = (int)(wb * 4 * bpp);
-    for (uint32_t y = 0; y < hb; y++)
+static void bc_decode_rows(VkFormat bc, const uint8_t *blocks, uint32_t wb, uint32_t y0, uint32_t y1, uint32_t bsize,
+                           uint8_t *out, uint32_t bpp) {
+    uint64_t pitch64 = (uint64_t)wb * 4 * bpp;
+    if (pitch64 > (uint64_t)INT_MAX) {
+        static _Atomic bool logged;
+        if (!atomic_exchange_explicit(&logged, true, memory_order_relaxed))
+            LOG("[vk] bc_decode_rows: pitch overflow (wb=%u bpp=%u)\n", wb, bpp);
+        return;
+    }
+    int pitch = (int)pitch64;
+    for (uint32_t y = y0; y < y1; y++)
         for (uint32_t x = 0; x < wb; x++) {
             const uint8_t *b = blocks + ((uint64_t)y * wb + x) * bsize;
-            uint8_t *o = out + (uint64_t)y * 4 * (uint64_t)pitch + (uint64_t)x * 4 * bpp;
+            uint8_t *o = out + (uint64_t)y * 4 * pitch64 + (uint64_t)x * 4 * bpp;
             switch (bc) {
             case VK_FORMAT_BC1_RGB_UNORM_BLOCK: case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
             case VK_FORMAT_BC1_RGBA_UNORM_BLOCK: case VK_FORMAT_BC1_RGBA_SRGB_BLOCK: bcdec_bc1(b, o, pitch); break;
@@ -256,7 +267,7 @@ static void bc_decode(VkFormat bc, const uint8_t *blocks, uint32_t wb, uint32_t 
                 uint16_t rgb[16 * 3];
                 bcdec_bc6h_half(b, rgb, 4 * 3, bc == VK_FORMAT_BC6H_SFLOAT_BLOCK);
                 for (int py = 0; py < 4; py++) {
-                    uint16_t *d = (uint16_t *)(o + (uint64_t)py * (uint64_t)pitch);
+                    uint16_t *d = (uint16_t *)(o + (uint64_t)py * pitch64);
                     for (int px = 0; px < 4; px++) {
                         d[px * 4 + 0] = rgb[(py * 4 + px) * 3 + 0];
                         d[px * 4 + 1] = rgb[(py * 4 + px) * 3 + 1];
@@ -269,6 +280,72 @@ static void bc_decode(VkFormat bc, const uint8_t *blocks, uint32_t wb, uint32_t 
             default: bcdec_bc7(b, o, pitch); break;
             }
         }
+}
+
+static VkBcPool g_bc_pool;
+
+static bool bc_cpu_device(void) {
+    if (!g_vk.phys) return true;
+    VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    return !format_supports(VK_FORMAT_BC1_RGBA_UNORM_BLOCK, need) ||
+           !format_supports(VK_FORMAT_BC7_UNORM_BLOCK, need) ||
+           getenv("LARECOMP_NO_BC") != NULL;
+}
+
+static int bc_parallel_threads_cfg(void) {
+    static _Atomic int cached = -1;
+    int n = atomic_load_explicit(&cached, memory_order_relaxed);
+    if (n > 0) return n;
+    const char *no_e = getenv("LARECOMP_NO_BC_PARALLEL");
+    bool no_env = no_e && atoi(no_e) != 0;
+    bool cpu_bc = !no_env && bc_cpu_device();
+    const char *e = no_env ? NULL : getenv("LARECOMP_BC_THREADS");
+    bool from_env = false;
+    int env_n = e ? vk_bc_parallel_threads(e, false, false, 1, &from_env) : 1;
+    int def_threads = (cpu_bc && !from_env) ? vk_bc_detect_default_threads() : 1;
+    n = from_env ? env_n : vk_bc_parallel_threads(e, no_env, cpu_bc, def_threads, &from_env);
+    if (atomic_exchange_explicit(&cached, n, memory_order_relaxed) < 0 && (cpu_bc || n > 1 || no_env)) {
+        const char *why = no_env ? "LARECOMP_NO_BC_PARALLEL"
+            : from_env ? "LARECOMP_BC_THREADS" : "driver default";
+        LOG("[vk] parallel BC CPU decode: %d thread%s (%s)\n", n, n == 1 ? "" : "s", why);
+    }
+    return n;
+}
+
+typedef struct {
+    VkFormat bc;
+    const uint8_t *blocks;
+    uint32_t wb;
+    uint32_t bsize;
+    uint8_t *out;
+    uint32_t bpp;
+} BcDecodeTask;
+
+static void bc_decode_task(void *ctx, uint32_t start, uint32_t count) {
+    const BcDecodeTask *t = (const BcDecodeTask *)ctx;
+    bc_decode_rows(t->bc, t->blocks, t->wb, start, start + count, t->bsize, t->out, t->bpp);
+}
+
+typedef struct {
+    const uint8_t *bc1;
+    uint8_t *astc;
+} BcAstcTask;
+
+static void bc1_astc_task(void *ctx, uint32_t start, uint32_t count) {
+    const BcAstcTask *t = (const BcAstcTask *)ctx;
+    bc1_to_astc(t->bc1 + (uint64_t)start * 8, t->astc + (uint64_t)start * 16, count);
+}
+
+static void bc_decode(VkFormat bc, const uint8_t *blocks, uint32_t wb, uint32_t hb, uint32_t bsize, uint8_t *out, uint32_t bpp) {
+    int threads = bc_parallel_threads_cfg();
+    if (vk_bc_parallel_should_split(bc, wb, hb, false, threads)) {
+        BcDecodeTask task = {bc, blocks, wb, bsize, out, bpp};
+        WdMark wm = vk_wd_enter(WD_R_BC_DECODE, (uint64_t)bc);
+        vk_bc_pool_run(&g_bc_pool, bc_decode_task, &task, hb, 2, threads);
+        vk_wd_leave(wm);
+        return;
+    }
+    bc_decode_rows(bc, blocks, wb, 0, hb, bsize, out, bpp);
 }
 #endif
 
@@ -666,8 +743,20 @@ static uint64_t bc_upload_blocks(VkCommandBuffer cb, TexBackend *b, const uint8_
     VkSpan s = vk_transient(out_size, 16);
     bool measure_decode = bench_on();
     uint64_t decode_start = (decode_ns || measure_decode) ? SDL_GetTicksNS() : 0;
-    if (bpp) bc_decode(b->bc_vf, blocks, wb, hb, bsize, s.ptr, bpp);
-    else bc1_to_astc(blocks, s.ptr, (uint64_t)wb * hb);
+    if (bpp) {
+        bc_decode(b->bc_vf, blocks, wb, hb, bsize, s.ptr, bpp);
+    } else {
+        uint64_t nblocks = (uint64_t)wb * hb;
+        int threads = bc_parallel_threads_cfg();
+        if (nblocks <= UINT32_MAX && vk_bc_parallel_should_split(b->bc_vf, wb, hb, true, threads)) {
+            BcAstcTask task = {blocks, s.ptr};
+            WdMark wm = vk_wd_enter(WD_R_BC_DECODE, (uint64_t)b->bc_vf);
+            vk_bc_pool_run(&g_bc_pool, bc1_astc_task, &task, (uint32_t)nblocks, 256, threads);
+            vk_wd_leave(wm);
+        } else {
+            bc1_to_astc(blocks, s.ptr, nblocks);
+        }
+    }
     if (decode_start) {
         uint64_t elapsed = SDL_GetTicksNS() - decode_start;
         if (decode_ns) *decode_ns = elapsed;
