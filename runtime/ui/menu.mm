@@ -22,6 +22,7 @@
 #else
 #include "imgui_impl_vulkan.h"
 extern "C" bool vk_imgui_backend_init(void);  // runtime/nvn/vulkan/imgui_glue.cpp
+extern "C" bool vk_rendering_active(void);    // runtime/nvn/vulkan/rpcompat.c
 extern "C" bool vk_low_ram(void);                // runtime/nvn/vulkan/exec.c: RAM saving as the app started
 extern "C" bool vk_low_ram_auto(long *total_mb); // (what Automatic picks on this device)
 #endif
@@ -316,7 +317,7 @@ void menu_apply_window_requests(void *win) {
 }
 
 // ------------------------------------------------------------------ render thread
-static bool g_inited;
+static bool g_inited, g_init_failed;
 static ImGuiContext *g_ctx;  // ours: the start screen (back to it after a reboot) has its own context
 static ImFont *g_font, *g_font_big;
 ImFont *g_overlay_font;  // the performance overlay's (Android's Roboto, as Swap2-Native's): ui/perf_overlay.mm
@@ -443,7 +444,16 @@ static void init(void) {
 #ifdef __APPLE__
     ImGui_ImplMetal_Init(dev);
 #else
-    vk_imgui_backend_init();
+    if (!vk_imgui_backend_init()) {
+        ImGui::DestroyContext(g_ctx);
+        g_ctx = NULL;
+        g_font = g_font_big = g_menu_font = g_menu_font_big = NULL;
+#ifdef __ANDROID__
+        g_overlay_font = NULL;
+#endif
+        g_init_failed = true;
+        return;
+    }
 #endif
     g_inited = true;
 }
@@ -1477,8 +1487,9 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
 #ifdef __APPLE__
     if (!g_inited) init(dev);
 #else
-    if (!g_inited) init();
+    if (!g_inited && !g_init_failed) init();
 #endif
+    if (!g_inited || !g_ctx) return;
     ImGui::SetCurrentContext(g_ctx);
     ImGuiIO &io = ImGui::GetIO();
     io.DisplaySize = ImVec2((float)tw, (float)th);
@@ -1608,6 +1619,7 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     ImGui_ImplMetal_RenderDrawData(ImGui::GetDrawData(), cb, enc);
     [enc endEncoding];
 #else
-    ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering
+    if (vk_rendering_active())
+        ImGui_ImplVulkan_RenderDrawData(ImGui::GetDrawData(), (VkCommandBuffer)cmd);  // inside the window image's rendering
 #endif
 }

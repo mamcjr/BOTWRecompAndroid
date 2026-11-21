@@ -202,7 +202,7 @@ void vmaGetHeapBudgets(VmaAllocator a, VmaBudget *b) { (void)a; memset(b, 0, siz
 void vmaGetMemoryProperties(VmaAllocator a, const VkPhysicalDeviceMemoryProperties **p) { (void)a; static VkPhysicalDeviceMemoryProperties mp; *p = &mp; }
 void vmaGetMemoryTypeProperties(VmaAllocator a, uint32_t i, VkMemoryPropertyFlags *f) { (void)a, (void)i; *f = 0; }
 
-void vk_begin_rendering(VkCommandBuffer cb, const VkRenderingInfo *ri, const VkFormat *c, VkFormat ds, VkSampleCountFlagBits sm) {
+bool vk_begin_rendering(VkCommandBuffer cb, const VkRenderingInfo *ri, const VkFormat *c, VkFormat ds, VkSampleCountFlagBits sm) {
     (void)c, (void)ds, (void)sm; MockCb *mc = find_cb(cb);
     MockOp op = {.op = MOP_PASS, .rw = ri->renderArea.extent.width, .rh = ri->renderArea.extent.height, .ncol = ri->colorAttachmentCount};
     for (uint32_t i = 0; i < ri->colorAttachmentCount && i < 8; i++) {
@@ -211,8 +211,10 @@ void vk_begin_rendering(VkCommandBuffer cb, const VkRenderingInfo *ri, const VkF
         op.att[i] = im; op.lop[i] = last_lop[i] = ri->pColorAttachments[i].loadOp;
     }
     mc->ops[mc->nops++] = op; act_cb = mc; act_att0 = op.att[0] ? op.att[0] : op.att[1];
+    return true;
 }
 void vk_end_rendering(VkCommandBuffer cb) { MockCb *mc = find_cb(cb); mc->ops[mc->nops++] = (MockOp){.op = MOP_END}; act_cb = NULL; act_att0 = NULL; }
+bool vk_rendering_active(void) { return act_cb != NULL; }
 static void sim_draw_rows(uint32_t r0, uint32_t n, uint16_t v) { act_cb->ops[act_cb->nops++] = (MockOp){.op = MOP_DRAW, .img = act_att0, .row0 = r0, .nrows = n, .val16 = v}; }
 static void sim_sample(NvnTexture *t, uint32_t x, uint32_t y, uint16_t *out) {
     MockImg *im = t && t->backend ? find_img(((TexBackend *)t->backend)->image) : NULL; MockCb *cb = find_cb(vk_cmd());

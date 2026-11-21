@@ -74,6 +74,8 @@ typedef struct {
     int present_fifo;     // the swapchain's present mode: 1 FIFO (each image waits for the screen), 0 MAILBOX; -1
                           // Automatic: FIFO on Adreno 7xx (#367: the picture froze with MAILBOX while the game ran on),
                           // MAILBOX elsewhere (vulkan/device.c present_mode; LARECOMP_VK_PRESENT over it)
+    int dyn_render;       // Vulkan dynamic rendering: 1 on, 0 classic VkRenderPass, -1 Automatic (off on ARM Mali r49+,
+                          // on elsewhere: vulkan/device.c); LARECOMP_NO_DYNAMIC_RENDERING over it; restart to apply
     bool log_file;        // the log in a file as well (platform/android.c), to send with a report
     char gpu_model[64];   // the GPU of the last start ("Adreno (TM) 830v1"): turnip_lrz's Automatic, before the driver
     bool heap_file;       // the game's memory as GPU memory through an exported file mapped at its address, where the driver

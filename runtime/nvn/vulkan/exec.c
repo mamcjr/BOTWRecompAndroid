@@ -2735,8 +2735,9 @@ static void begin_pass(void) {
                     (void *)b, b ? (void *)b->image : NULL, (unsigned long long)vk_frame_counter());
         }
     }
-    vk_begin_rendering(cb, &ri, pass_color, pass_depth != VK_FORMAT_UNDEFINED ? pass_depth : pass_stencil,
-                       (VkSampleCountFlagBits)pass_samples);
+    if (!vk_begin_rendering(cb, &ri, pass_color, pass_depth != VK_FORMAT_UNDEFINED ? pass_depth : pass_stencil,
+                            (VkSampleCountFlagBits)pass_samples))
+        return;
     if (g_debug_frame) pass_dump_b = st.rt.ncolor && st.rt.color[0] ? st.rt.color[0]->backend : NULL;
     pass_dump_layer = ~0u;
     if (g_debug_frame && !pass_dump_b && st.rt.depth && st.rt.depth->backend) {  // depth only (shadow maps)
@@ -2977,12 +2978,14 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
                                        .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = pc_layout()};
-    {   // (no dynamic rendering: against a compatible render pass, rpcompat.c)
+    if (!g_vk.dyn_render) {  // (no dynamic rendering: against a compatible render pass, rpcompat.c)
         VkRenderPass crp = vk_rp_compat(pass_ncolor, pass_color, pass_depth, pass_stencil, ms.rasterizationSamples);
-        if (crp) pi.pNext = rinfo.pNext, pi.renderPass = crp;
+        if (!crp) return VK_NULL_HANDLE;
+        pi.pNext = rinfo.pNext, pi.renderPass = crp;
     }
     VkPipeline p = VK_NULL_HANDLE;
     if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p) != VK_SUCCESS) LOG("[vk] clear pipeline failed\n");
+    if (!p) return VK_NULL_HANDLE;
     clear_tab[slot].key = key;
     clear_tab[slot].pipe = p;
     return p;
@@ -2991,6 +2994,7 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil, uint32_t sval,
                   uint32_t smask) {
     begin_pass();
+    if (!in_pass) return;
     for (int i = 0; i < nlclear; i++) {  // (done by the pass's load operations: begin_pass - each once)
         if (lclear[i].rec != g_cur_rec) continue;
         uint32_t asp = lclear[i].aspects;
@@ -4187,9 +4191,15 @@ static void build_pipeline(void *arg) {
                                        .pViewportState = &vs, .pRasterizationState = &rs, .pMultisampleState = &ms,
                                        .pDepthStencilState = &ds, .pColorBlendState = &cb, .pDynamicState = &dy,
                                        .layout = k->prog->layout};
-    {   // (no dynamic rendering: against a compatible render pass, rpcompat.c)
+    if (!g_vk.dyn_render) {  // (no dynamic rendering: against a compatible render pass, rpcompat.c)
         VkRenderPass crp = vk_rp_compat(k->ncolor, k->color, k->depth, k->stencil, ms.rasterizationSamples);
-        if (crp) pi.pNext = ri.pNext, pi.renderPass = crp;
+        if (!crp) {
+            pp->retry_s = g_exec_s + 5;
+            atomic_store(&pipe_oom, 1);
+            signal_build_done(&pp->state, 2);
+            return;
+        }
+        pi.pNext = ri.pNext, pi.renderPass = crp;
     }
 #ifdef __ANDROID__
     if (g_vk.exec_stats) pi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
@@ -8298,6 +8308,7 @@ static void draw_(CmdRec *r, bool indexed) {
 #endif
     begin_pass();
     ninplace = 0;
+    if (!in_pass) { stat_skipped++; return; }
     VkCommandBuffer cb = vk_cmd();
 
     uint32_t mode = (uint32_t)r->x[0];
@@ -9302,12 +9313,16 @@ static VkPipeline present_pipeline_a(VkFormat fmt, bool alpha) {  // alpha: the 
                                        .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = present_layout};
-    {   // (no dynamic rendering: against a compatible render pass, rpcompat.c)
+    if (!g_vk.dyn_render) {  // (no dynamic rendering: against a compatible render pass, rpcompat.c)
         VkRenderPass crp = vk_rp_compat(1, &fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, ms.rasterizationSamples);
-        if (crp) pi.pNext = ri.pNext, pi.renderPass = crp;
+        if (!crp) return VK_NULL_HANDLE;
+        pi.pNext = ri.pNext, pi.renderPass = crp;
     }
-    VkPipeline p;
-    VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
+    VkPipeline p = VK_NULL_HANDLE;
+    if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p) != VK_SUCCESS || !p) {
+        LOG("[vk] present pipeline failed\n");
+        return VK_NULL_HANDLE;
+    }
     for (int i = 0; i < 6; i++) if (!cache[i].p) { cache[i].f = fmt; cache[i].a = alpha; cache[i].p = p; break; }
     return p;
 }
@@ -9372,12 +9387,16 @@ static VkPipeline post_pipeline(const char *fs, VkFormat fmt) {
                                        .pStages = stages, .pVertexInputState = &vi, .pInputAssemblyState = &ia, .pViewportState = &vs,
                                        .pRasterizationState = &rs, .pMultisampleState = &ms, .pDepthStencilState = &ds,
                                        .pColorBlendState = &cb, .pDynamicState = &dy, .layout = post_layout};
-    {   // (no dynamic rendering: against a compatible render pass, rpcompat.c)
+    if (!g_vk.dyn_render) {  // (no dynamic rendering: against a compatible render pass, rpcompat.c)
         VkRenderPass crp = vk_rp_compat(1, &fmt, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, ms.rasterizationSamples);
-        if (crp) pi.pNext = ri.pNext, pi.renderPass = crp;
+        if (!crp) return VK_NULL_HANDLE;
+        pi.pNext = ri.pNext, pi.renderPass = crp;
     }
-    VkPipeline p;
-    VK_CHECK(vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p));
+    VkPipeline p = VK_NULL_HANDLE;
+    if (vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &p) != VK_SUCCESS || !p) {
+        LOG("[vk] post pipeline failed\n");
+        return VK_NULL_HANDLE;
+    }
     for (int i = 0; i < 16; i++) if (!cache[i].p) { cache[i].fs = fs; cache[i].f = fmt; cache[i].p = p; break; }
     return p;
 }
@@ -9448,6 +9467,7 @@ static VkImageView smaa_lut(int i) {
 static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *srcs, int n, TexBackend *dst, const float pc[8],
                       bool clear) {
     VkPipeline pipe = post_pipeline(fs, dst->format);  // (before the rendering begins: created inside it, the NVIDIA driver crashed)
+    if (!pipe) return;
     vk_full_barrier(cb);
     VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO, .imageView = post_view(dst),
                                     .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
@@ -9455,7 +9475,7 @@ static void post_pass(VkCommandBuffer cb, const char *fs, const VkImageView *src
                                     .storeOp = VK_ATTACHMENT_STORE_OP_STORE};
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {dst->width, dst->height}},
                           .layerCount = 1, .colorAttachmentCount = 1, .pColorAttachments = &ca};
-    vk_begin_rendering(cb, &ri, &dst->format, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT);
+    if (!vk_begin_rendering(cb, &ri, &dst->format, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT)) return;
     VkDescriptorSet ds = vk_alloc_set(post_set_layout);
     VkDescriptorImageInfo ii[3];
     VkWriteDescriptorSet w[3];
@@ -9631,6 +9651,7 @@ void vk_present_draw(VkCommandBuffer cb, TexBackend *b, float vx, float vy, floa
     if (!b || !b->image || (b->aspect & ~VK_IMAGE_ASPECT_COLOR_BIT)) return;
     VkImageView src = post_process(cb, b, pv[6] > 0 ? vw / pv[6] : vw, pv[7] > 0 ? vh / pv[7] : vh);
     VkPipeline p = present_pipeline(g_vk.sc_format);
+    if (!p || !vk_rendering_active()) return;
     VkDescriptorSet ds = vk_alloc_set(present_set_layout);
     VkDescriptorImageInfo ii = {vk_default_sampler(true), src, VK_IMAGE_LAYOUT_GENERAL};
     VkWriteDescriptorSet w = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
@@ -9706,24 +9727,25 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {w, h}}, .layerCount = 1,
                           .colorAttachmentCount = 1, .pColorAttachments = &ca};
     const VkFormat rgba8 = VK_FORMAT_R8G8B8A8_UNORM;
-    vk_begin_rendering(cb, &ri, &rgba8, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT);
     VkPipeline p = present_pipeline_a(VK_FORMAT_R8G8B8A8_UNORM, strstr(path, "pass_") != NULL);
-    VkDescriptorSet ds = vk_alloc_set(present_set_layout);
-    VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};
-    VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
-                               .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
-    vkUpdateDescriptorSets(g_vk.dev, 1, &wr, 0, NULL);
-    vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
-    vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
-    VkViewport vp = {0, 0, (float)w, (float)h, 0, 1};
-    VkRect2D sc = {{0, 0}, {w, h}};
-    vkCmdSetViewport(cb, 0, 1, &vp);
-    vkCmdSetScissor(cb, 0, 1, &sc);
-    float pv[8] = {renderer_origin_lower_left() && !strstr(path, "window") ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
-    vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
-    ss_forget();  // (static-VI pipeline and another layout: draws re-bind state)
-    vkCmdDraw(cb, 3, 1, 0, 0);
-    vk_end_rendering(cb);
+    if (p && vk_begin_rendering(cb, &ri, &rgba8, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT)) {
+        VkDescriptorSet ds = vk_alloc_set(present_set_layout);
+        VkDescriptorImageInfo ii = {vk_default_sampler(true), raw_view(b), VK_IMAGE_LAYOUT_GENERAL};
+        VkWriteDescriptorSet wr = {.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, .dstSet = ds, .dstBinding = 0, .descriptorCount = 1,
+                                   .descriptorType = VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, .pImageInfo = &ii};
+        vkUpdateDescriptorSets(g_vk.dev, 1, &wr, 0, NULL);
+        vkCmdBindPipeline(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, p);
+        vkCmdBindDescriptorSets(cb, VK_PIPELINE_BIND_POINT_GRAPHICS, present_layout, 0, 1, &ds, 0, NULL);
+        VkViewport vp = {0, 0, (float)w, (float)h, 0, 1};
+        VkRect2D sc = {{0, 0}, {w, h}};
+        vkCmdSetViewport(cb, 0, 1, &vp);
+        vkCmdSetScissor(cb, 0, 1, &sc);
+        float pv[8] = {renderer_origin_lower_left() && !strstr(path, "window") ? 1.0f : 0.0f, 0, 0, 0, crop[0], crop[1], crop[2], crop[3]};
+        vkCmdPushConstants(cb, present_layout, VK_SHADER_STAGE_VERTEX_BIT, 0, 32, pv);
+        ss_forget();  // (static-VI pipeline and another layout: draws re-bind state)
+        vkCmdDraw(cb, 3, 1, 0, 0);
+        vk_end_rendering(cb);
+    }
     vk_full_barrier(cb);
     VkSpan out = vk_readback((uint64_t)w * h * 4);
     VkBufferImageCopy c = {.bufferOffset = out.off, .imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .imageExtent = {w, h, 1}};
