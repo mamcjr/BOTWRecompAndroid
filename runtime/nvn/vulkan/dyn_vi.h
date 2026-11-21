@@ -2,7 +2,6 @@
 // Included from runtime/nvn/vulkan/exec.c and tools/test_dyn_vertex_input.c.
 #pragma once
 
-#include <ctype.h>
 #include <stdbool.h>
 #include <stdint.h>
 #include <stdlib.h>
@@ -11,6 +10,8 @@
 #if !defined(VK_VERSION_1_0)
 #include <vulkan/vulkan_core.h>
 #endif
+
+#include "device_compat.h"
 
 #ifndef ZERO_BINDING
 #define ZERO_BINDING 16
@@ -79,24 +80,6 @@ static inline void vk_build_dyn_vi(uint32_t prog_attr_mask, int nattrib, const u
             .divisor = inst ? out->divisor[s] : 1u,
         };
     }
-}
-
-// Parse ARM proprietary Mali major revision token ("v1.r49p1..." -> 49, "r38p1..." -> 38); -1 if absent.
-static inline int vk_arm_driver_major(const char *info) {
-    if (!info) return -1;
-    for (const char *p = info; *p; p++) {
-        if (*p != 'r') continue;
-        if (p > info && isalnum((unsigned char)p[-1])) continue;
-        if (!isdigit((unsigned char)p[1])) continue;
-        unsigned long ver = 0;
-        const char *q = p + 1;
-        while (isdigit((unsigned char)*q)) {
-            if (ver < 100000ul) ver = ver * 10ul + (unsigned long)(*q - '0');
-            q++;
-        }
-        if (*q == 'p' && isdigit((unsigned char)q[1])) return (int)ver;
-    }
-    return -1;
 }
 
 // Enable dynamic vertex input by default only on drivers verified to handle vkCmdSetVertexInputEXT reliably:

@@ -512,19 +512,30 @@ static void create_device(void) {
 #ifdef __ANDROID__
     // (below 1.3: pick_device checked the required ones are there; an optional group goes in only whole - dynamic
     // rendering's three, for one). Test switches, each that group's other way on any driver (below 1.3 also as if its
-    // extensions were missing, as on Mali's): LARECOMP_NO_DYNAMIC_RENDERING=1, LARECOMP_NO_SYNC2=1, LARECOMP_NO_EDS=1
+    // extensions were missing, as on Mali's): LARECOMP_NO_DYNAMIC_RENDERING=1/0, LARECOMP_NO_SYNC2=1, LARECOMP_NO_EDS=1
     // (extended dynamic state 2 too), LARECOMP_NO_EDS2=1
-    bool no_dr = env_on("LARECOMP_NO_DYNAMIC_RENDERING"), no_s2 = env_on("LARECOMP_NO_SYNC2"), no_eds = env_on("LARECOMP_NO_EDS");
-    bool no_eds2 = no_eds || env_on("LARECOMP_NO_EDS2");
-    bool cg[OPT_N];
-    for (int g = 0; g < OPT_N; g++) cg[g] = g_vk.api >= VK_API_VERSION_1_3 || compat_group(ep, ne, g_vk.api, g);
-    if (g_vk.api < VK_API_VERSION_1_3)
-        cg[OPT_DR] &= !no_dr, cg[OPT_SYNC2] &= !no_s2, cg[OPT_EDS] &= !no_eds, cg[OPT_EDS2] &= !no_eds2;
-    for (size_t i = 0; i < N_COMPAT_EXT; i++)
-        if (g_vk.api < COMPAT_EXT[i].below && cg[COMPAT_EXT[i].optional]) ext[n_ext++] = COMPAT_EXT[i].name;
     // (VkPhysicalDeviceDriverProperties: core from 1.2, before that its own extension, only queried)
     bool driver_props = g_vk.api >= VK_API_VERSION_1_2 || has_ext(ep, ne, VK_KHR_DRIVER_PROPERTIES_EXTENSION_NAME);
     g_driver_props = driver_props;
+    VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
+    VkPhysicalDeviceProperties2 properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
+                                              .pNext = driver_props ? &driver : NULL};
+    vkGetPhysicalDeviceProperties2(g_vk.phys, &properties);
+    if (!driver_props) snprintf(driver.driverName, sizeof driver.driverName, "unknown");
+    const char *no_dr_env = getenv("LARECOMP_NO_DYNAMIC_RENDERING");
+    bool no_s2 = env_on("LARECOMP_NO_SYNC2"), no_eds = env_on("LARECOMP_NO_EDS");
+    bool no_eds2 = no_eds || env_on("LARECOMP_NO_EDS2");
+    bool cg[OPT_N];
+    for (int g = 0; g < OPT_N; g++) cg[g] = g_vk.api >= VK_API_VERSION_1_3 || compat_group(ep, ne, g_vk.api, g);
+    // Keep physical-device support separate from whether OPT_DR extensions are enabled below 1.3.
+    bool dr_ext_ok = cg[OPT_DR];
+    if (g_vk.api < VK_API_VERSION_1_3) {
+        cg[OPT_DR] &= vk_dyn_render_want(cg[OPT_DR], (uint32_t)driver.driverID, driver.driverInfo, driver_props,
+                                         no_dr_env, NULL);
+        cg[OPT_SYNC2] &= !no_s2, cg[OPT_EDS] &= !no_eds, cg[OPT_EDS2] &= !no_eds2;
+    }
+    for (size_t i = 0; i < N_COMPAT_EXT; i++)
+        if (g_vk.api < COMPAT_EXT[i].below && cg[COMPAT_EXT[i].optional]) ext[n_ext++] = COMPAT_EXT[i].name;
 #endif
     g_vk.custom_border = has_ext(ep, ne, VK_EXT_CUSTOM_BORDER_COLOR_EXTENSION_NAME);
 #ifdef __ANDROID__
@@ -657,7 +668,7 @@ static void create_device(void) {
         h12.pNext = NULL;
         void *q = g_vk.api >= VK_API_VERSION_1_2 ? (void *)&h11 : (void *)&q_b16;
 #define QCHAIN(on, s) do { if (on) { (s).pNext = q; q = &(s); } } while (0)
-        QCHAIN(cg[OPT_DR], q_dr);
+        QCHAIN(dr_ext_ok, q_dr);
         QCHAIN(cg[OPT_SYNC2], q_s2);
         QCHAIN(cg[OPT_EDS], q_eds);
         QCHAIN(cg[OPT_EDS2], q_eds2);
@@ -670,7 +681,7 @@ static void create_device(void) {
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &have);
 #ifdef __ANDROID__
     if (g_vk.api < VK_API_VERSION_1_3) {
-        h13.dynamicRendering = cg[OPT_DR] && q_dr.dynamicRendering;
+        h13.dynamicRendering = dr_ext_ok && q_dr.dynamicRendering;
         h13.synchronization2 = cg[OPT_SYNC2] && q_s2.synchronization2;
         h13.shaderDemoteToHelperInvocation = cg[OPT_DEMOTE] && q_dem.shaderDemoteToHelperInvocation;
         h13.shaderTerminateInvocation = cg[OPT_TERM] && q_term.shaderTerminateInvocation;
@@ -699,15 +710,15 @@ static void create_device(void) {
     if (!g_vk.eds) LOG("[vk] no extended dynamic state%s: states baked into pipelines\n", no_eds ? " (LARECOMP_NO_EDS)" : "");
     else if (!g_vk.eds2) LOG("[vk] no extended dynamic state 2: depth bias and primitive restart in the pipelines\n");
     // Dynamic rendering where the driver has it; without, classic render passes (rpcompat.c).
-    // LARECOMP_NO_DYNAMIC_RENDERING=1: render passes on any driver (to test that path).
-    g_vk.dyn_render = h13.dynamicRendering && !no_dr;
+    // Default off on ARM Mali r49+ (vkCmdBeginRendering triggers Scudo mmap/munmap churn in the driver);
+    // LARECOMP_NO_DYNAMIC_RENDERING=0 forces dynamic rendering on, =1 forces classic render passes on any driver.
+    const char *dr_reason = NULL;
+    g_vk.dyn_render = vk_dyn_render_want(h13.dynamicRendering != VK_FALSE, (uint32_t)driver.driverID, driver.driverInfo,
+                                         driver_props, no_dr_env, &dr_reason);
     if (!g_vk.dyn_render)
-        LOG("[vk] no dynamic rendering (%s): classic render passes\n", no_dr ? "switched off" : "the driver lacks it");
-    VkPhysicalDeviceDriverProperties driver = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DRIVER_PROPERTIES};
-    VkPhysicalDeviceProperties2 properties = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2,
-                                              .pNext = driver_props ? &driver : NULL};
-    vkGetPhysicalDeviceProperties2(g_vk.phys, &properties);
-    if (!driver_props) snprintf(driver.driverName, sizeof driver.driverName, "unknown");
+        LOG("[vk] no dynamic rendering (%s): classic render passes\n", dr_reason);
+    else if (no_dr_env && *no_dr_env)
+        LOG("[vk] dynamic rendering enabled (%s)\n", dr_reason);
     LOG("[vk-cap] gpu %s vendor %#x device %#x api %u.%u.%u driver-id %u name %s info %s\n",
         g_vk.props.deviceName, g_vk.props.vendorID, g_vk.props.deviceID, VK_API_VERSION_MAJOR(g_vk.props.apiVersion),
         VK_API_VERSION_MINOR(g_vk.props.apiVersion), VK_API_VERSION_PATCH(g_vk.props.apiVersion),
