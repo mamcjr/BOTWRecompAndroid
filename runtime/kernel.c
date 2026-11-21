@@ -227,13 +227,21 @@ void rt_unwind_point(void) {
 // sometimes moved on between the two and the worker told an owner that was gone (2026-10-16: crashes, and a hang
 // when the notification was skipped instead: hle/job_race.c). So the threads of core 0 take turns here too: a runnable
 // queue, held while the thread runs and handed on at its blocking SVCs (and around the host's long waits for the
-// renderer: kernel_blocking_begin / _end). Cores 1-3 stay parallel, as on the Switch.
+// renderer: kernel_blocking_begin / _end). Cores 1-3 stay parallel by default.
+// LARECOMP_CORE_LOCKS=<mask> (default 1: core 0 only; 7: cores 0-2): the same turns on those cores too, as on the
+// Switch, where two threads of one core never run at once. #401 (Mali-G1, 0.4.8): the main thread looped forever in
+// a corrupted list of the effect system (nw::eft2::System at main+0x658f0, list walk at main+0x4e9c0); the game's
+// effect code picks a 0x830-byte work context by a TLS slot, or GetCurrentCoreNumber() for a thread without one
+// (main+0x105b5c8), so two such threads of core 1 or 2 running at once here share one context.
 static pthread_mutex_t c0_m = PTHREAD_MUTEX_INITIALIZER;
 static pthread_cond_t c0_cv = PTHREAD_COND_INITIALIZER;
-static KThread *c0_head, *c0_tail;
+static struct { KThread *head, *tail, *holder; uint64_t since; } cq[4];  // (c0_m) each core's queue and its holder
+#define c0_head cq[0].head
+#define c0_tail cq[0].tail
+#define c0_holder cq[0].holder  // (c0_m) the thread that has core 0, since c0_since
+#define c0_since cq[0].since
 static int c0_on = -1;
-static KThread *c0_holder;  // (c0_m) the thread that has core 0, since c0_since
-static uint64_t c0_since;
+static unsigned core_locks = 1;  // the cores whose threads take turns (bit n: core n)
 
 // Telemetry (c0_m; issue #41: how much of a frame goes to waiting for core 0, against a slow clock): every 30 s one log
 // line - how often core 0 changed hands, the waits for it (total, longest) and how much of the time it was held.
@@ -282,6 +290,10 @@ static void *core0_slicer(void *arg) {
 static pthread_once_t c0_once = PTHREAD_ONCE_INIT;
 static void core0_init(void) {
     c0_on = !getenv("LARECOMP_NO_CORE0");
+    const char *cl = getenv("LARECOMP_CORE_LOCKS");
+    if (cl && *cl) core_locks = (unsigned)strtoul(cl, NULL, 0) & 0xF;
+    if (!c0_on) core_locks = 0;
+    if (core_locks != 1) LOG("[kernel] threads take turns on cores (mask) %#x (LARECOMP_CORE_LOCKS)\n", core_locks);
     const char *e = getenv("LARECOMP_C0_SLICE_MS");
     if (e && atoi(e) > 0) c0_slice_ns = (uint64_t)atoi(e) * 1000000;
     if (c0_on && c0_slice_ns) {
@@ -290,6 +302,17 @@ static void core0_init(void) {
         pthread_detach(th);
     }
 }
+// Give up the turn t holds (caller holds c0_m)
+static void core_drop(KThread *t) {
+    if (!t->core0_held) return;
+    t->core0_held = false;
+    int k = t->lock_core;
+    if (cq[k].holder == t) {
+        if (!k) c0_held_until(plat_now_ns());
+        cq[k].holder = NULL;
+    }
+    pthread_cond_broadcast(&c0_cv);
+}
 static void core0_acquire(KThread *t) {
     pthread_once(&c0_once, core0_init);
     if (!t || !c0_on) return;
@@ -297,49 +320,54 @@ static void core0_acquire(KThread *t) {
     if (t->core0_evicted) {
         __atomic_store_n(&t->core0_evicted, false, __ATOMIC_RELEASE);
         if (--c0_nevicted == 0) __atomic_fetch_and(&g_fnprof, ~2, __ATOMIC_SEQ_CST);
-        if (t->core0_held) {
-            t->core0_held = false;
-            c0_held_until(plat_now_ns()), c0_holder = NULL;
-            pthread_cond_broadcast(&c0_cv);
+        core_drop(t);
+    }
+    for (;;) {
+        int core = __atomic_load_n(&t->core, __ATOMIC_ACQUIRE);
+        if (core < 0 || core > 3 || !(core_locks & (1u << core))) {  // (a core whose threads run in parallel)
+            core_drop(t);
+            break;
         }
-    }
-    if (__atomic_load_n(&t->core, __ATOMIC_ACQUIRE) != 0) {
         if (t->core0_held) {
-            t->core0_held = false;
-            c0_held_until(plat_now_ns()), c0_holder = NULL;
-            pthread_cond_broadcast(&c0_cv);
+            if (t->lock_core == core) break;
+            core_drop(t);  // (moved to another core: that core's turn now)
         }
-        pthread_mutex_unlock(&c0_m);
-        return;
+        // A removable queue lets SetThreadCoreMask move a waiter to another core without waiting for the current
+        // owner to yield (that owner may itself be spinning for this worker).
+        t->core0_next = NULL;
+        if (cq[core].tail) cq[core].tail->core0_next = t;
+        else cq[core].head = t;
+        cq[core].tail = t;
+        uint64_t t0 = plat_now_ns();
+        while ((cq[core].holder || cq[core].head != t) && __atomic_load_n(&t->core, __ATOMIC_ACQUIRE) == core &&
+               !g_rt_unwind)
+            pthread_cond_wait(&c0_cv, &c0_m);
+        uint64_t now = plat_now_ns(), w = now - t0;
+        g_blocked_ns += w;
+        if (!core) {
+            c0_stat.takes++, c0_stat.waited += w;
+            if (w > c0_stat.longest) c0_stat.longest = w;
+            c0_stat_log(now);
+        }
+        KThread **p = &cq[core].head, *prev = NULL;
+        while (*p != t) { prev = *p; p = &(*p)->core0_next; }
+        *p = t->core0_next;
+        if (cq[core].tail == t) cq[core].tail = prev;
+        t->core0_next = NULL;
+        if (g_rt_unwind) {
+            pthread_cond_broadcast(&c0_cv);
+            break;
+        }
+        if (__atomic_load_n(&t->core, __ATOMIC_ACQUIRE) != core) {  // (moved meanwhile: the new core's turn)
+            pthread_cond_broadcast(&c0_cv);
+            continue;
+        }
+        t->core0_held = true;
+        t->lock_core = core;
+        cq[core].holder = t;
+        cq[core].since = now;
+        break;
     }
-    if (t->core0_held) { pthread_mutex_unlock(&c0_m); return; }
-    // A removable queue lets SetThreadCoreMask move a waiter to another core without waiting for the current
-    // owner to yield (that owner may itself be spinning for this worker).
-    t->core0_next = NULL;
-    if (c0_tail) c0_tail->core0_next = t;
-    else c0_head = t;
-    c0_tail = t;
-    uint64_t t0 = plat_now_ns();
-    while ((c0_holder || c0_head != t) && __atomic_load_n(&t->core, __ATOMIC_ACQUIRE) == 0 && !g_rt_unwind)
-        pthread_cond_wait(&c0_cv, &c0_m);
-    uint64_t now = plat_now_ns(), w = now - t0;
-    g_blocked_ns += w;
-    c0_stat.takes++, c0_stat.waited += w;
-    if (w > c0_stat.longest) c0_stat.longest = w;
-    c0_stat_log(now);
-    KThread **p = &c0_head, *prev = NULL;
-    while (*p != t) { prev = *p; p = &(*p)->core0_next; }
-    *p = t->core0_next;
-    if (c0_tail == t) c0_tail = prev;
-    t->core0_next = NULL;
-    if (__atomic_load_n(&t->core, __ATOMIC_ACQUIRE) != 0 || g_rt_unwind) {
-        pthread_cond_broadcast(&c0_cv);
-        pthread_mutex_unlock(&c0_m);
-        return;
-    }
-    t->core0_held = true;
-    c0_holder = t;
-    c0_since = now;
     pthread_mutex_unlock(&c0_m);
 }
 
@@ -356,11 +384,7 @@ static void core0_release(KThread *t) {
         __atomic_store_n(&t->core0_evicted, false, __ATOMIC_RELEASE);
         if (--c0_nevicted == 0) __atomic_fetch_and(&g_fnprof, ~2, __ATOMIC_SEQ_CST);
     }
-    if (t->core0_held) {
-        t->core0_held = false;
-        if (c0_holder == t) c0_held_until(plat_now_ns()), c0_holder = NULL;
-        pthread_cond_broadcast(&c0_cv);
-    }
+    core_drop(t);
     pthread_mutex_unlock(&c0_m);
 }
 
@@ -378,6 +402,22 @@ static bool svc_blocks(uint32_t imm) {
 // objects.c's GPU waits - taking core 0 back at the inner end would hold it through the rest of the outer wait).
 static __thread uint64_t blocking_t0;
 static __thread int blocking_depth;
+// With LARECOMP_CORE_LOCKS past core 0, a wait that ends inside a host function (native.c native_hle_c) takes the
+// core's turn back only when that function returns to the game's code: the host code may still hold its own locks
+// there (the first try, 2026-11-20: a core-1 thread back from push's queue-full wait waited for core 1's turn while
+// holding a lock that core 1's holder, t87 in an NVN call, waited for - the game stopped at frame 59). The lifted
+// game reaches host functions through rt_dispatch, not native_hle_c (dispatch.c hle_counted wraps those calls;
+// the second try, without it, stopped at frame 60 the same way: t82 back from push with p_lock, t87 in
+// vk_async_call waiting for p_lock while holding core 1's turn).
+static __thread int hle_depth;
+static __thread bool turn_owed;
+bool kernel_turns_past_core0(void) { return (core_locks & ~1u) != 0; }
+void kernel_hle_enter(void) { hle_depth++; }
+void kernel_hle_leave(void) {
+    if (--hle_depth > 0 || !turn_owed) return;
+    turn_owed = false;
+    core0_acquire(t_cur);
+}
 void kernel_blocking_begin(void) {
     if (blocking_depth++) return;
     blocking_t0 = plat_now_ns();
@@ -385,7 +425,8 @@ void kernel_blocking_begin(void) {
 }
 void kernel_blocking_end(void) {
     if (blocking_depth <= 0 || --blocking_depth) return;
-    core0_acquire(t_cur);
+    if (hle_depth > 0 && (core_locks & ~1u)) turn_owed = true;
+    else core0_acquire(t_cur);
     if (blocking_t0) g_blocked_ns += plat_now_ns() - blocking_t0;
     blocking_t0 = 0;
 }
@@ -432,7 +473,41 @@ bool kernel_core0_info(uint64_t *id, uint64_t *held_ns, uint64_t *waiters, int m
 
 // Where core 0's holder is right now (its host registers and frames); false if there is none or it didn't answer
 // within ~200 ms (a thread stuck in the kernel with signals blocked).
+static bool thread_where(KThread *h, uint64_t *pc, uint64_t *lr, uint64_t *frames, int max, int *nframes);
 bool kernel_core0_where(uint64_t *pc, uint64_t *lr, uint64_t *frames, int max, int *nframes) {
+    return thread_where(c0_holder, pc, lr, frames, max, nframes);
+}
+
+// The threads that run but stand still (in a host function, or holding a core's turn) and aren't core 0's holder
+// (log_core0 shows that one): where each is, as for core 0's holder. LARECOMP_CORE_LOCKS=7 stopped the game with a
+// core-1 thread in nvnTexturePoolRegisterTexture holding core 1 and another in nvnQueuePresentTexture, marked as
+// waiting for room in an empty render queue: which host waits they sit in is what this shows. `fmt` names an address.
+void kernel_log_stuck_stacks(void (*fmt)(char *out, size_t cap, uint64_t a)) {
+    extern const char *hle_slot_name(uint64_t pc);
+    for (KThread *t = g_threads; t; t = t->anext) {
+        if (!t->started || t->finished || t == c0_holder) continue;
+        uint32_t n = t->svc_now;
+        bool in_host = hle_slot_name(t->cpu.pc) != NULL;
+        if (n && !in_host) continue;  // (in an svc: the thread list says which)
+        if (!in_host && !t->core0_held) continue;
+        uint64_t pc = 0, lr = 0, fr[16];
+        int nf = 0;
+        if (!thread_where(t, &pc, &lr, fr, 16, &nf)) {
+            LOG("[watchdog]   t%llu did not answer the signal\n", (unsigned long long)t->id);
+            continue;
+        }
+        char a[200], b[200];
+        fmt(a, sizeof a, pc), fmt(b, sizeof b, lr);
+        LOG("[watchdog]   t%llu (host tid %d) is at pc %s, lr %s\n", (unsigned long long)t->id, (int)pthread_gettid_np(t->host),
+            a, b);
+        for (int i = 0; i < nf; i++) {
+            fmt(a, sizeof a, fr[i]);
+            LOG("[watchdog]     #%d %s\n", i, a);
+        }
+    }
+}
+
+static bool thread_where(KThread *h, uint64_t *pc, uint64_t *lr, uint64_t *frames, int max, int *nframes) {
     static bool installed;
     if (!installed) {
         struct sigaction sa;
@@ -443,7 +518,6 @@ bool kernel_core0_where(uint64_t *pc, uint64_t *lr, uint64_t *frames, int max, i
         if (sigaction(SIGUSR2, &sa, NULL)) return false;
         installed = true;
     }
-    KThread *h = c0_holder;
     if (!h) return false;
     uint64_t before = __atomic_load_n(&c0_where.seq, __ATOMIC_ACQUIRE);
     if (pthread_kill(h->host, SIGUSR2)) return false;
@@ -900,7 +974,8 @@ void kernel_log_threads(uint64_t svc_ns) {
         if (t->finished) continue;
         uint32_t n = t->svc_now;
 #ifdef __ANDROID__
-        const char *c0 = t->core0_held ? ", holds core 0" : "";
+        char c0[24] = "";
+        if (t->core0_held) snprintf(c0, sizeof c0, ", holds core %d", t->lock_core);
 #else
         const char *c0 = "";
 #endif
@@ -910,10 +985,13 @@ void kernel_log_threads(uint64_t svc_ns) {
                 (now - t->svc_since) / 1e9, (unsigned long long)t->svc_args[0], (unsigned long long)t->svc_args[1],
                 (unsigned long long)t->svc_args[2], (unsigned long long)t->svc_args[3],
                 (unsigned long long)t->svc_lr, (int)t->wait_kind, (unsigned long long)t->wait_addr, c0);
-        else
-            LOG("[watchdog]  t%llu prio %d core %d: running%s, pc %llx lr %llx%s\n", (unsigned long long)t->id, t->prio,
+        else {
+            extern const char *hle_slot_name(uint64_t pc);  // (dispatch.c: a host function's fake address)
+            const char *fn = hle_slot_name(t->cpu.pc);
+            LOG("[watchdog]  t%llu prio %d core %d: running%s, pc %llx%s%s lr %llx%s\n", (unsigned long long)t->id, t->prio,
                 __atomic_load_n(&t->core, __ATOMIC_RELAXED), n ? " (short svc)" : "", (unsigned long long)t->cpu.pc,
-                (unsigned long long)t->cpu.x[30], c0);
+                fn ? " in " : "", fn ? fn : "", (unsigned long long)t->cpu.x[30], c0);
+        }
     }
 }
 
@@ -1401,7 +1479,7 @@ void kernel_reset(void) {
     pthread_mutex_lock(&g_klock);
 #ifdef __ANDROID__
     pthread_mutex_lock(&c0_m);
-    c0_head = c0_tail = c0_holder = NULL;
+    memset(cq, 0, sizeof cq);
     c0_nevicted = 0;
     __atomic_fetch_and(&g_fnprof, ~2, __ATOMIC_SEQ_CST);
     pthread_mutex_unlock(&c0_m);

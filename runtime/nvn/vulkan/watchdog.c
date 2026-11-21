@@ -194,6 +194,8 @@ static void report(uint64_t now, double stalled, bool second) {
     extern void kernel_log_threads(uint64_t svc_ns);
     kernel_log_threads(2000000000ull);
     log_core0(now);
+    extern void kernel_log_stuck_stacks(void (*fmt)(char *out, size_t cap, uint64_t a));
+    kernel_log_stuck_stacks(where);  // (the others in a host function or holding a core's turn: where they are)
     fflush(stderr);  // (the log pump reads the pipe: nothing stays in stdio)
 }
 

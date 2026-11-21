@@ -48,9 +48,10 @@ struct KThread {
     volatile uint64_t svc_since, svc_args[4], svc_lr;
 #ifdef __ANDROID__
     void *dcache;          // dispatch.c: this thread's guest -> host function cache (TLS is slow in a dlopened library)
-    bool core0_held;       // kernel.c: this thread has core 0 (it runs; the others of core 0 wait)
+    bool core0_held;       // kernel.c: this thread has its core's turn (core lock_core: the others of that core wait)
     bool core0_evicted;    // atomic request to reconcile core ownership at the next guest safe point
-    KThread *core0_next;   // core-0 runnable queue (c0_m)
+    int lock_core;         // (core0_held) whose turn it holds: 0, or 1-3 with LARECOMP_CORE_LOCKS
+    KThread *core0_next;   // a core's runnable queue (c0_m)
 #endif
 };
 

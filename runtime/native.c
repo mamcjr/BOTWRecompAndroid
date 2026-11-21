@@ -89,10 +89,13 @@ void native_call(Cpu *c, uint64_t addr) {
 void native_svc_c(Cpu *c, uint32_t imm) { rt_svc(c, imm, c->x[30]); }
 
 HostFn hle_slot_fn(uint64_t pc);  // dispatch.c
+void kernel_hle_enter(void), kernel_hle_leave(void);  // kernel.c (a core's turn owed by a wait in the call)
 void native_hle_c(Cpu *c, uint32_t i) {
     rt_unwind_point();
     HostFn f = hle_slot_fn(HLE_BASE + 16ull * i);
+    kernel_hle_enter();
     f(c);
+    kernel_hle_leave();
 }
 
 // ---- the rewriter

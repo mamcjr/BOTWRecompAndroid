@@ -52,6 +52,12 @@ HostFn hle_lookup_impl(const char *name) {
 
 static void hle_unimplemented(Cpu *c);
 
+// The host function a fake HLE address stands for (the freeze report's "in nvnQueueFinish"), NULL past the stubs
+const char *hle_slot_name(uint64_t pc) {
+    if (pc < HLE_BASE || pc >= HLE_BASE + 16ull * (uint64_t)hle_count) return NULL;
+    return hle_slots[(pc - HLE_BASE) / 16].name;
+}
+
 uint64_t hle_register(const char *name, HostFn fn) {
     for (int i = 0; i < hle_count; i++)
         if (!strcmp(hle_slots[i].name, name)) return HLE_BASE + 16ull * i;
@@ -80,6 +86,21 @@ static void null_call(Cpu *c) {
     if (n++ < 10) LOG("[dispatch] the game's code called address 0: returned 0 (lr %llx)\n", (unsigned long long)c->x[30]);
     c->x[0] = 0;
 }
+
+#ifdef __ANDROID__
+// With LARECOMP_CORE_LOCKS past core 0: an HLE call from the lifted game, counted as a host function (kernel.c
+// kernel_hle_enter), so a wait inside it takes the core's turn back only on the way out, with no host lock held.
+bool kernel_turns_past_core0(void);
+void kernel_hle_enter(void), kernel_hle_leave(void);
+static void hle_counted(Cpu *c) {
+    int i = (int)((c->pc - HLE_BASE) / 16);
+    GuestFn f = hle_slots[i].fn;
+    if (!f) unimpl_pc = c->pc, f = hle_unimplemented;
+    kernel_hle_enter();
+    f(c);
+    kernel_hle_leave();
+}
+#endif
 
 static void hle_unimplemented(Cpu *c) {
     int i = (int)((unimpl_pc - HLE_BASE) / 16);
@@ -193,6 +214,9 @@ static GuestFn dispatch_slow(Cpu *c) {
         rt_unwind_point();  // (HLE calls aren't cached below, so every one passes here: a reboot's safe point)
         int i = (int)((pc - HLE_BASE) / 16);
         if (i < hle_count) {
+#ifdef __ANDROID__
+            if (kernel_turns_past_core0()) return hle_counted;
+#endif
             if (hle_slots[i].fn) return hle_slots[i].fn;
             unimpl_pc = pc;
             return hle_unimplemented;
