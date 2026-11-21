@@ -901,7 +901,7 @@ typedef struct APerformanceHintSession APerformanceHintSession;
 // on from - a race in the game's job system that a main thread much faster than its workers wins (on the Switch every
 // core runs at the same clock).
 static cpu_set_t g_all_cores;
-static bool g_pinned;
+static _Atomic bool g_pinned;
 
 // LARECOMP_UCLAMP_MIN=<1-1024> (a test, issue #41): a utilization floor for every thread that starts here (the game's,
 // the render thread, audio), so the governor runs their cores at least at that share of their top clock, however
@@ -961,12 +961,15 @@ void plat_render_thread_pin(void) {
             k++;
         }
     if (!best || k == 0 || k == n) return;
+    if (!atomic_load_explicit(&g_pinned, memory_order_acquire) &&
+        sched_getaffinity(0, sizeof g_all_cores, &g_all_cores) == 0)
+        atomic_store_explicit(&g_pinned, true, memory_order_release);
     int r = sched_setaffinity(0, sizeof set, &set);
     LOG("[android] render thread on the %d fastest cores (%ld MHz): %s\n", k, best / 1000, r ? strerror(errno) : "ok");
 }
 
 void plat_thread_unpin(void) {
-    if (g_pinned) sched_setaffinity(0, sizeof g_all_cores, &g_all_cores);
+    if (atomic_load_explicit(&g_pinned, memory_order_acquire)) sched_setaffinity(0, sizeof g_all_cores, &g_all_cores);
     uclamp_min_thread();
 }
 
@@ -994,7 +997,7 @@ static void pin_to_fastest_cores(void) {
         }
     if (!best || k == 0 || k == n) return;  // (one cluster: nothing to pick)
     if (sched_getaffinity(0, sizeof g_all_cores, &g_all_cores)) return;
-    g_pinned = true;  // (before: a thread started from here from now on goes back to g_all_cores)
+    atomic_store_explicit(&g_pinned, true, memory_order_release);  // (before: a thread started from here from now on goes back to g_all_cores)
     int r = sched_setaffinity(0, sizeof set, &set);
     LOG("[android] presenting thread on the %d fastest cores (%ld MHz): %s\n", k, best / 1000, r ? strerror(errno) : "ok");
 }

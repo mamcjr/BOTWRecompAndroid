@@ -15,11 +15,14 @@ VkG g_vk;
 bool g_benchmark;
 _Atomic uint64_t g_bench_perf[BP_COUNT];
 uint64_t plat_now_ns(void) { return 1; }
+WdMark vk_wd_enter(uint32_t stage, uint64_t arg) { (void)stage, (void)arg; return (WdMark){0}; }
+void vk_wd_leave(WdMark m) { (void)m; }
 #endif
 void rt_fatal_trace(void) { abort(); }
 static uint8_t staging[1 << 20];
+static uint8_t readback_buf[1 << 20];
 VkSpan vk_transient(uint64_t size, uint64_t align) { (void)size, (void)align; return (VkSpan){VK_NULL_HANDLE, 0, staging}; }
-VkSpan vk_readback(uint64_t size) { (void)size; return (VkSpan){VK_NULL_HANDLE, 0, staging}; }
+VkSpan vk_readback(uint64_t size) { (void)size; return (VkSpan){VK_NULL_HANDLE, 0, readback_buf}; }
 void vk_readback_ready(uint64_t size) { (void)size; }
 VkCommandBuffer vk_cmd(void) { return VK_NULL_HANDLE; }
 VkCommandBuffer vk_upload_cmd(void) { return VK_NULL_HANDLE; }
