@@ -46,6 +46,7 @@ typedef VkSpan CbwinSpan;
 #include "timing_trace.h"
 #include "object_cache.h"
 #include "dyn_vi.h"
+#include "warm_cache_fastpath.h"
 #include "../renderer.h"
 #include "../../settings.h"
 #include "../../paths.h"
@@ -1556,6 +1557,32 @@ static bool jobs_all_idle(void) {
 }
 
 static _Atomic uint64_t stat_meta_hits, stat_meta_misses;
+#ifdef __ANDROID__
+static VkWarmInlineBudget warm_budget = {.frame = ~0ull};
+static uint64_t warm_budget_fps_frame = ~0ull;
+static bool warm_budget_env_checked, warm_budget_env_override;
+static uint64_t warm_budget_env_ns;
+static _Atomic uint64_t stat_warm_prog_hits, stat_warm_pipe_hits, stat_warm_pipe_misses;
+static inline void warm_inline_budget_refresh(uint64_t frame) {
+    if (!warm_budget_env_checked) {
+        warm_budget_env_checked = true;
+        warm_budget_env_override = vk_warm_inline_parse_env_ns(getenv("LARECOMP_INLINE_WARM_US"), &warm_budget_env_ns);
+    }
+    if (!g_vk.pipe_cache_ctrl) {
+        warm_budget.limit_ns = 0;
+        return;
+    }
+    if (warm_budget_env_override) {
+        warm_budget.limit_ns = warm_budget_env_ns;
+    } else if (frame != warm_budget_fps_frame || !warm_budget.limit_ns) {
+        extern bool framepace_on(void);
+        extern int framepace_target(void);
+        warm_budget_fps_frame = frame;
+        int target_fps = framepace_on() ? framepace_target() : 30;
+        warm_budget.limit_ns = (uint64_t)vk_warm_inline_default_us(target_fps) * 1000ull;
+    }
+}
+#endif
 
 static void jobs_drain(void) {
 #ifdef __ANDROID__
@@ -1717,6 +1744,14 @@ void vk_shader_build_report(const char *where) {
     if (hits || misses)
         LOG("[vk] shader-meta (%s): %llu hits / %llu misses\n", where ? where : "?",
             (unsigned long long)hits, (unsigned long long)misses);
+#ifdef __ANDROID__
+    uint64_t wprog = atomic_exchange_explicit(&stat_warm_prog_hits, 0, memory_order_relaxed);
+    uint64_t wpipe_h = atomic_exchange_explicit(&stat_warm_pipe_hits, 0, memory_order_relaxed);
+    uint64_t wpipe_m = atomic_exchange_explicit(&stat_warm_pipe_misses, 0, memory_order_relaxed);
+    if (wprog || wpipe_h || wpipe_m)
+        LOG("[vk] warm-cache fastpath (%s): prog %llu hits, pipe %llu hits / %llu misses\n",
+            where ? where : "?", (unsigned long long)wprog, (unsigned long long)wpipe_h, (unsigned long long)wpipe_m);
+#endif
 }
 
 static void wait_built_job(_Atomic int *state, _Atomic int *urgent_flag, void *steal_arg, uint64_t wd_arg) {
@@ -3286,9 +3321,13 @@ static void compile_program_from_spirv(Prog *p, uint32_t *sv, size_t nv, uint32_
         // per draw (Qualcomm's driver: ~18% of the render thread). With the offsets given at bind time (stage_set),
         // draws of the same buffers and textures share their sets. The game's constant buffers first, then the
         // runtime's tables, up to the device's limit. LARECOMP_NO_DYN_UBO=1: off.
-        static int off = -1;
-        if (off < 0) off = getenv("LARECOMP_NO_DYN_UBO") != NULL;
-        uint32_t lim = off ? 0 : g_vk.props.limits.maxDescriptorSetUniformBuffersDynamic, used = 0;
+        static _Atomic int off = -1;
+        int is_off = atomic_load_explicit(&off, memory_order_relaxed);
+        if (is_off < 0) {
+            is_off = getenv("LARECOMP_NO_DYN_UBO") != NULL;
+            atomic_store_explicit(&off, is_off, memory_order_relaxed);
+        }
+        uint32_t lim = is_off ? 0 : g_vk.props.limits.maxDescriptorSetUniformBuffersDynamic, used = 0;
         if (lim > 64) lim = 64;  // (draw_'s offset arrays)
         for (int pass = 0; pass < 2; pass++)
             for (int i = 0; i < p->nbinds && used < lim; i++) {
@@ -3501,13 +3540,8 @@ static void translate_program(void *arg) {
     run_job_ex(compile_program, p, atomic_load_explicit(&p->urgent, memory_order_relaxed) != 0);
 }
 
-static void prog_fast_or_translate(void *arg) {
-    Prog *p = arg;
-    if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
-        signal_build_done(&p->state, 2);
-        return;
-    }
-    BENCH_BUILD();
+static bool prog_load_from_meta_cache(Prog *p, bool have_fs_key, uint32_t expected_vs_out_mask, uint64_t opt_fs_h1,
+                                      uint64_t opt_fs_h2) {
     ShaderInfo *vi = NULL, *fi = NULL;
     uint32_t *sv = NULL, *sf = NULL;
     size_t nv = 0, nf = 0;
@@ -3523,41 +3557,62 @@ static void prog_fast_or_translate(void *arg) {
     if (p->meta_key_ok[0])
         vi = mw_meta_load("cache/spirv", p->meta_h1[0], p->meta_h2[0], STAGE_VERTEX, &vs_spv_h, &vs_uses_vid, NULL);
     if (vi) {
-        ShaderKey fkey = p->fkey;
-        fkey.vs_out_mask = vi->out_mask;
-        if (mw_stage_key((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], p->const_bytes[1], STAGE_FRAGMENT, &fkey,
-                         current_trans_flags(STAGE_FRAGMENT), HEAP_BASE, HEAP_MAX, MW_META_BUILD_ID,
-                         &p->meta_h1[1], &p->meta_h2[1])) {
-            p->meta_key_ok[1] = true;
-            fi = mw_meta_load("cache/spirv", p->meta_h1[1], p->meta_h2[1], STAGE_FRAGMENT, &fs_spv_h, NULL, &fs_gather);
+        uint64_t fs_h1 = 0, fs_h2 = 0;
+        bool fs_key_ok = false;
+        if (have_fs_key && vi->out_mask == expected_vs_out_mask) {
+            fs_h1 = opt_fs_h1;
+            fs_h2 = opt_fs_h2;
+            fs_key_ok = true;
+        } else {
+            ShaderKey fkey = p->fkey;
+            fkey.vs_out_mask = vi->out_mask;
+            fs_key_ok = mw_stage_key((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], p->const_bytes[1], STAGE_FRAGMENT,
+                                     &fkey, current_trans_flags(STAGE_FRAGMENT), HEAP_BASE, HEAP_MAX, MW_META_BUILD_ID,
+                                     &fs_h1, &fs_h2);
         }
-    }
-    if (vi && fi) {
-        sv = vk_spirv_load_cached(vs_spv_h, &nv);
-        sf = sv ? vk_spirv_load_cached(fs_spv_h, &nf) : NULL;
-        if (sv && sf) {
-            if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
-                free(sv);
-                free(sf);
-                maxwell_free(vi);
-                maxwell_free(fi);
-                signal_build_done(&p->state, 2);
-                return;
+        if (fs_key_ok) {
+            fi = mw_meta_load("cache/spirv", fs_h1, fs_h2, STAGE_FRAGMENT, &fs_spv_h, NULL, &fs_gather);
+            if (fi) {
+                sv = vk_spirv_load_cached(vs_spv_h, &nv);
+                sf = sv ? vk_spirv_load_cached(fs_spv_h, &nf) : NULL;
+                if (sv && sf) {
+                    if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
+                        free(sv);
+                        free(sf);
+                        maxwell_free(vi);
+                        maxwell_free(fi);
+                        return false;
+                    }
+                    p->meta_key_ok[1] = true;
+                    p->meta_h1[1] = fs_h1;
+                    p->meta_h2[1] = fs_h2;
+                    p->vi = vi;
+                    p->fi = fi;
+                    p->fkey.vs_out_mask = vi->out_mask;
+                    p->fs_out_mask = fi->out_mask;
+                    p->vs_uses_vid = vs_uses_vid;
+                    p->fs_gather = fs_gather;
+                    compile_program_from_spirv(p, sv, nv, sf, nf, true);
+                    return true;
+                }
             }
-            p->vi = vi;
-            p->fi = fi;
-            p->fkey.vs_out_mask = vi->out_mask;
-            p->fs_out_mask = fi->out_mask;
-            p->vs_uses_vid = vs_uses_vid;
-            p->fs_gather = fs_gather;
-            compile_program_from_spirv(p, sv, nv, sf, nf, true);
-            return;
         }
     }
     free(sv);
     free(sf);
     maxwell_free(vi);
     maxwell_free(fi);
+    return false;
+}
+
+static void prog_fast_or_translate(void *arg) {
+    Prog *p = arg;
+    if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
+        signal_build_done(&p->state, 2);
+        return;
+    }
+    BENCH_BUILD();
+    if (prog_load_from_meta_cache(p, false, 0, 0, 0)) return;
     if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
         signal_build_done(&p->state, 2);
         return;
@@ -3623,6 +3678,49 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey, bool 
                                           STAGE_VERTEX, &p->vkey, current_trans_flags(STAGE_VERTEX),
                                           HEAP_BASE, HEAP_MAX, MW_META_BUILD_ID, &p->meta_h1[0], &p->meta_h2[0]);
         if (p->meta_key_ok[0] && mw_meta_exists("cache/spirv", p->meta_h1[0])) {
+#ifdef __ANDROID__
+            // Try bounded inline cache load so warm SPIR-V hits do not skip depth-buffered draws for a frame.
+            if (g_vk.pipe_cache_ctrl && g_vk.pcache && !urgent && !sync_shaders() && !g_inline_steal) {
+                uint64_t frame = renderer_present_count();
+                warm_inline_budget_refresh(frame);
+                if (vk_warm_budget_allow(&warm_budget, frame)) {
+                    WdMark wm = vk_wd_enter(WD_R_BUILD_WAIT, p->code[1]);
+                    uint64_t bench_t0 = bench_clock();
+                    uint64_t t0 = plat_now_ns();
+                    uint32_t vs_out_mask = 0;
+                    uint64_t fs_h1 = 0, fs_h2 = 0;
+                    ShaderKey fs_key = p->fkey;
+                    bool fs_meta_ready =
+                        mw_meta_peek_out_mask("cache/spirv", p->meta_h1[0], p->meta_h2[0], &vs_out_mask) &&
+                        (fs_key.vs_out_mask = vs_out_mask,
+                         mw_stage_key((const uint8_t *)(uintptr_t)p->code[1], p->cmax[1], p->const_bytes[1],
+                                      STAGE_FRAGMENT, &fs_key, current_trans_flags(STAGE_FRAGMENT), HEAP_BASE, HEAP_MAX,
+                                      MW_META_BUILD_ID, &fs_h1, &fs_h2)) &&
+                        mw_meta_exists("cache/spirv", fs_h1);
+                    bool hit = fs_meta_ready && prog_load_from_meta_cache(p, true, vs_out_mask, fs_h1, fs_h2);
+                    uint64_t dt = plat_now_ns() - t0;
+                    vk_warm_budget_account(&warm_budget, frame, dt);
+                    account_build_wait(dt);
+                    if (hit && bench_t0) {
+                        bench_elapsed(BP_BUILD_NS, bench_t0);
+                        bench_record(BP_BUILDS, 1);
+                    }
+                    vk_wd_leave(wm);
+                    if (hit) {
+                        if (atomic_load_explicit(&p->state, memory_order_acquire) == 1)
+                            atomic_fetch_add_explicit(&stat_warm_prog_hits, 1, memory_order_relaxed);
+                        return p;
+                    }
+                    if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
+                        signal_build_done(&p->state, 2);
+                        return p;
+                    }
+                    atomic_fetch_add_explicit(&stat_meta_misses, 1, memory_order_relaxed);
+                    render_dispatch_program(translate_program, p, urgent, true, p->code[1]);
+                    return p;
+                }
+            }
+#endif
             render_dispatch_program(prog_fast_or_translate, p, urgent, false, p->code[1]);
             return p;
         }
@@ -4101,13 +4199,12 @@ static VkPrimitiveTopology topo_class_base(uint8_t c) {
     return c == 0 ? VK_PRIMITIVE_TOPOLOGY_POINT_LIST : c == 1 ? VK_PRIMITIVE_TOPOLOGY_LINE_LIST : VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST;
 }
 
-static void build_pipeline(void *arg) {
-    Pipe *pp = arg;
+static bool build_pipeline_ex(Pipe *pp, bool cache_only) {
     if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
-        signal_build_done(&pp->state, 2);
-        return;
+        if (!cache_only) signal_build_done(&pp->state, 2);
+        return false;
     }
-    BENCH_BUILD();
+    uint64_t bench_t0 = bench_clock();
     PipeKey *k = &pp->k;
     VkPipelineShaderStageCreateInfo stages[2] = {
         {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_VERTEX_BIT, .module = k->prog->vs, .pName = "main"},
@@ -4197,16 +4294,18 @@ static void build_pipeline(void *arg) {
     if (!g_vk.dyn_render) {  // (no dynamic rendering: against a compatible render pass, rpcompat.c)
         VkRenderPass crp = vk_rp_compat(k->ncolor, k->color, k->depth, k->stencil, ms.rasterizationSamples);
         if (!crp) {
+            if (cache_only) return false;
             pp->retry_s = g_exec_s + 5;
             atomic_store(&pipe_oom, 1);
             signal_build_done(&pp->state, 2);
-            return;
+            return false;
         }
         pi.pNext = ri.pNext, pi.renderPass = crp;
     }
 #ifdef __ANDROID__
-    if (g_vk.exec_stats) pi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
-    {   // LARECOMP_LOG_PIPE=1: each pipeline's shaders before the driver compiles them (a crash in its compiler: the
+    if (cache_only) pi.flags |= VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT;
+    if (g_vk.exec_stats && !cache_only) pi.flags |= VK_PIPELINE_CREATE_CAPTURE_STATISTICS_BIT_KHR;
+    if (!cache_only) {  // LARECOMP_LOG_PIPE=1: each pipeline's shaders before the driver compiles them (a crash in its compiler: the
         // last line names the pair; their sources with LARECOMP_SAVE_MSL, build/glsl/<address>_vs|fs.glsl)
         static int logp = -1;
         if (logp < 0) logp = getenv("LARECOMP_LOG_PIPE") != NULL;
@@ -4214,9 +4313,16 @@ static void build_pipeline(void *arg) {
     }
 #endif
     long long mg0 = vk_mnow();
-    VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pp->pipe);
+    VkPipeline pipe = VK_NULL_HANDLE;
+    VkResult r = vkCreateGraphicsPipelines(g_vk.dev, g_vk.pcache, 1, &pi, NULL, &pipe);
+    if (cache_only && r != VK_SUCCESS) {
+        if (pipe != VK_NULL_HANDLE) vkDestroyPipeline(g_vk.dev, pipe, NULL);
+        return false;
+    }
+    if (r == VK_SUCCESS) pp->pipe = pipe;
+    else if (pipe != VK_NULL_HANDLE) vkDestroyPipeline(g_vk.dev, pipe, NULL);
     vk_mgrow_add(MG_GPIPE, mg0);
-    {   // LARECOMP_PIPE_FAIL_OOM=<n>: the n-th to (n+19)-th pipelines built fail once as out of device memory (a test of
+    if (!cache_only) {  // LARECOMP_PIPE_FAIL_OOM=<n>: the n-th to (n+19)-th pipelines built fail once as out of device memory (a test of
         // the retry, #520; twenty, so some of them are drawn again)
         static long fail_at = -1;
         static _Atomic long built;
@@ -4228,12 +4334,16 @@ static void build_pipeline(void *arg) {
             r = VK_ERROR_OUT_OF_DEVICE_MEMORY;
         }
     }
+    if (bench_t0) {
+        bench_elapsed(BP_BUILD_NS, bench_t0);
+        bench_record(BP_BUILDS, 1);
+    }
     if (r != VK_SUCCESS) {
         static int n;
         if (n++ < 10) LOG("[vk] pipeline creation failed: %d\n", r);
     }
 #ifdef __ANDROID__
-    if (r == VK_SUCCESS && g_vk.exec_stats) {  // (LARECOMP_SHADER_STATS) one line per compiled stage
+    if (r == VK_SUCCESS && g_vk.exec_stats && !cache_only) {  // (LARECOMP_SHADER_STATS) one line per compiled stage
         uint64_t fsh = hmix(1469598103934665603ull, (const void *)(uintptr_t)(k->prog->code[1] + 0x30), 0x200);
         VkPipelineInfoKHR pinfo = {.sType = VK_STRUCTURE_TYPE_PIPELINE_INFO_KHR, .pipeline = pp->pipe};
         VkPipelineExecutablePropertiesKHR props[4];
@@ -4274,6 +4384,11 @@ static void build_pipeline(void *arg) {
         }
     }
     signal_build_done(&pp->state, r == VK_SUCCESS ? 1 : 2);
+    return r == VK_SUCCESS;
+}
+
+static void build_pipeline(void *arg) {
+    (void)build_pipeline_ex((Pipe *)arg, false);
 }
 
 static void build_pipeline_urgent(Pipe *pp) {
@@ -4305,6 +4420,30 @@ static void schedule_pipeline_build(Pipe *pp, bool keep) {
         build_pipeline_urgent(pp);
         return;
     }
+#ifdef __ANDROID__
+    if (g_vk.pipe_cache_ctrl && g_vk.pcache && !g_vk.exec_stats && !g_inline_steal) {
+        uint64_t frame = renderer_present_count();
+        warm_inline_budget_refresh(frame);
+        if (vk_warm_budget_allow(&warm_budget, frame)) {
+            WdMark wm = vk_wd_enter(WD_R_BUILD_WAIT, pp->k.prog ? pp->k.prog->code[1] : 0);
+            uint64_t t0 = plat_now_ns();
+            bool hit = build_pipeline_ex(pp, true);
+            uint64_t dt = plat_now_ns() - t0;
+            vk_warm_budget_account(&warm_budget, frame, dt);
+            account_build_wait(dt);
+            vk_wd_leave(wm);
+            if (hit) {
+                atomic_fetch_add_explicit(&stat_warm_pipe_hits, 1, memory_order_relaxed);
+                return;
+            }
+            if (atomic_load_explicit(&jobs_abort, memory_order_acquire)) {
+                signal_build_done(&pp->state, 2);
+                return;
+            }
+            atomic_fetch_add_explicit(&stat_warm_pipe_misses, 1, memory_order_relaxed);
+        }
+    }
+#endif
     run_job_ex(build_pipeline, pp, false);
 }
 
@@ -7196,6 +7335,8 @@ void vk_exec_reset(void) {
     jobs_drain();
 #ifdef __ANDROID__
     prewarm_reset();
+    vk_warm_budget_reset(&warm_budget);
+    warm_budget_fps_frame = ~0ull;
 #endif
     vk_shader_build_report("reboot");
     int np = 0, ng = 0, kept = 0;
