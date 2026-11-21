@@ -291,7 +291,9 @@ static pthread_once_t c0_once = PTHREAD_ONCE_INIT;
 static void core0_init(void) {
     c0_on = !getenv("LARECOMP_NO_CORE0");
     const char *cl = getenv("LARECOMP_CORE_LOCKS");
+    extern __attribute__((weak)) bool settings_core_turns(void);  // (settings.c; absent in the tests)
     if (cl && *cl) core_locks = (unsigned)strtoul(cl, NULL, 0) & 0xF;
+    else if (settings_core_turns && settings_core_turns()) core_locks = 7;  // (Settings > Switch-style core turns)
     if (!c0_on) core_locks = 0;
     if (core_locks != 1) LOG("[kernel] threads take turns on cores (mask) %#x (LARECOMP_CORE_LOCKS)\n", core_locks);
     const char *e = getenv("LARECOMP_C0_SLICE_MS");

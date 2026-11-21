@@ -14,7 +14,7 @@ It is built on the engine of **[LAS Recomp](https://github.com/peiikai/LASRecomp
 > [!WARNING]
 > **Beta.** Tested primarily on one phone (POCO F7 Ultra, Adreno 830, Mesa Turnip driver). Performance and compatibility
 > vary by device; expect bugs, especially on GPUs that have not been tested on physical hardware. See the
-> [0.4.8-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.8-beta) and the
+> [0.4.9-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.9-beta) and the
 > [development notes](docs/BOTW-PORT.md) (in Portuguese).
 
 ## Supported platform
@@ -78,6 +78,9 @@ Windows, Linux or macOS may still be used as development hosts with the Android 
 - **0.4.8:** fixes for game threads that could wait forever (timed waits survive a clock change, a cancelled wait
   no longer looks like a taken lock), a freeze report that shows where the game's main thread is (#401), texture
   slots without stalls on every GPU, and Mali compute work chained without extra barriers.
+- **0.4.9:** Settings > Switch-style core turns (experimental, off), for the freeze after a few minutes (#401);
+  a fuller freeze report; Unlocked aspect on screens squarer than 16:9 (#474); and Mali shader constants copied
+  only where they change.
 - **Known issues:** short grass appears only up close; water reflections can move with the camera; the pause menu
   background can be black on Qualcomm's stock driver; Link may flicker on the first hit in Native Mode; rain falls
   slower than on the console.
@@ -132,7 +135,7 @@ icons read from your game files. The game's menus keep the classic buttons.
    Files > Vulkan driver**. If the app reports that the Vulkan driver is too old at startup, long-press the app icon
    and choose **Choose driver** before launching the game.
 
-Updating from 0.2.x to 0.4.8-beta does not require rebuilding game code. Shaders compile again once, so the first
+Updating from 0.2.x to 0.4.9-beta does not require rebuilding game code. Shaders compile again once, so the first
 minutes may stutter. To report a problem, open an [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) with
 your phone, GPU, driver, game version and a log from **Settings > Files > Save a log file**.
 

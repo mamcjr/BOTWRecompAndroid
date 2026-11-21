@@ -783,6 +783,10 @@ static void tab_display(void) {
     opt_toggle("Pipeline prewarming (experimental)", &g_settings.pipe_prewarm, false,
                "Records graphics pipelines used in the world and builds them on background workers while a save loads, so "
                "fewer draws wait or skip on first entry. Off by default. Applies the next time a save loads.");
+    opt_toggle("Switch-style core turns (experimental)", &g_settings.core_turns, false,
+               "The game's threads that share a CPU core take turns, as on the Switch, on cores 0 to 2 instead of only "
+               "core 0. Try it if the game freezes after a few minutes, mostly in fights with many effects (#401). An "
+               "experiment - report what goes wrong. Applies the next time the game starts.");
     opt_toggle("32-bit shader math", &g_settings.shader_int32, false,
                "Translates the game's shaders with 32-bit address math, the path used for drivers without 64-bit "
                "integers (Adreno 6xx / 7xx and Mali stock drivers). Try it if lighting, grass or text are missing or wrong "
