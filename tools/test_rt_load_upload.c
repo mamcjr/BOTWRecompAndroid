@@ -609,6 +609,90 @@ int main(void) {
     resolve_feedback(&pr, 1); begin_pass(); vk_end_pass(); renderer_flush();
     check("Turnip in-place feedback keeps snap_ok & destroy clears dead snapshot pointers", ok_ip && stat_feedback_copies == fb0 + 1);
 
+    // 6b. Mali (vendorID 0x13B5) manual "On" opt-in for in-place feedback while Automatic (-1) stays on copies,
+    // mid-pass break tracking, empty/non-empty env precedence, and non-Turnip/non-Mali negative control.
+    g_vk.props.vendorID = 0x13B5; mock_turnip = false; g_settings.inplace_reads = -1; g_inplace_copy = -1;
+    unsetenv("LARECOMP_FEEDBACK_INPLACE"); unsetenv("LARECOMP_FEEDBACK_COPY");
+    backend_texture_destroyed(&tr); tr = make_tex(0x2a, 64, 64, 0x40, 0x1111); vk_tex(&tr, false); renderer_flush();
+    stat_inplace_breaks = 0; uint64_t fb_mali0 = stat_feedback_copies;
+
+    // Mali Automatic (-1) keeps safe copies.
+    reset_pass(&tr, NULL, 0xF, NULL); st.tpool = &dpool; st.tex[1][0] = 0x100001ull;
+    resolve_feedback(&pr, 1); vk_end_pass(); renderer_flush();
+    bool ok_mali_auto_copy = g_inplace_copy == 1 && stat_feedback_copies == fb_mali0 + 1;
+
+    // Explicit Settings "On" (inplace_reads = 1) enables in-place reads on Mali + mid-pass break on barrier.
+    snapshots_invalidate(&tr);
+    g_settings.inplace_reads = 1; g_inplace_copy = -1;
+    reset_pass(&tr, NULL, 0xF, NULL); st.tpool = &dpool; st.tex[1][0] = 0x100001ull;
+    resolve_feedback(&pr, 1); snapshots_mark_fb_dirty(&tr); begin_pass(); ninplace = 0; sim_draw_rows(0, 2, 0x3333);
+    pass_written |= 1; st.rt_dirty = false; resolve_feedback(&pr, 1);
+    bool ok_same_pass = !g_inplace_copy && !stat_inplace_breaks && !st.rt_dirty;
+    snapshots_flush_fb_dirty("barrier");
+    resolve_feedback(&pr, 1);
+    bool ok_mali_break = stat_inplace_breaks == 1 && st.rt_dirty && stat_feedback_copies == fb_mali0 + 1;
+    vk_end_pass(); renderer_flush();
+
+    snapshots_invalidate(&tr);
+    g_settings.inplace_reads = 0; g_inplace_copy = -1;  // explicit setting=0 forces copies on Mali
+    reset_pass(&tr, NULL, 0xF, NULL); st.tpool = &dpool; st.tex[1][0] = 0x100001ull;
+    resolve_feedback(&pr, 1); vk_end_pass(); renderer_flush();
+    bool ok_set_off = g_inplace_copy == 1 && stat_feedback_copies == fb_mali0 + 2;
+
+    setenv("LARECOMP_FEEDBACK_INPLACE", "1", 1); g_inplace_copy = -1;  // LARECOMP_FEEDBACK_INPLACE=1 overrides setting=0
+    reset_pass(&tr, NULL, 0xF, NULL); st.tpool = &dpool; st.tex[1][0] = 0x100001ull;
+    resolve_feedback(&pr, 1); vk_end_pass(); renderer_flush();
+    bool ok_fi_on = g_inplace_copy == 0 && stat_feedback_copies == fb_mali0 + 2;
+
+    snapshots_invalidate(&tr);
+    setenv("LARECOMP_FEEDBACK_INPLACE", "0", 1); g_settings.inplace_reads = 1; g_inplace_copy = -1;
+    reset_pass(&tr, NULL, 0xF, NULL); st.tpool = &dpool; st.tex[1][0] = 0x100001ull;
+    resolve_feedback(&pr, 1); vk_end_pass(); renderer_flush();
+    bool ok_fi_off = g_inplace_copy == 1 && stat_feedback_copies == fb_mali0 + 3;
+
+    // LARECOMP_FEEDBACK_COPY=1 takes precedence over LARECOMP_FEEDBACK_INPLACE=1 and settings=1.
+    snapshots_invalidate(&tr);
+    setenv("LARECOMP_FEEDBACK_COPY", "1", 1); setenv("LARECOMP_FEEDBACK_INPLACE", "1", 1);
+    g_settings.inplace_reads = 1; g_inplace_copy = -1;
+    reset_pass(&tr, NULL, 0xF, NULL); st.tpool = &dpool; st.tex[1][0] = 0x100001ull;
+    resolve_feedback(&pr, 1); vk_end_pass(); renderer_flush();
+    bool ok_fb_copy_prec = g_inplace_copy == 1 && stat_feedback_copies == fb_mali0 + 4;
+    unsetenv("LARECOMP_FEEDBACK_COPY"); unsetenv("LARECOMP_FEEDBACK_INPLACE");
+
+    // Non-Turnip, non-Mali GPU (vendorID 0x5143) even with settings=1 keeps feedback copies.
+    snapshots_invalidate(&tr);
+    g_vk.props.vendorID = 0x5143; g_settings.inplace_reads = 1; g_inplace_copy = -1;
+    reset_pass(&tr, NULL, 0xF, NULL); st.tpool = &dpool; st.tex[1][0] = 0x100001ull;
+    resolve_feedback(&pr, 1); vk_end_pass(); renderer_flush();
+    bool ok_non_mali_off = g_inplace_copy == 1 && stat_feedback_copies == fb_mali0 + 5;
+
+    // Empty LARECOMP_FEEDBACK_INPLACE="" does not block settings (-1 stays copies, 1 stays in place on Mali).
+    snapshots_invalidate(&tr);
+    g_vk.props.vendorID = 0x13B5; setenv("LARECOMP_FEEDBACK_INPLACE", "", 1);
+    g_settings.inplace_reads = -1; g_inplace_copy = -1;
+    reset_pass(&tr, NULL, 0xF, NULL); st.tpool = &dpool; st.tex[1][0] = 0x100001ull;
+    resolve_feedback(&pr, 1); vk_end_pass(); renderer_flush();
+    bool ok_empty_auto = g_inplace_copy == 1 && stat_feedback_copies == fb_mali0 + 6;
+    g_settings.inplace_reads = 1; g_inplace_copy = -1;
+    reset_pass(&tr, NULL, 0xF, NULL); st.tpool = &dpool; st.tex[1][0] = 0x100001ull;
+    resolve_feedback(&pr, 1); vk_end_pass(); renderer_flush();
+    bool ok_empty_on = g_inplace_copy == 0 && stat_feedback_copies == fb_mali0 + 6;
+    unsetenv("LARECOMP_FEEDBACK_INPLACE");
+
+    // AB("copy") == 1 forces feedback copy on Mali even when g_inplace_copy == 0.
+    snapshots_invalidate(&tr);
+    g_vk.props.vendorID = 0x13B5; g_settings.inplace_reads = 1; g_inplace_copy = -1;
+    setenv("LARECOMP_AB", "1:copy", 1); ab_n = -1; s_frame_counter = 1;
+    reset_pass(&tr, NULL, 0xF, NULL); st.tpool = &dpool; st.tex[1][0] = 0x100001ull;
+    resolve_feedback(&pr, 1); vk_end_pass(); renderer_flush();
+    bool ok_ab_copy = g_inplace_copy == 0 && stat_feedback_copies == fb_mali0 + 7;
+    unsetenv("LARECOMP_AB"); ab_n = -1; s_frame_counter = 500;
+
+    check("Mali (0x13B5) manual On in-place feedback, Automatic=copy, pass-break, and env/setting matrix",
+          ok_mali_auto_copy && ok_same_pass && ok_mali_break && ok_set_off && ok_fi_on && ok_fi_off &&
+          ok_fb_copy_prec && ok_non_mali_off && ok_empty_auto && ok_empty_on && ok_ab_copy);
+    g_vk.props.vendorID = 0; g_settings.inplace_reads = 0; g_inplace_copy = -1;
+
     // 7. tex_discarded_bytes accounting stays accurate across re-upload and destroy_image.
     tex_discarded_bytes = 0; uint64_t disc = 0;
     NvnTexture td1 = make_tex(0x2a, 128, 128, 0x0, 0x1234), td2 = make_tex(0x2a, 128, 128, 0x0, 0x5678);
