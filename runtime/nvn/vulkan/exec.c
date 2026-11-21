@@ -3059,10 +3059,11 @@ static void descriptor_plan(const VkBindingInfo *binds, int count, uint32_t set,
     for (int i = 0; i < count; i++) {
         const VkBindingInfo *b = &binds[i];
         if (b->set != set) continue;
+        int ubo = b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER || b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC;
         if ((b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) ||
-            (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) || b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
+            (ubo && b->binding < 17) || b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
             plan->regular[plan->nregular++] = (uint8_t)i;
-        else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
+        else if (ubo &&
                  (b->binding == 18 || b->binding == 19 || b->binding == GMAP_BUFFER_INDEX || b->binding == CBPATCH_BUFFER_INDEX))
             plan->deferred[plan->ndeferred++] = (uint8_t)i;
     }
