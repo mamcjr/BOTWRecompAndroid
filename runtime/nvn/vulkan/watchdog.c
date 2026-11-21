@@ -83,6 +83,7 @@ static const char *const stage_name[WD_STAGES] = {
     [WD_R_QUEUE_PRESENT] = "vkQueuePresentKHR",
     [WD_R_SWAPCHAIN] = "swapchain / surface made again (vkDeviceWaitIdle)",
     [WD_R_BUILD_WAIT] = "waiting for a shader or pipeline build",
+    [WD_R_BC_DECODE] = "waiting for parallel BC texture decode",
     [WD_GPU_WAIT] = "waiting for the GPU (vk_wait_seq)",
     [WD_G_QUEUE_FULL] = "waiting for room in the render thread's queue (push)",
     [WD_G_WAIT_ID] = "waiting for the render thread to reach a request",
