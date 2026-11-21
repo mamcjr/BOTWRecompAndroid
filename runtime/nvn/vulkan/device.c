@@ -18,6 +18,7 @@
 #include "../../ui/menu.h"
 #include "vk.h"
 #include "dyn_vi.h"
+#include "warm_cache_fastpath.h"
 #include "timing_trace.h"
 #include "device_compat.h"
 #include "../output_scale.h"
@@ -913,6 +914,23 @@ static void create_device(void) {
         vids.pNext = f.pNext;
         f.pNext = &vids;
     }
+    // Enable Vulkan 1.3 pipelineCreationCacheControl on verified Mali r49+ drivers so warm cache hits resolve inline
+    // without skipping frames (LARECOMP_VK_CACHE_CTRL=1/0 overrides, LARECOMP_VK_NO_CACHE_CTRL=1: off).
+    const char *pcc_env = getenv("LARECOMP_VK_CACHE_CTRL");
+    bool no_pcc = env_on("LARECOMP_VK_NO_CACHE_CTRL");
+    bool no_pcache = getenv("LARECOMP_VK_NO_PIPELINE_CACHE") != NULL;
+    bool have_pcc = g_vk.api >= VK_API_VERSION_1_3 && h13.pipelineCreationCacheControl;
+    bool want_pcc = vk_pipe_cache_ctrl_want((uint32_t)driver.driverID, driver.driverInfo, driver_props, pcc_env, no_pcc);
+    g_vk.pipe_cache_ctrl = want_pcc && have_pcc && !no_pcache;
+    if (g_vk.api >= VK_API_VERSION_1_3)
+        f13.pipelineCreationCacheControl = g_vk.pipe_cache_ctrl ? VK_TRUE : VK_FALSE;
+    const char *pcc_why = no_pcc ? "LARECOMP_VK_NO_CACHE_CTRL"
+        : (pcc_env && *pcc_env && !want_pcc) ? "LARECOMP_VK_CACHE_CTRL=0"
+        : !want_pcc ? "off by default"
+        : no_pcache ? "pipeline cache disabled"
+        : !have_pcc ? "unsupported"
+        : (pcc_env && *pcc_env) ? "LARECOMP_VK_CACHE_CTRL" : "driver default";
+    LOG("[vk-cap] pipeline cache control: %s (%s)\n", g_vk.pipe_cache_ctrl ? "on" : "off", pcc_why);
 #endif
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
