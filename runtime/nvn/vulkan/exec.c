@@ -5983,6 +5983,38 @@ static GcBack gc_back[256];
 static int gc_nback;
 static pthread_mutex_t gc_lock = PTHREAD_MUTEX_INITIALIZER;
 
+// One 256-byte block of the arena back into guest memory: only the 8-byte words the GPU changed (src against the
+// shadow), each with a compare-and-swap that expects the shadow's value, so a word the game's threads wrote since -
+// even while this runs - stays theirs. The check before (gcopy_retire: the CPU didn't write the block) and a plain
+// memcpy after it left a window: a game thread writing the block in between lost that write. The ranges have a
+// 4 KB margin before each bound buffer and gaps of up to 4 KB merged in (gcopy_ranges), where the game's heap keeps
+// its block headers and free-list links: #401 (Mali-G1, copy mode, 0.4.9 with core turns on) hung walking a heap's
+// free list that looped (main+0x4e824, a block of size x1 with alignment x2 from the list at heap+0x180), on core 2
+// and in the effect system's frame start alike, after 5-20 minutes of fights with many effects. Turnip (the heap
+// placed) never copies back, and never hung. LARECOMP_GA_BACK_WHOLE=1: the whole block, as before.
+static void ga_back_block(uint8_t *g, const uint8_t *src, uint8_t *sh, uint64_t n) {
+    static int whole = -1;
+    if (whole < 0) whole = getenv("LARECOMP_GA_BACK_WHOLE") && atoi(getenv("LARECOMP_GA_BACK_WHOLE"));
+    if (whole || ((uintptr_t)g & 7) || (n & 7)) {
+        memcpy(g, src, n);
+        return;
+    }
+    uint64_t *gw = (uint64_t *)g;
+    const uint64_t *sw = (const uint64_t *)src, *hw = (const uint64_t *)sh;
+    for (uint64_t w = 0; w < n / 8; w++) {
+        uint64_t s = sw[w], expect = hw[w];
+        if (s == expect) continue;  // (the GPU didn't change it: the game's, whatever it holds now)
+        if (__atomic_compare_exchange_n(&gw[w], &expect, s, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) continue;
+        // (the game wrote it since the check: kept. Before, this write was lost - logged, the evidence for #401)
+        static int told;
+        if (told < 20) {
+            told++;
+            LOG("[vk] arena copy-back: a word the game wrote meanwhile kept, at heap+%llx (GPU %016llx, game %016llx)\n",
+                (unsigned long long)((uintptr_t)&gw[w] - HEAP_BASE), (unsigned long long)s, (unsigned long long)expect);
+        }
+    }
+}
+
 static void gcopy_retire(uint64_t done) {
     pthread_mutex_lock(&gc_lock);
     bool any_ready = false;
@@ -6012,7 +6044,7 @@ static void gcopy_retire(uint64_t done) {
                 // GPU's and wrote them over the CPU's: the game's allocator lists looped, the game hung)
                 if (gc_back[i].bseq[b / 256] > gc_back[i].seq) continue;
                 if (!memcmp(src + b, sh + b, n) || memcmp(g + b, sh + b, n)) continue;  // (GPU unchanged / CPU wrote)
-                memcpy(g + b, src + b, n);
+                ga_back_block(g + b, src + b, sh + b, n);
                 memcpy(sh + b, src + b, n);
             }
         } else gc_back[k++] = gc_back[i];
