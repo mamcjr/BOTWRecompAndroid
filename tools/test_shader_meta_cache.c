@@ -106,6 +106,8 @@ int main(void) {
     vk_pad.rt_kind[0] = 2;
     vk_pad.no_ds_write = true;
     vk_pad.vs_out_mask = 0x12345678u;
+    vk_pad.local_read_slot[0] = 2u;
+    vk_pad.local_read_att[0] = 1u;
     assert(mw_stage_key(blob_a, cmax, const_sz, STAGE_VERTEX, &vk_pad, tf, 0x100000000ull, 0x80000000ull, TEST_BUILD_ID, &h1b, &h2b));
     assert(h1a == h1b && h2a == h2b);
 
@@ -190,6 +192,13 @@ int main(void) {
     assert_key_differs_vs(blob_a, cmax, const_sz, STAGE_FRAGMENT, &fk_var, tf, 0x100000000ull, 0x80000000ull, TEST_BUILD_ID, fh1, fh2);
     fk_var = fkey; fk_var.soft_linear_rep_v = 2ull;
     assert_key_differs_vs(blob_a, cmax, const_sz, STAGE_FRAGMENT, &fk_var, tf, 0x100000000ull, 0x80000000ull, TEST_BUILD_ID, fh1, fh2);
+    fk_var = fkey; fk_var.local_read_slot[0] = 2u;
+    assert_key_differs_vs(blob_a, cmax, const_sz, STAGE_FRAGMENT, &fk_var, tf, 0x100000000ull, 0x80000000ull, TEST_BUILD_ID, fh1, fh2);
+    fk_var = fkey; fk_var.local_read_slot[0] = 2u; fk_var.local_read_att[0] = 3u;
+    uint64_t lrh1 = 0, lrh2 = 0;
+    assert(mw_stage_key(blob_a, cmax, const_sz, STAGE_FRAGMENT, &fk_var, tf, 0x100000000ull, 0x80000000ull, TEST_BUILD_ID, &lrh1, &lrh2));
+    fk_var.local_read_att[0] = 1u;
+    assert_key_differs_vs(blob_a, cmax, const_sz, STAGE_FRAGMENT, &fk_var, tf, 0x100000000ull, 0x80000000ull, TEST_BUILD_ID, lrh1, lrh2);
 
     // w == 0 && i > 4 stop + BRX in dead padding past w == 0 ignored
     uint8_t zero_pad_a[1024], zero_pad_b[1024];
@@ -266,7 +275,8 @@ int main(void) {
     src.cbuf_dynamic = 0x4u;
     src.cbwin_mask = 0x2u;
     src.ntex = 2;
-    src.tex[0] = (ShaderTexture){.handle_offset = 0x28, .type = TEXTYPE_2D_ARRAY, .shadow = true, .is_array = true, .sampled = true};
+    src.tex[0] = (ShaderTexture){.handle_offset = 0x28, .type = TEXTYPE_2D_ARRAY, .shadow = true, .is_array = true, .sampled = true,
+                                 .local_read_var = 3};
     src.tex[1] = (ShaderTexture){.handle_offset = 0x40, .type = TEXTYPE_3D, .is_image = true, .bindless = true,
                                  .bindless_cbuf = 3, .bindless_offset = 0x80};
     src.attr_mask = 0x1fu;
@@ -279,6 +289,7 @@ int main(void) {
     src.uses_rscale = true;
     src.local_mem = 128;
     src.num_insts = 42;
+    src.screen_uv_mask = 0x15u;
 
     // Invalid store/load arguments and overlong directory path rejection
     assert(!mw_meta_store(NULL, h1a, h2a, STAGE_FRAGMENT, &src, 0x1234ull, false, 1));
@@ -317,12 +328,14 @@ int main(void) {
     assert(loaded->cbuf_dynamic == src.cbuf_dynamic && loaded->cbwin_mask == src.cbwin_mask && loaded->ntex == 2);
     assert(loaded->attr_mask == src.attr_mask && loaded->out_mask == src.out_mask);
     assert(loaded->tex[0].handle_offset == 0x28 && loaded->tex[0].type == TEXTYPE_2D_ARRAY &&
-           loaded->tex[0].shadow && loaded->tex[0].is_array && loaded->tex[0].sampled);
+           loaded->tex[0].shadow && loaded->tex[0].is_array && loaded->tex[0].sampled &&
+           loaded->tex[0].local_read_var == 3);
     assert(loaded->tex[1].handle_offset == 0x40 && loaded->tex[1].type == TEXTYPE_3D &&
            loaded->tex[1].is_image && loaded->tex[1].bindless && !loaded->tex[1].sampled &&
            loaded->tex[1].bindless_cbuf == 3 && loaded->tex[1].bindless_offset == 0x80);
     assert(loaded->writes_depth && loaded->uses_discard && loaded->uses_gmem && loaded->uses_gmem_map);
-    assert(loaded->uses_tint && loaded->uses_rscale && loaded->local_mem == 128 && loaded->num_insts == 42);
+    assert(loaded->uses_tint && loaded->uses_rscale && loaded->local_mem == 128 && loaded->num_insts == 42 &&
+           loaded->screen_uv_mask == 0x15u);
     free(loaded);
 
     // STAGE_VERTEX roundtrip + overwrite with ntex = 0 and ntex = 64
@@ -413,6 +426,15 @@ int main(void) {
     assert(f && fwrite(&bad_hdr, sizeof bad_hdr, 1, f) == 1 && fwrite(bad_tex, sizeof bad_tex, 1, f) == 1);
     fclose(f);
     assert(mw_meta_load(dir, h1a, h2a, STAGE_FRAGMENT, &got_spv, &got_vid, &got_gather) == NULL);
+
+    bad_hdr.ntex = 2;
+    bad_tex[0].local_read_var = 33;
+    bad_hdr.payload_hash = mw_meta_payload_hash(&bad_hdr, bad_tex, 2);
+    f = fopen(path, "wb");
+    assert(f && fwrite(&bad_hdr, sizeof bad_hdr, 1, f) == 1 && fwrite(bad_tex, sizeof bad_tex, 1, f) == 1);
+    fclose(f);
+    assert(mw_meta_load(dir, h1a, h2a, STAGE_FRAGMENT, &got_spv, &got_vid, &got_gather) == NULL);
+    bad_tex[0].local_read_var = 3;
 
     f = fopen(path, "wb");
     assert(f && fwrite(raw, 1, raw_n, f) == raw_n && fputc(0, f) != EOF);

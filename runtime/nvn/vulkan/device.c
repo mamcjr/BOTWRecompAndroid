@@ -18,6 +18,7 @@
 #include "../../ui/menu.h"
 #include "vk.h"
 #include "dyn_vi.h"
+#include "local_read.h"
 #include "timing_trace.h"
 #include "device_compat.h"
 #include "../output_scale.h"
@@ -494,6 +495,8 @@ static void create_device(void) {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PIPELINE_EXECUTABLE_PROPERTIES_FEATURES_KHR};
     VkPhysicalDeviceVertexInputDynamicStateFeaturesEXT vids_have = {
         .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_VERTEX_INPUT_DYNAMIC_STATE_FEATURES_EXT};
+    VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR lr_have = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR};
     VkPhysicalDeviceFeatures2 optional = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2};
 #define QUERY_OPTIONAL(name, feature) do { if (has_ext(ep, ne, name)) { \
         feature.pNext = optional.pNext; optional.pNext = &feature; } } while (0)
@@ -503,6 +506,10 @@ static void create_device(void) {
     QUERY_OPTIONAL(VK_KHR_MAINTENANCE_5_EXTENSION_NAME, maintenance5_have);
     QUERY_OPTIONAL(VK_KHR_PIPELINE_EXECUTABLE_PROPERTIES_EXTENSION_NAME, executable_have);
     QUERY_OPTIONAL(VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME, vids_have);
+    if (g_vk.api >= VK_API_VERSION_1_4 || has_ext(ep, ne, VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME)) {
+        lr_have.pNext = optional.pNext;
+        optional.pNext = &lr_have;
+    }
 #undef QUERY_OPTIONAL
     vkGetPhysicalDeviceFeatures2(g_vk.phys, &optional);
 #endif
@@ -620,6 +627,7 @@ static void create_device(void) {
     // (frame generation, lsfg/: its shaders read unbound slots - null descriptors)
     bool robustness2 = has_ext(ep, ne, VK_EXT_ROBUSTNESS_2_EXTENSION_NAME) && !env_on("LARECOMP_NO_ROBUSTNESS2");
     bool have_dyn_vi = has_ext(ep, ne, VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME);
+    bool have_local_read_ext = has_ext(ep, ne, VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME);
 #endif
     free(ep);
 
@@ -912,6 +920,33 @@ static void create_device(void) {
         ext[n_ext++] = VK_EXT_VERTEX_INPUT_DYNAMIC_STATE_EXTENSION_NAME;
         vids.pNext = f.pNext;
         f.pNext = &vids;
+    }
+    const char *lr_env = getenv("LARECOMP_LOCAL_READ");
+    bool no_lr = env_on("LARECOMP_NO_LOCAL_READ");
+    bool want_lr = vk_local_read_want((uint32_t)driver.driverID, driver.driverInfo, driver_props, lr_env, no_lr);
+    bool have_lr = g_vk.api >= VK_API_VERSION_1_4 || have_local_read_ext;
+    uint32_t max_lr = g_vk.props.limits.maxPerStageDescriptorInputAttachments < g_vk.props.limits.maxDescriptorSetInputAttachments
+                    ? g_vk.props.limits.maxPerStageDescriptorInputAttachments
+                    : g_vk.props.limits.maxDescriptorSetInputAttachments;
+    g_vk.local_read = want_lr && g_vk.dyn_render && g_vk.sync2 && have_lr && lr_have.dynamicRenderingLocalRead && max_lr >= 1u;
+    const char *lr_why = no_lr ? "LARECOMP_NO_LOCAL_READ"
+        : (lr_env && *lr_env && !want_lr) ? "LARECOMP_LOCAL_READ=0"
+        : !want_lr ? (driver_props ? "driver excluded by default" : "no driver properties")
+        : !g_vk.dyn_render ? "no dynamicRendering"
+        : !g_vk.sync2 ? "no synchronization2"
+        : !have_lr ? "missing extension"
+        : !lr_have.dynamicRenderingLocalRead ? "feature disabled"
+        : max_lr < 1u ? "maxInputAttachments < 1"
+        : (lr_env && *lr_env) ? "LARECOMP_LOCAL_READ" : "driver default";
+    LOG("[vk-cap] dynamic rendering local read: %s (%s)\n", g_vk.local_read ? "on" : "off", lr_why);
+    VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR lrf = {
+        .sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DYNAMIC_RENDERING_LOCAL_READ_FEATURES_KHR,
+        .dynamicRenderingLocalRead = VK_TRUE};
+    if (g_vk.local_read) {
+        if (have_local_read_ext && g_vk.api < VK_API_VERSION_1_4)
+            ext[n_ext++] = VK_KHR_DYNAMIC_RENDERING_LOCAL_READ_EXTENSION_NAME;
+        lrf.pNext = f.pNext;
+        f.pNext = &lrf;
     }
 #endif
     float prio = 1.0f;

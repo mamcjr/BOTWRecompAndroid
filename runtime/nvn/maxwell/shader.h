@@ -54,12 +54,15 @@ typedef struct {
     uint64_t soft_linear_mip;    // subset of soft_linear using mipmapped min_filter (select LOD when >= 2)
     uint64_t soft_linear_rep_u;  // subset of soft_linear using REPEAT wrap on U (wrap[0] == 1; else CLAMP_TO_EDGE)
     uint64_t soft_linear_rep_v;  // subset of soft_linear using REPEAT wrap on V (wrap[1] == 1; else CLAMP_TO_EDGE)
+    uint8_t local_read_slot[8];  // (fragment) 1 + FS texture slot lowered to subpassInput (0 = unused), sorted
+    uint8_t local_read_att[8];   // (fragment) target color attachment index (0..7) for each local_read_slot
 } ShaderKey;
 
 typedef struct {
     uint32_t handle_offset;  // byte offset of the texture handle in the bound texture cbuf
     uint8_t type;            // TEXTYPE_*
     bool shadow, is_array, is_image, bindless, sampled;
+    uint8_t local_read_var;  // (fragment) 1 + varying index (1..32) if all reads use unmodified screen UV, else 0
     uint32_t bindless_cbuf, bindless_offset;
 } ShaderTexture;
 
@@ -86,6 +89,7 @@ typedef struct {
                             // target scale, [1 + i] = allocation scale of texture i
     uint32_t local_mem;     // bytes of local memory
     uint32_t num_insts;
+    uint32_t screen_uv_mask; // (vertex) bit i set if v<i> == ((pos.x+w)*0.5, (±pos.y+w)*0.5, _, w)
     char error[256];        // set when translation fails
 } ShaderInfo;
 

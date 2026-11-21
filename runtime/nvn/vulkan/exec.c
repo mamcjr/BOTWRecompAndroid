@@ -46,6 +46,7 @@ typedef VkSpan CbwinSpan;
 #include "timing_trace.h"
 #include "object_cache.h"
 #include "dyn_vi.h"
+#include "local_read.h"
 #include "../renderer.h"
 #include "../../settings.h"
 #include "../../paths.h"
@@ -60,6 +61,8 @@ static uint64_t stat_draws, stat_skipped, stat_passes, stat_dispatches, stat_wai
 static uint64_t stat_dchained;  // (dispatches with no barrier before them: dchain)
 static uint64_t stat_feedback_reads;  // (attachments sampled as they are: only read, resolve_feedback)
 static uint64_t stat_inplace_breaks;  // (passes ended so a draw reads a target the pass wrote: resolve_feedback)
+static uint64_t stat_local_reads;     // (draws reading color attachments via VK_KHR_dynamic_rendering_local_read)
+static uint64_t stat_local_barriers;  // (in-pass BY_REGION_BIT barriers emitted for tile-local reads)
 static uint64_t stat_upload_bytes;
 static uint64_t stat_cb_bytes[2], stat_cb_n[2], stat_cb_copied, stat_cbwin;  // (LARECOMP_LOG_CBUF_BYTES: game constant buffers bound,
                                                                  // fixed [0] / dynamically indexed [1], and bytes copied)
@@ -141,6 +144,11 @@ static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
 static uint32_t pass_written;  // (the attachments this pass's draws wrote so far: draw_writes)
 static uint32_t pass_dup_null;  // (color slots left unbound: their image is bound in another slot - begin_pass)
+static VkImageView pass_color_view[8];  // (live views bound in current pass, NULL if unbound / dropped duplicate)
+static NvnTexture *pass_color_tex[8];   // (guest textures backing each color slot in current pass)
+static uint32_t pass_att_w[8], pass_att_h[8];
+static uint8_t pass_local_dirty;        // (color slots written/cleared since last local-read barrier in current pass)
+static uint8_t pass_local_read_mask;    // (color slots read via subpassInput since last local-read barrier in current pass)
 static const void *g_cur_rec;   // (exec_list: the record being run)
 static struct { const void *rec; uint32_t aspects; } lclear[16];  // (clears the pass's load operations did: begin_pass)
 static int nlclear;
@@ -1197,9 +1205,10 @@ VkDescriptorSet vk_alloc_set(VkDescriptorSetLayout layout) {
             VkDescriptorPoolSize sizes[] = {{VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 32768}, {VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 4096},
                                             {VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, 32768},
                                             {VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, 1024}, {VK_DESCRIPTOR_TYPE_SAMPLER, 1024},
-                                            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 32768}};
+                                            {VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC, 32768},
+                                            {VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT, 4096}};
             VkDescriptorPoolCreateInfo ci = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO, .maxSets = 8192,
-                                             .poolSizeCount = 6, .pPoolSizes = sizes};
+                                             .poolSizeCount = g_vk.local_read ? 7u : 6u, .pPoolSizes = sizes};
             VK_CHECK(vkCreateDescriptorPool(g_vk.dev, &ci, NULL, &s->pools[s->npools++]));
         }
         VkDescriptorSetAllocateInfo ai = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO,
@@ -1857,13 +1866,18 @@ const char *renderer_stats(void) {
     int compiles = atomic_exchange(&stat_compiles, 0);
     compiles_before += (uint64_t)compiles;
     skipped_before += stat_skipped;
+    char lr_buf[48] = "";
+    if (g_vk.local_read)
+        snprintf(lr_buf, sizeof lr_buf, ", local %llu/%llu", (unsigned long long)stat_local_reads, (unsigned long long)stat_local_barriers);
     snprintf(stats_text, sizeof stats_text,
-             "%llu draws, %llu skipped, %llu passes, %llu dispatches (%llu chained), %llu flushes, wait %.0fms, compile %d (waited %.0fms), fbcopy %llu (read %llu, breaks %llu), upload %.1fMB, binds %llu pipe %llu sets",
+             "%llu draws, %llu skipped, %llu passes, %llu dispatches (%llu chained), %llu flushes, wait %.0fms, compile %d (waited %.0fms), fbcopy %llu (read %llu, breaks %llu%s), upload %.1fMB, binds %llu pipe %llu sets",
              (unsigned long long)stat_draws, (unsigned long long)stat_skipped, (unsigned long long)stat_passes,
              (unsigned long long)stat_dispatches, (unsigned long long)stat_dchained, (unsigned long long)stat_flushes, (double)stat_wait_ns / 1e6,
-             compiles, (double)stat_build_wait_ns / 1e6, (unsigned long long)stat_feedback_copies, (unsigned long long)stat_feedback_reads, (unsigned long long)stat_inplace_breaks, (double)stat_upload_bytes / 1048576.0,
+             compiles, (double)stat_build_wait_ns / 1e6, (unsigned long long)stat_feedback_copies, (unsigned long long)stat_feedback_reads,
+             (unsigned long long)stat_inplace_breaks, lr_buf, (double)stat_upload_bytes / 1048576.0,
              (unsigned long long)stat_pipe_binds, (unsigned long long)stat_set_binds);
-    stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
+    stat_feedback_copies = stat_feedback_reads = stat_inplace_breaks = stat_local_reads = stat_local_barriers =
+        stat_upload_bytes = stat_build_wait_ns = stat_pipe_binds = stat_set_binds = 0;
     if (getenv("LARECOMP_LOG_CBUF_BYTES")) {
         LOG("[cbuf] fixed %llu x %.1f KB, dynamic %llu x %.1f KB; copied %.1f MB; in place, patched %llu\n",
             (unsigned long long)stat_cb_n[0], stat_cb_n[0] ? stat_cb_bytes[0] / 1024.0 / stat_cb_n[0] : 0,
@@ -2407,6 +2421,12 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     vk_end_rendering(vk_cmd());
     in_pass = false;
+    pass_local_dirty = 0;
+    pass_local_read_mask = 0;
+    memset(pass_color_view, 0, sizeof pass_color_view);
+    memset(pass_color_tex, 0, sizeof pass_color_tex);
+    memset(pass_att_w, 0, sizeof pass_att_w);
+    memset(pass_att_h, 0, sizeof pass_att_h);
     {   extern TexBackend *g_dump_sampled;
         if (g_dump_sampled) { TexBackend *db = g_dump_sampled; g_dump_sampled = NULL; dump_layers_raw(db); }
     }
@@ -2566,6 +2586,10 @@ static void begin_pass(void) {
     wb_npass = 0;
     uint32_t unowned_slots = 0, unowned_wb = 0;
     uint32_t att_ew[8] = {0}, att_eh[8] = {0};
+    memset(pass_color_view, 0, sizeof pass_color_view);
+    memset(pass_color_tex, 0, sizeof pass_color_tex);
+    memset(pass_att_w, 0, sizeof pass_att_w);
+    memset(pass_att_h, 0, sizeof pass_att_h);
     for (int i = 0; i < st.rt.ncolor; i++) {
         NvnTexture *t = st.rt.color[i];
         ca[i] = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
@@ -2606,7 +2630,13 @@ static void begin_pass(void) {
             ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
         }
         ca[i].imageView = v;
-        if (i < 8) { att_ew[i] = ew; att_eh[i] = eh; }
+        if (i < 8) {
+            att_ew[i] = ew; att_eh[i] = eh;
+            pass_color_view[i] = v;
+            pass_color_tex[i] = t;
+            pass_att_w[i] = ew;
+            pass_att_h[i] = eh;
+        }
         ca[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
         ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_LOAD;
         ca[i].storeOp = VK_ATTACHMENT_STORE_OP_STORE;
@@ -2638,6 +2668,12 @@ static void begin_pass(void) {
             int drop = wj || !wi ? i : j;
             ca[drop].imageView = VK_NULL_HANDLE;
             pass_color[drop] = VK_FORMAT_UNDEFINED;
+            if (drop < 8) {
+                pass_color_view[drop] = VK_NULL_HANDLE;
+                pass_color_tex[drop] = NULL;
+                pass_att_w[drop] = 0;
+                pass_att_h[drop] = 0;
+            }
             pass_dup_null |= 1u << drop;
         }
     pass_depth = pass_stencil = VK_FORMAT_UNDEFINED;
@@ -2756,6 +2792,12 @@ static void begin_pass(void) {
     ss_forget();  // (whatever ran between the passes may have set its own state)
     in_pass = true;
     pass_written = 0;
+    pass_local_dirty = 0;
+    pass_local_read_mask = 0;
+    if (g_vk.local_read) {
+        for (uint32_t i = 0; i < pass_ncolor && i < 8; i++)
+            if (ca[i].imageView && ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) pass_local_dirty |= (uint8_t)(1u << i);
+    }
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
 }
@@ -2988,6 +3030,23 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
     return p;
 }
 
+static void emit_local_read_barrier(VkCommandBuffer cb) {
+    VkMemoryBarrier2 mb = {
+        .sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER_2,
+        .srcStageMask = VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT,
+        .srcAccessMask = VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT | VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT,
+        .dstStageMask = VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT,
+        .dstAccessMask = VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT | VK_ACCESS_2_COLOR_ATTACHMENT_READ_BIT |
+                         VK_ACCESS_2_COLOR_ATTACHMENT_WRITE_BIT,
+    };
+    VkDependencyInfo di = {.sType = VK_STRUCTURE_TYPE_DEPENDENCY_INFO, .dependencyFlags = VK_DEPENDENCY_BY_REGION_BIT,
+                           .memoryBarrierCount = 1, .pMemoryBarriers = &mb};
+    vkCmdPipelineBarrier2(cb, &di);
+    pass_local_dirty = 0;
+    pass_local_read_mask = 0;
+    stat_local_barriers++;
+}
+
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil, uint32_t sval,
                   uint32_t smask) {
     begin_pass();
@@ -3019,7 +3078,13 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
         VkImageAspectFlags dsa = (depth && pass_depth ? VK_IMAGE_ASPECT_DEPTH_BIT : 0) | (stencil && pass_stencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0);
         if (dsa) a[n++] = (VkClearAttachment){.aspectMask = dsa, .clearValue.depthStencil = {dval, sval}};
         VkClearRect cr = {rect, 0, 1};
-        if (n) vkCmdClearAttachments(cb, n, a, 1, &cr);
+        if (n) {
+            if (g_vk.local_read && index >= 0 && index < 8) {
+                if (pass_local_read_mask & (1u << index)) emit_local_read_barrier(cb);
+                pass_local_dirty |= (uint8_t)(1u << index);
+            }
+            vkCmdClearAttachments(cb, n, a, 1, &cr);
+        }
         return;
     }
     VkPipeline p = clear_pipeline(index, kind, mask, depth, stencil);
@@ -3045,6 +3110,10 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
     pc[4] = dval;
     vkCmdPushConstants(cb, pc_layout(), VK_SHADER_STAGE_VERTEX_BIT | VK_SHADER_STAGE_FRAGMENT_BIT, 0, 32, pc);
     ss.known &= ~SS_SETS;  // (another layout: the draws' sets are bound again)
+    if (g_vk.local_read && index >= 0 && index < 8) {
+        if (pass_local_read_mask & (1u << index)) emit_local_read_barrier(cb);
+        pass_local_dirty |= (uint8_t)(1u << index);
+    }
     vkCmdDraw(cb, 3, 1, 0, 0);
 }
 
@@ -3060,6 +3129,7 @@ static void descriptor_plan(const VkBindingInfo *binds, int count, uint32_t set,
         const VkBindingInfo *b = &binds[i];
         if (b->set != set) continue;
         if ((b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) ||
+            (b->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT && b->binding >= 32) ||
             (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) || b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER)
             plan->regular[plan->nregular++] = (uint8_t)i;
         else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER &&
@@ -3590,6 +3660,10 @@ static Prog *get_program(NvnProgram *np, ShaderKey *vkey, ShaderKey *fkey, bool 
     if (fkey->no_ds_write) { h ^= 0xE1; h *= 0x100000001B3ull; }  // (keys without it hash as before)
 #endif
     if (fkey->soft_linear) h = hash_words(h, &fkey->soft_linear, 4 * sizeof(uint64_t));
+    if (fkey->local_read_slot[0]) {
+        h = hash_words(h, fkey->local_read_slot, sizeof fkey->local_read_slot);
+        h = hash_words(h, fkey->local_read_att, sizeof fkey->local_read_att);
+    }
     if (!h) h = 1;
     VkObjectEntry *entry = vk_object_slot(&prog_cache, h);
     if (entry->object) {
@@ -4574,12 +4648,14 @@ void vk_alias_texture_destroyed(NvnTexture *t) {
     if (naliases) alias_before_write(t, 0, "freed");
     for (int i = 0; i < 8; i++)
         if (snap_tex[i] == t) { snap_tex[i] = NULL; snap_ok[i] = false; snap_fb_dirty[i] = false; }
+    for (int i = 0; i < 8; i++) if (pass_color_tex[i] == t) pass_color_tex[i] = NULL;
     for (int i = 0; i < nsnaps; i++) if (snaps[i].key == t) snaps[i].key = NULL;
     for (int i = 0; i < ninplace; i++) if (inplace_tex[i] == t) inplace_tex[i] = NULL;
 }
 void vk_alias_reset(void) {
     naliases = 0;
     ninplace = 0;
+    memset(pass_color_tex, 0, sizeof pass_color_tex);
     for (int i = 0; i < 8; i++) { snap_tex[i] = NULL; snap_ok[i] = false; snap_fb_dirty[i] = false; }
     for (int i = 0; i < nsnaps; i++) snaps[i].key = NULL;
 }  // (reboot: every texture goes)
@@ -4633,6 +4709,7 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
     ShaderInfo *infos[2] = {pr->vi, pr->fi};
     for (int sg = 0; sg < 2; sg++)
         for (int i = 0; i < infos[sg]->ntex; i++) {
+            if (sg == 1 && vk_local_read_slot_att(pr->fkey.local_read_slot, pr->fkey.local_read_att, i) >= 0) continue;
             NvnTexEntry *e = shader_texture_entry(sg, &infos[sg]->tex[i]);
             if (!is_attachment_entry(e)) continue;
             NvnTexture *t = e->tex;
@@ -7098,6 +7175,12 @@ void vk_exec_reset(void) {
     dchain_after = false;
     dchain_cb = VK_NULL_HANDLE;
     dchain_env = -1;
+    pass_local_dirty = 0;
+    pass_local_read_mask = 0;
+    memset(pass_color_view, 0, sizeof pass_color_view);
+    memset(pass_color_tex, 0, sizeof pass_color_tex);
+    memset(pass_att_w, 0, sizeof pass_att_w);
+    memset(pass_att_h, 0, sizeof pass_att_h);
     st_defaults();
 }
 
@@ -7280,6 +7363,21 @@ static VkDescriptorSet stage_set(Prog *p, VkDescriptorSetLayout layout, uint32_t
             if (ti < 64) {
                 tex_sc[sg][ti][0] = sc[0]; tex_sc[sg][ti][1] = sc[1];
                 tex_wh[sg][ti][0] = wh[0]; tex_wh[sg][ti][1] = wh[1];
+            }
+            w[n].pImageInfo = &ii[n];
+        } else if (b->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT && b->binding >= 32) {
+            int ti = (int)b->binding - 32;
+            int att = ti < si->ntex ? vk_local_read_slot_att(p->fkey.local_read_slot, p->fkey.local_read_att, ti) : -1;
+            if (ti < si->ntex && pre_ii && ti < 64) {
+                ii[n] = pre_ii[ti];
+            } else {
+                VkImageView iv = (att >= 0 && att < (int)pass_ncolor && pass_color_view[att]) ? pass_color_view[att] : vk_dummy_view(TEXTYPE_2D);
+                ii[n] = (VkDescriptorImageInfo){VK_NULL_HANDLE, iv, VK_IMAGE_LAYOUT_GENERAL};
+            }
+            if (ti < 64) {
+                tex_sc[sg][ti][0] = pass_sx; tex_sc[sg][ti][1] = pass_sy;
+                tex_wh[sg][ti][0] = att >= 0 && att < 8 && pass_color_tex[att] ? pass_color_tex[att]->width : 0;
+                tex_wh[sg][ti][1] = att >= 0 && att < 8 && pass_color_tex[att] ? pass_color_tex[att]->height : 0;
             }
             w[n].pImageInfo = &ii[n];
         } else if (is_ubo(b->type) && b->binding < 17) {
@@ -7801,6 +7899,321 @@ void vk_pick_report(void) {
     pick.draws = 0;
 }
 
+static bool tex_in_list(NvnTexture *const *list, int count, const NvnTexture *t) {
+    for (int i = 0; i < count; i++) if (list[i] == t) return true;
+    return false;
+}
+
+static void add_disqualified_tex(NvnTexture *disq[96], int *ndisq, NvnTexture *t) {
+    if (!t || tex_in_list(disq, *ndisq, t) || *ndisq >= 96) return;
+    disq[(*ndisq)++] = t;
+}
+
+static uint64_t compute_fs_hash(uint64_t fs) {
+    static uint64_t last_fs, last_hash;
+    if (fs != last_fs) {
+        last_fs = fs;
+#ifdef __ANDROID__
+        // (memoized per shader address, checked against a copy of its bytes: the byte-serial hash on every
+        // fragment-shader change was ~40% of draw_)
+        // (1024 slots: BOTW draws a few hundred fragment shaders a frame, and 64 kept colliding)
+        static struct { uint64_t addr, hash; uint8_t code[0x200]; } fsh[1024];
+        const void *code = (const void *)(uintptr_t)(fs + 0x30);
+        unsigned i = (unsigned)((fs * 0x9E3779B97F4A7C15ull) >> 54);
+        if (!fs) last_hash = 0;
+        else if (fsh[i].addr == fs && !memcmp(fsh[i].code, code, 0x200)) last_hash = fsh[i].hash;
+        else {
+            last_hash = hmix(1469598103934665603ull, code, 0x200);
+            fsh[i].addr = fs, fsh[i].hash = last_hash;
+            memcpy(fsh[i].code, code, 0x200);
+        }
+#else
+        last_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
+#endif
+    }
+    return last_hash;
+}
+
+static int local_read_max_atts(void) {
+    uint32_t m = g_vk.props.limits.maxPerStageDescriptorInputAttachments < g_vk.props.limits.maxDescriptorSetInputAttachments
+               ? g_vk.props.limits.maxPerStageDescriptorInputAttachments
+               : g_vk.props.limits.maxDescriptorSetInputAttachments;
+    return m < 8u ? (int)m : 8;
+}
+
+static Prog *local_read_fallback_prog(ShaderKey *vkey, ShaderKey *fkey, bool keep) {
+    memset(fkey->local_read_slot, 0, sizeof fkey->local_read_slot);
+    memset(fkey->local_read_att, 0, sizeof fkey->local_read_att);
+    Prog *fb_pr = get_program(st.program, vkey, fkey, keep && urgent_shaders_on());
+    if (fb_pr && keep) wait_built_job(&fb_pr->state, &fb_pr->urgent, fb_pr, fb_pr->code[1]);
+    if (fb_pr && !atomic_load(&fb_pr->state)) stat_skipped_building++;
+    return (fb_pr && atomic_load(&fb_pr->state) == 1) ? fb_pr : NULL;
+}
+
+static bool local_read_pred_layout(uint32_t draw_w, bool elig[8], NvnTexture *pt[8], VkFormat pf[8],
+                                   uint32_t pew[8], uint32_t peh[8], uint32_t *minw_out, uint32_t *minh_out) {
+    memset(elig, 0, 8 * sizeof elig[0]);
+    memset(pt, 0, 8 * sizeof pt[0]);
+    memset(pf, 0, 8 * sizeof pf[0]);
+    memset(pew, 0, 8 * sizeof pew[0]);
+    memset(peh, 0, 8 * sizeof peh[0]);
+
+    bool using_cur_pass = in_pass && !st.rt_dirty && !(draw_w & pass_dup_null);
+    if (using_cur_pass) {
+        for (int i = 0; i < st.rt.ncolor && i < 8; i++) {
+            pt[i] = pass_color_tex[i];
+            elig[i] = pass_samples == 1 && pass_color_view[i] != VK_NULL_HANDLE && pass_color_tex[i] != NULL;
+            pf[i] = pass_color[i];
+            pew[i] = pass_att_w[i];
+            peh[i] = pass_att_h[i];
+        }
+        *minw_out = pass_w;
+        *minh_out = pass_h;
+        return true;
+    }
+
+    // Read-only CPU prediction of begin_pass() without creating images or mutating b->gpu_owned.
+    const NvnTexture *all[9];
+    const TexBackend *all_b[9];
+    int nall = 0;
+    for (int i = 0; i < st.rt.ncolor && i < 8; i++) {
+        if (!st.rt.color[i]) continue;
+        const TexBackend *tb = st.rt.color[i]->backend;
+        if (!tb || !tb->image) return false;
+        all[nall] = st.rt.color[i];
+        all_b[nall++] = tb;
+    }
+    if (st.rt.depth) {
+        const TexBackend *db = st.rt.depth->backend;
+        if (!db || !db->image) return false;
+        all[nall] = st.rt.depth;
+        all_b[nall++] = db;
+    }
+    for (int i = 0; i < nall; i++) {
+        if (!all_b[i]->scalable) continue;
+        uint8_t sg = all_b[i]->rs_group;
+        for (int k = 0; k < nall; k++) {
+            if (all[k]->width == all[i]->width && all[k]->height == all[i]->height &&
+                !all_b[k]->rs_group && sg && (all[k]->target == 1 || all[k]->target == 4) && all[k]->samples <= 1)
+                return false;
+        }
+        break;
+    }
+
+    VkFormat pvf_raw[8] = {0};
+    uint32_t plv[8] = {0}, ply[8] = {0};
+    uint32_t minw = UINT32_MAX, minh = UINT32_MAX;
+    for (int i = 0; i < st.rt.ncolor && i < 8; i++) {
+        NvnTexture *t = st.rt.color[i];
+        if (!t) continue;
+        const TexBackend *b = t->backend;
+        if (b->bc_vf && st.rt.has_cview[i]) return false;
+        bool view_fmt = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4);
+        if (view_fmt && vk_format(t->format) != b->format &&
+            rt_kind(st.rt.cview[i].format) != rt_kind(t->format))
+            continue;
+        if (b->base_type == VK_IMAGE_VIEW_TYPE_3D) return false;
+        uint32_t lv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
+        VkFormat vf = view_fmt && vk_format(t->format) == b->format
+                    ? vk_format(st.rt.cview[i].format) : b->format;
+        VkFormat view_fmt_raw = vk_sampled_format(t, &st.rt.cview[i], st.rt.has_cview[i] != 0);
+        uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
+        uint32_t rlv = lv > b->skip ? lv - b->skip : 0;
+        if (b->levels && rlv >= b->levels) rlv = b->levels - 1;
+        uint32_t rly = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 2) ? st.rt.cview[i].min_layer : 0;
+        if (b->layers && rly >= b->layers) rly = b->layers - 1;
+
+        pt[i] = t;
+        pvf_raw[i] = view_fmt_raw;
+        plv[i] = rlv;
+        ply[i] = rly;
+        elig[i] = lv == 0 && b->can_input_att && b->samples == 1 && !b->bc_vf &&
+                  vk_format(t->format) == b->format && view_fmt_raw == vf;
+        pf[i] = elig[i] ? vf : VK_FORMAT_UNDEFINED;
+        pew[i] = ew;
+        peh[i] = eh;
+        if (ew < minw) minw = ew;
+        if (eh < minh) minh = eh;
+    }
+    if (st.rt.depth) {
+        const TexBackend *db = st.rt.depth->backend;
+        if (renderer_format_is_depth(st.rt.depth->format)) {
+            uint32_t lv = st.rt.has_dview && (st.rt.dview.setmask & 1) ? st.rt.dview.base_level : 0;
+            uint32_t ew = level_extent(db->width, lv), eh = level_extent(db->height, lv);
+            if (ew < minw) minw = ew;
+            if (eh < minh) minh = eh;
+        }
+    }
+    if (minw == UINT32_MAX || minh == UINT32_MAX) return false;
+    for (int i = 1; i < st.rt.ncolor && i < 8; i++)
+        for (int j = 0; j < i && pt[i]; j++) {
+            if (pt[j] != pt[i] || pvf_raw[j] != pvf_raw[i] || plv[j] != plv[i] || ply[j] != ply[i]) continue;
+            bool wi = (st.channel_mask >> (i * 4)) & 0xF, wj = (st.channel_mask >> (j * 4)) & 0xF;
+            int drop = wj || !wi ? i : j;
+            pt[drop] = NULL;
+            elig[drop] = false;
+            pf[drop] = VK_FORMAT_UNDEFINED;
+        }
+    *minw_out = minw;
+    *minh_out = minh;
+    return true;
+}
+
+static void stage_fill_local_read(const Prog *ref_pr, uint64_t fs_hash, ShaderKey *fk) {
+    memset(fk->local_read_slot, 0, sizeof fk->local_read_slot);
+    memset(fk->local_read_att, 0, sizeof fk->local_read_att);
+    int max_lr = local_read_max_atts();
+    if (!g_vk.local_read || max_lr <= 0 || !ref_pr || !ref_pr->vi || !ref_pr->fi) return;
+    const ShaderInfo *vi = ref_pr->vi, *fi = ref_pr->fi;
+    if (!vi->screen_uv_mask || !fi->ntex || !st.rt.ncolor || !st.tpool || !st.spool) return;
+
+    static int fb_off = -1, fb_always = -1, fb_copy = -1;
+    if (fb_off < 0) {
+        fb_off = getenv("LARECOMP_NO_FEEDBACK") != NULL;
+        fb_always = getenv("LARECOMP_FEEDBACK_ALWAYS") != NULL;
+        fb_copy = getenv("LARECOMP_FEEDBACK_COPY") != NULL;
+    }
+    extern int vk_ab(const char *what);
+    if (fb_off || fb_always || fb_copy || AB("copy") == 1) return;
+
+    if (st.viewport[0][0] != 0.0f || st.viewport[0][1] != 0.0f ||
+        st.viewport[0][2] <= 0.0f || st.viewport[0][3] <= 0.0f) return;
+    extern float widescreen_effect_stretch(uint64_t fs_hash);
+    if (widescreen_effect_stretch(fs_hash) > 1.0f) return;
+    extern bool widescreen_ui_centred(void);
+    if (widescreen_ui_centred() && st.rt.color[0] && st.rt.color[0]->backend &&
+        ((const TexBackend *)st.rt.color[0]->backend)->rs_group == RS_OUT) return;
+    if (st.rt.color[0] && renderer_texture_presented(st.rt.color[0])) return;
+
+    bool elig[8];
+    NvnTexture *pt[8];
+    VkFormat pf[8];
+    uint32_t pew[8], peh[8], pred_minw = 0, pred_minh = 0;
+    const uint32_t draw_w = draw_writes(ref_pr);
+    if (!local_read_pred_layout(draw_w, elig, pt, pf, pew, peh, &pred_minw, &pred_minh)) return;
+
+    // Disqualify any attachment texture referenced by VS, non-local FS slots, aliases, or multiple active RT slots.
+    NvnTexture *disq[96];
+    int ndisq = 0;
+    if (scene_up.t) add_disqualified_tex(disq, &ndisq, scene_up.t);
+    for (int i = 0; i < st.rt.ncolor && i < 8; i++) {
+        if (!pt[i]) continue;
+        for (int j = i + 1; j < st.rt.ncolor && j < 8; j++)
+            if (pt[j] == pt[i]) add_disqualified_tex(disq, &ndisq, pt[i]);
+    }
+    for (int i = 0; i < vi->ntex && i < 64; i++) {
+        NvnTexture *vt = shader_texture_object(0, (ShaderTexture *)&vi->tex[i]);
+        if (vt) add_disqualified_tex(disq, &ndisq, vt);
+    }
+
+    int8_t cand_att[64];
+    NvnTexture *cand_tex[64];
+    for (int i = 0; i < 64; i++) { cand_att[i] = -1; cand_tex[i] = NULL; }
+
+    for (int i = 0; i < fi->ntex && i < 64; i++) {
+        const ShaderTexture *st_ = &fi->tex[i];
+        NvnTexEntry *e = shader_texture_entry(1, (ShaderTexture *)st_);
+        if (!e || !e->tex || !is_attachment_entry(e)) continue;
+        NvnTexture *t = e->tex;
+        if (naliases && alias_read(t) != t) {
+            add_disqualified_tex(disq, &ndisq, t);
+            add_disqualified_tex(disq, &ndisq, alias_read(t));
+            continue;
+        }
+        if (tex_in_list(disq, ndisq, t)) continue;
+
+        bool ok = st_->local_read_var >= 1u && st_->local_read_var <= 32u &&
+                  ((vi->screen_uv_mask >> (st_->local_read_var - 1u)) & 1u) != 0u &&
+                  !((fk->soft_linear >> i) & 1ull) &&
+                  st_->type == TEXTYPE_2D && st_->sampled && !st_->shadow && !st_->is_image && !st_->bindless;
+        int att = -1;
+        if (ok) {
+            for (int a = 0; a < st.rt.ncolor && a < 8; a++)
+                if (pt[a] == t && elig[a]) { att = a; break; }
+            if (att < 0) ok = false;
+        }
+        if (ok) {
+            uint32_t lv0 = e->has_view && (e->view.setmask & 1) ? e->view.base_level : 0;
+            uint32_t nlv = e->has_view && (e->view.setmask & 1) && e->view.num_levels ? e->view.num_levels
+                         : (t->levels > lv0 ? t->levels - lv0 : 1);
+            uint32_t ly0 = e->has_view && (e->view.setmask & 2) ? e->view.min_layer : 0;
+            uint32_t nly = e->has_view && (e->view.setmask & 2) && e->view.num_layers ? e->view.num_layers : 1;
+            if (lv0 != 0 || ly0 != 0 || nly != 1) ok = false;
+            if (!view_overlaps_rt(e, &st.rt.cview[att], st.rt.has_cview[att] != 0)) ok = false;
+            if (!vk_tex_can_input_att(t)) ok = false;
+            VkFormat sf = vk_sampled_format(t, &e->view, e->has_view);
+            if (sf == VK_FORMAT_UNDEFINED || sf != pf[att] || vk_format_is_int(pf[att])) ok = false;
+            if (!vk_view_is_identity_swizzle(t, &e->view, e->has_view)) ok = false;
+            if (!vk_view_is_identity_swizzle(t, &st.rt.cview[att], st.rt.has_cview[att] != 0)) ok = false;
+            if (pew[att] != pred_minw || peh[att] != pred_minh) ok = false;
+            if (fabsf((float)t->width - st.viewport[0][2]) > 1e-3f ||
+                fabsf((float)t->height - st.viewport[0][3]) > 1e-3f) ok = false;
+            if (ok) {
+                uint64_t h = shader_texture_handle(1, st_);
+                uint32_t tsc = (uint32_t)(h >> 20) & 0xFFF;
+                if (tsc >= (uint32_t)st.spool->count) ok = false;
+                else {
+                    const NvnSamplerDesc *sd = &((const NvnSamplerDesc *)st.spool->entries)[tsc];
+                    if (sd->compare_mode != 0) ok = false;
+                    if (nlv > 1 && (sd->lod_min > 0.0f || sd->lod_bias > 0.0f)) ok = false;
+                }
+            }
+        }
+        if (!ok) {
+            add_disqualified_tex(disq, &ndisq, t);
+            continue;
+        }
+        cand_att[i] = (int8_t)att;
+        cand_tex[i] = t;
+    }
+
+    int reserved = 0;
+    NvnTexture *acc[8] = {0};
+    int nacc = 0;
+    for (int i = 0; i < fi->ntex && i < 64; i++) {
+        if (cand_att[i] < 0 || tex_in_list(disq, ndisq, cand_tex[i]) || tex_in_list(acc, nacc, cand_tex[i])) continue;
+        int need = 0;
+        for (int j = i; j < fi->ntex && j < 64; j++)
+            if (cand_att[j] >= 0 && cand_tex[j] == cand_tex[i]) need++;
+        if (reserved + need > max_lr) {
+            add_disqualified_tex(disq, &ndisq, cand_tex[i]);
+            continue;
+        }
+        acc[nacc++] = cand_tex[i];
+        reserved += need;
+    }
+
+    int n = 0;
+    for (int i = 0; i < fi->ntex && i < 64 && n < 8; i++) {
+        if (cand_att[i] < 0 || !tex_in_list(acc, nacc, cand_tex[i])) continue;
+        fk->local_read_slot[n] = (uint8_t)(i + 1);
+        fk->local_read_att[n] = (uint8_t)cand_att[i];
+        n++;
+    }
+}
+
+static void update_draw_snapshots_ex(uint32_t draw_w, bool check_dup) {
+    snap_reason = "draw-depthwrite";
+    if (st.rt.depth && st.ds[0] && st.ds[1]) {
+        bool fb = false;
+        for (int k = 0; k < nfeedback; k++) fb |= feedback_tex[k] == st.rt.depth;
+        for (int k = 0; k < ninplace; k++) fb |= inplace_tex[k] == st.rt.depth;
+        if (fb) snapshots_mark_fb_dirty(st.rt.depth);
+        else snapshots_invalidate(st.rt.depth);
+    }
+    if (check_dup && in_pass && (draw_w & pass_dup_null)) st.rt_dirty = true, prof_dirty[2]++;  // (writes a slot begin_pass left unbound)
+    snap_reason = "draw-colorwrite";
+    for (int i = 0; i < st.rt.ncolor; i++) {
+        if ((draw_w >> i) & 1) {
+            bool fb = false;
+            for (int k = 0; k < nfeedback; k++) fb |= feedback_tex[k] == st.rt.color[i];
+            for (int k = 0; k < ninplace; k++) fb |= inplace_tex[k] == st.rt.color[i];
+            if (fb) snapshots_mark_fb_dirty(st.rt.color[i]);
+            else snapshots_invalidate(st.rt.color[i]);
+        }
+    }
+}
+
 static void draw(CmdRec *r, bool indexed) {
     PROF_T0();
     draw_(r, indexed);
@@ -7809,6 +8222,7 @@ static void draw(CmdRec *r, bool indexed) {
 static uint64_t prof_tp_;
 static void draw_(CmdRec *r, bool indexed) {
     if (prof) prof_tp_ = SDL_GetTicksNS();
+    scene_up.t = NULL;
     if (!st.program) { stat_skipped++; return; }
     ShaderKey vkey = {0}, fkey = {0};
     vkey.glsl = fkey.glsl = 1;
@@ -7841,16 +8255,32 @@ static void draw_(CmdRec *r, bool indexed) {
         }
         keep = kkeep;
     }
+    uint64_t fs = st.program->stages[1].code_addr;
+    uint64_t last_hash = compute_fs_hash(fs);
     ShaderKey vbase = vkey, fbase = fkey;
-    bool masks_done = false;
-    if (vk_any_format_no_linear() && last_prog && atomic_load(&last_prog->state) == 1 &&
-        last_prog->code[0] == st.program->stages[0].code_addr && last_prog->code[1] == st.program->stages[1].code_addr) {
+    bool masks_done = false, lr_done = false;
+    bool last_prog_ok = last_prog && atomic_load(&last_prog->state) == 1 &&
+                        last_prog->code[0] == st.program->stages[0].code_addr &&
+                        last_prog->code[1] == fs &&
+                        last_prog->vkey.flip_y == vkey.flip_y &&
+                        last_prog->vkey.flip_x == vkey.flip_x;
+    if (last_prog_ok && vk_any_format_no_linear()) {
         stage_fill_soft_linear(0, last_prog->vi, &vkey);
         stage_fill_soft_linear(1, last_prog->fi, &fkey);
         masks_done = true;
     }
+    if (last_prog_ok && g_vk.local_read && last_prog->vi->screen_uv_mask) {
+        stage_fill_local_read(last_prog, last_hash, &fkey);
+        lr_done = true;
+    }
     Prog *pr = get_program(st.program, &vkey, &fkey, keep && urgent_shaders_on());
     if (pr && keep) wait_built_job(&pr->state, &pr->urgent, pr, pr->code[1]);
+    if (lr_done && fkey.local_read_slot[0] && (!pr || atomic_load(&pr->state) != 1)) {
+        memset(fkey.local_read_slot, 0, sizeof fkey.local_read_slot);
+        memset(fkey.local_read_att, 0, sizeof fkey.local_read_att);
+        pr = get_program(st.program, &vkey, &fkey, keep && urgent_shaders_on());
+        if (pr && keep) wait_built_job(&pr->state, &pr->urgent, pr, pr->code[1]);
+    }
     if (masks_done && (vkey.soft_linear || fkey.soft_linear) && (!pr || atomic_load(&pr->state) == 2)) {
         vkey = vbase;
         fkey = fbase;
@@ -7871,29 +8301,16 @@ static void draw_(CmdRec *r, bool indexed) {
             if (sl_state == 1) { vkey = vk2; fkey = fk2; pr = sl; }
         }
     }
-    {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
-        static uint64_t last_fs, last_hash;
-        uint64_t fs = st.program->stages[1].code_addr;
-        if (fs != last_fs) {
-            last_fs = fs;
-#ifdef __ANDROID__
-            // (memoized per shader address, checked against a copy of its bytes: the byte-serial hash on every
-            // fragment-shader change was ~40% of draw_)
-            // (1024 slots: BOTW draws a few hundred fragment shaders a frame, and 64 kept colliding)
-            static struct { uint64_t addr, hash; uint8_t code[0x200]; } fsh[1024];
-            const void *code = (const void *)(uintptr_t)(fs + 0x30);
-            unsigned i = (unsigned)((fs * 0x9E3779B97F4A7C15ull) >> 54);
-            if (!fs) last_hash = 0;
-            else if (fsh[i].addr == fs && !memcmp(fsh[i].code, code, 0x200)) last_hash = fsh[i].hash;
-            else {
-                last_hash = hmix(1469598103934665603ull, code, 0x200);
-                fsh[i].addr = fs, fsh[i].hash = last_hash;
-                memcpy(fsh[i].code, code, 0x200);
-            }
-#else
-            last_hash = fs ? hmix(1469598103934665603ull, (const void *)(uintptr_t)(fs + 0x30), 0x200) : 0;
-#endif
+    if (!lr_done && g_vk.local_read && pr->vi->screen_uv_mask) {
+        ShaderKey fk2 = fkey;
+        stage_fill_local_read(pr, last_hash, &fk2);
+        if (fk2.local_read_slot[0]) {
+            Prog *lr = get_program(st.program, &vkey, &fk2, keep && urgent_shaders_on());
+            if (lr && keep) wait_built_job(&lr->state, &lr->urgent, lr, lr->code[1]);
+            if (lr && atomic_load(&lr->state) == 1) { fkey = fk2; pr = lr; }
         }
+    }
+    {   // fragment-shader hash: interior backdrop detection (widescreen), skip lists, item twinkle (renderer.m)
         static uint64_t skip[128];  // (bisecting a frame's shaders: many at once)
         static int nskip = -1;
         if (nskip < 0) {
@@ -8173,33 +8590,80 @@ static void draw_(CmdRec *r, bool indexed) {
     alias_draw_check();
     // (the attachments this draw writes: once a draw - the targets and masks don't change before it is recorded; three
     // computations of it were ~8% of the render thread on the POCO F7 Ultra)
-    const uint32_t draw_w = draw_writes(pr);
-    resolve_feedback(pr, draw_w);
-    scene_upscale(pr, r);
-    snap_reason = "draw-depthwrite";
-    if (st.rt.depth && st.ds[0] && st.ds[1]) {
-        bool fb = false;
-        for (int k = 0; k < nfeedback; k++) fb |= feedback_tex[k] == st.rt.depth;
-        for (int k = 0; k < ninplace; k++) fb |= inplace_tex[k] == st.rt.depth;
-        if (fb) snapshots_mark_fb_dirty(st.rt.depth);
-        else snapshots_invalidate(st.rt.depth);
-    }
-    if (in_pass && (draw_w & pass_dup_null)) st.rt_dirty = true, prof_dirty[2]++;  // (writes a slot begin_pass left unbound)
-    snap_reason = "draw-colorwrite";
-    for (int i = 0; i < st.rt.ncolor; i++) {
-        if ((draw_w >> i) & 1) {
-            bool fb = false;
-            for (int k = 0; k < nfeedback; k++) fb |= feedback_tex[k] == st.rt.color[i];
-            for (int k = 0; k < ninplace; k++) fb |= inplace_tex[k] == st.rt.color[i];
-            if (fb) snapshots_mark_fb_dirty(st.rt.color[i]);
-            else snapshots_invalidate(st.rt.color[i]);
+    uint32_t draw_w = draw_writes(pr);
+    uint8_t lr_read_mask = 0;
+    if (pr->fkey.local_read_slot[0]) {
+        bool pre_elig[8];
+        NvnTexture *pre_pt[8];
+        VkFormat pre_pf[8];
+        uint32_t pre_ew[8], pre_eh[8], pre_mw = 0, pre_mh = 0;
+        bool lr_pre_ok = local_read_pred_layout(draw_w, pre_elig, pre_pt, pre_pf, pre_ew, pre_eh, &pre_mw, &pre_mh);
+        for (int k = 0; lr_pre_ok && k < 8 && pr->fkey.local_read_slot[k]; k++) {
+            int ts = (int)pr->fkey.local_read_slot[k] - 1;
+            int att = (int)pr->fkey.local_read_att[k];
+            if (ts >= pr->fi->ntex || att >= st.rt.ncolor || !pre_elig[att] ||
+                pre_pt[att] != st.rt.color[att] || pre_ew[att] != pre_mw || pre_eh[att] != pre_mh)
+                lr_pre_ok = false;
+        }
+        if (!lr_pre_ok) {
+            Prog *fb_pr = local_read_fallback_prog(&vkey, &fkey, keep);
+            if (!fb_pr) { stat_skipped++; skip_note("shader"); return; }
+            pr = fb_pr;
+            pipeline_dirty = true;
+            draw_w = draw_writes(pr);
         }
     }
+    resolve_feedback(pr, draw_w);
+    scene_upscale(pr, r);
+    if (pr->fkey.local_read_slot[0] && scene_up.t) {
+        bool clash = false;
+        for (int k = 0; k < 8 && pr->fkey.local_read_slot[k]; k++) {
+            int att = (int)pr->fkey.local_read_att[k];
+            if (att < st.rt.ncolor && st.rt.color[att] == scene_up.t) { clash = true; break; }
+        }
+        if (clash) {
+            Prog *fb_pr = local_read_fallback_prog(&vkey, &fkey, keep);
+            if (!fb_pr) { stat_skipped++; skip_note("shader"); return; }
+            pr = fb_pr;
+            pipeline_dirty = true;
+            draw_w = draw_writes(pr);
+            resolve_feedback(pr, draw_w);
+        }
+    }
+    if (!pr->fkey.local_read_slot[0]) update_draw_snapshots_ex(draw_w, true);
+    else if (in_pass && (draw_w & pass_dup_null)) st.rt_dirty = true, prof_dirty[2]++;
 #ifdef __ANDROID__
     if (atomic_load_explicit(&gcopy_mode, memory_order_relaxed) && (pr->vi->uses_gmem_store || pr->fi->uses_gmem_store) && (pr->vi->uses_gmem_map || pr->fi->uses_gmem_map))
         gres_premerge((pr->vi->uses_gmem_map ? 1u : 0u) | (pr->fi->uses_gmem_map ? 2u : 0u));  // (before the pass opens)
 #endif
     begin_pass();
+    if (pr->fkey.local_read_slot[0]) {
+        bool lr_ok = true;
+        for (int k = 0; k < 8 && pr->fkey.local_read_slot[k]; k++) {
+            int ts = (int)pr->fkey.local_read_slot[k] - 1;
+            int att = (int)pr->fkey.local_read_att[k];
+            if (ts >= pr->fi->ntex || att >= (int)pass_ncolor || !pass_color_view[att] ||
+                pass_color_tex[att] != st.rt.color[att] || pass_color_tex[att] == scene_up.t ||
+                pass_att_w[att] != pass_w || pass_att_h[att] != pass_h) {
+                lr_ok = false;
+                break;
+            }
+            lr_read_mask |= (uint8_t)(1u << att);
+        }
+        if (!lr_ok) {
+            Prog *fb_pr = local_read_fallback_prog(&vkey, &fkey, keep);
+            if (!fb_pr) { vk_end_pass(); st.rt_dirty = true; stat_skipped++; skip_note("shader"); return; }
+            pr = fb_pr;
+            pipeline_dirty = true;
+            lr_read_mask = 0;
+            draw_w = draw_writes(pr);
+            resolve_feedback(pr, draw_w);
+            update_draw_snapshots_ex(draw_w, true);
+            begin_pass();
+        } else {
+            update_draw_snapshots_ex(draw_w, false);
+        }
+    }
     ninplace = 0;
     VkCommandBuffer cb = vk_cmd();
 
@@ -8487,6 +8951,14 @@ static void draw_(CmdRec *r, bool indexed) {
     VkDescriptorImageInfo fii[64];
     uint64_t prof_tx_ = prof ? SDL_GetTicksNS() : 0;
     for (int i = 0; i < pr->fi->ntex && i < 64; i++) {
+        int lr_att = pr->fkey.local_read_slot[0] ? vk_local_read_slot_att(pr->fkey.local_read_slot, pr->fkey.local_read_att, i) : -1;
+        if (lr_att >= 0) {
+            fii[i] = (VkDescriptorImageInfo){VK_NULL_HANDLE, pass_color_view[lr_att], VK_IMAGE_LAYOUT_GENERAL};
+            tex_sc[1][i][0] = pass_sx; tex_sc[1][i][1] = pass_sy;
+            tex_wh[1][i][0] = lr_att < 8 && pass_color_tex[lr_att] ? pass_color_tex[lr_att]->width : 0;
+            tex_wh[1][i][1] = lr_att < 8 && pass_color_tex[lr_att] ? pass_color_tex[lr_att]->height : 0;
+            continue;
+        }
         float sc[2]; uint32_t wh[2];
         texture_info(1, pr->fi, i, &fii[i], sc, wh);
         tex_sc[1][i][0] = sc[0]; tex_sc[1][i][1] = sc[1]; tex_wh[1][i][0] = wh[0]; tex_wh[1][i][1] = wh[1];
@@ -8568,6 +9040,7 @@ static void draw_(CmdRec *r, bool indexed) {
     uint64_t prof_t1_ = prof ? SDL_GetTicksNS() : 0;
     VkDescriptorSet fset = stage_set(pr, pr->set_layout[1], 1, 1, pr->fi, rs0, tint, 0, 0, 0, fii, dyn + ndv, &ndf);
     up_fix.sx = 0;
+    scene_up.t = NULL;
     if (prof) prof_sets += SDL_GetTicksNS() - prof_t1_;
     VkDescriptorSet sets[2] = {vset, fset};
     // (the same sets and offsets as the previous draw - the set cache, stage_set: not bound again)
@@ -8714,6 +9187,14 @@ static void draw_(CmdRec *r, bool indexed) {
 
     if (prof) prof_vtx += SDL_GetTicksNS() - prof_t2_;
     // ---- draw
+    if (g_vk.local_read) {
+        uint8_t draw_w_color = (uint8_t)(draw_w & 0xFFu);
+        if ((lr_read_mask & pass_local_dirty) || (draw_w_color & pass_local_read_mask))
+            emit_local_read_barrier(cb);
+        pass_local_read_mask |= lr_read_mask;
+        pass_local_dirty |= draw_w_color;
+        if (lr_read_mask) stat_local_reads++;
+    }
     if (!use_index) vkCmdDraw(cb, count, inst, first, base_inst);
     else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
     if (g_debug_frame) pick_after_draw();

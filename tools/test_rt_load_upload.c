@@ -158,7 +158,7 @@ int plat_written_pages(uint64_t lo, uint64_t size, uint64_t *pages, int max, uin
 
 // ---- byte-backed mock Vulkan GPU & hazard validator
 typedef struct {
-    VkImage handle; uint32_t w, h, bpb; uint8_t *px; VkImageLayout layout;
+    VkImage handle; uint32_t w, h, bpb; VkImageUsageFlags usage; uint8_t *px; VkImageLayout layout;
     VkPipelineStageFlags2 pending_write_stage, visible_dst_stage, pending_read_stage;
     VkAccessFlags2 pending_write_access, visible_dst_access;
 } MockImg;
@@ -168,7 +168,7 @@ enum { MOP_CLR = 1, MOP_B2I, MOP_COPY, MOP_PASS, MOP_DRAW, MOP_SMP, MOP_END, MOP
 typedef struct {
     int op; MockImg *img, *dst_img, *att[8], *bar_img; MockBuf *buf; VkBufferImageCopy bic; VkImageCopy ic;
     uint32_t rw, rh, ncol, row0, nrows; VkAttachmentLoadOp lop[8]; uint16_t val16, *smp16;
-    bool has_mem, has_img; VkImageLayout bo, bn;
+    bool has_mem, has_img; VkImageLayout bo, bn; VkDependencyFlags bflags;
     VkPipelineStageFlags2 mss, mds, iss, ids; VkAccessFlags2 msa, mda, isa, ida;
 } MockOp;
 typedef struct { VkCommandBuffer handle; MockOp ops[512]; int nops; } MockCb;
@@ -184,6 +184,7 @@ VkResult vmaCreateImage(VmaAllocator a, const VkImageCreateInfo *ci, const VmaAl
     (void)a, (void)ai, (void)in;
     MockImg *x = &m_imgs[n_imgs++]; memset(x, 0, sizeof *x);
     x->w = ci->extent.width; x->h = ci->extent.height; x->bpb = ci->format == VK_FORMAT_R16_UNORM ? 2 : 8;
+    x->usage = ci->usage;
     x->layout = ci->initialLayout; x->px = calloc((size_t)x->w * x->h, x->bpb); memset(x->px, 0xDD, (size_t)x->w * x->h * x->bpb);
     x->handle = (VkImage)(uintptr_t)(0x10000 + n_imgs); *im = x->handle; *m = (VmaAllocation)x; return VK_SUCCESS;
 }
@@ -266,7 +267,7 @@ static VKAPI_ATTR void VKAPI_CALL m_copy_img(VkCommandBuffer cb, VkImage s, VkIm
 }
 static VKAPI_ATTR void VKAPI_CALL m_bar2(VkCommandBuffer cb, const VkDependencyInfo *di) {
     stat_bar++; if (cb == subs[cur_sub].upload) stat_up_bar++;
-    MockCb *c = find_cb(cb); MockOp op = {.op = MOP_BAR};
+    MockCb *c = find_cb(cb); MockOp op = {.op = MOP_BAR, .bflags = di ? di->dependencyFlags : 0};
     if (di && di->memoryBarrierCount) {
         const VkMemoryBarrier2 *mb = &di->pMemoryBarriers[0];
         op.has_mem = true; op.mss = mb->srcStageMask; op.mds = mb->dstStageMask; op.msa = mb->srcAccessMask; op.mda = mb->dstAccessMask;
@@ -374,9 +375,20 @@ static VKAPI_ATTR void VKAPI_CALL n_cat(VkCommandBuffer c, uint32_t na, const Vk
 static VKAPI_ATTR void VKAPI_CALL n_rqp(VkCommandBuffer c, VkQueryPool q, uint32_t f, uint32_t n) { (void)c, (void)q, (void)f, (void)n; }
 static VKAPI_ATTR void VKAPI_CALL n_ts2(VkCommandBuffer c, VkPipelineStageFlags2 s, VkQueryPool q, uint32_t n) { (void)c, (void)s, (void)q, (void)n; }
 static VKAPI_ATTR VkResult VKAPI_CALL n_gqp(VkDevice d, VkQueryPool q, uint32_t f, uint32_t n, size_t s, void *p, VkDeviceSize st2, VkQueryResultFlags fl) { (void)d, (void)q, (void)f, (void)n, (void)s, (void)p, (void)st2, (void)fl; return VK_NOT_READY; }
-static VKAPI_ATTR VkResult VKAPI_CALL n_cdp(VkDevice d, const VkDescriptorPoolCreateInfo *c, const VkAllocationCallbacks *a, VkDescriptorPool *p) { (void)d, (void)c, (void)a; *p = VK_NULL_HANDLE; return VK_SUCCESS; }
-static VKAPI_ATTR VkResult VKAPI_CALL n_ads(VkDevice d, const VkDescriptorSetAllocateInfo *c, VkDescriptorSet *s) { (void)d, (void)c, (void)s; return VK_SUCCESS; }
-static VKAPI_ATTR void VKAPI_CALL n_uds(VkDevice d, uint32_t wc, const VkWriteDescriptorSet *w, uint32_t cc, const VkCopyDescriptorSet *c) { (void)d, (void)wc, (void)w, (void)cc, (void)c; }
+static struct { uint32_t binding; VkDescriptorType type; VkDescriptorImageInfo ii; } last_wds[32];
+static uint32_t n_last_wds;
+static VKAPI_ATTR VkResult VKAPI_CALL n_cdp(VkDevice d, const VkDescriptorPoolCreateInfo *c, const VkAllocationCallbacks *a, VkDescriptorPool *p) { (void)d, (void)c, (void)a; *p = (VkDescriptorPool)(uintptr_t)0x50001u; return VK_SUCCESS; }
+static VKAPI_ATTR VkResult VKAPI_CALL n_ads(VkDevice d, const VkDescriptorSetAllocateInfo *c, VkDescriptorSet *s) { (void)d, (void)c; for (uint32_t i = 0; i < c->descriptorSetCount; i++) s[i] = (VkDescriptorSet)(uintptr_t)(0x60001u + i); return VK_SUCCESS; }
+static VKAPI_ATTR void VKAPI_CALL n_uds(VkDevice d, uint32_t wc, const VkWriteDescriptorSet *w, uint32_t cc, const VkCopyDescriptorSet *c) {
+    (void)d, (void)cc, (void)c;
+    n_last_wds = wc < 32 ? wc : 32;
+    for (uint32_t i = 0; i < n_last_wds; i++) {
+        last_wds[i].binding = w[i].dstBinding;
+        last_wds[i].type = w[i].descriptorType;
+        if (w[i].pImageInfo) last_wds[i].ii = *w[i].pImageInfo;
+        else memset(&last_wds[i].ii, 0, sizeof last_wds[i].ii);
+    }
+}
 static VKAPI_ATTR VkResult VKAPI_CALL n_dsl(VkDevice d, const VkDescriptorSetLayoutCreateInfo *c, const VkAllocationCallbacks *a, VkDescriptorSetLayout *l) { (void)d, (void)c, (void)a; *l = VK_NULL_HANDLE; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL n_pl(VkDevice d, const VkPipelineLayoutCreateInfo *c, const VkAllocationCallbacks *a, VkPipelineLayout *l) { (void)d, (void)c, (void)a; *l = VK_NULL_HANDLE; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL n_gp(VkDevice d, VkPipelineCache pc, uint32_t n, const VkGraphicsPipelineCreateInfo *c, const VkAllocationCallbacks *a, VkPipeline *p) { (void)d, (void)pc, (void)n, (void)c, (void)a, (void)p; return VK_SUCCESS; }
@@ -1022,6 +1034,263 @@ int main(void) {
                ok_nosnap_gcopy, ok_nosnap_placed, ok_ab_placed, ok_ab_gcopy, ok_non_mali_off,
                ok_placed_shortcircuit, ok_retire_drop, ok_seqlock_mt, ok_cbwin_off, ok_reset, ok_non_cbwin_zero_churn);
     check("cbwin integration: base reuse, in/out updates, b2b/seqlock, retire, mt stress, #453, short-circuit, non-Mali off, zero non-cbwin churn, and reset", ok_cb_all);
+    }
+
+    // 10. Tile-local read (VK_KHR_dynamic_rendering_local_read): 0 copies/breaks, BY_REGION_BIT RAW/WAR/clear, guards & reset.
+    {
+        s_frame_counter = 600;
+        g_vk.local_read = true;
+        g_vk.props.limits.maxPerStageDescriptorInputAttachments = 8;
+        g_vk.props.limits.maxDescriptorSetInputAttachments = 8;
+
+        // 10a. Unowned wb_eligible RTs: stage_fill_local_read must NOT create backend or set gpu_owned prematurely,
+        // and subsequent LOAD_OP_LOAD must still upload new CPU writes via vk_tex_upload_for_load().
+        NvnTexture tu0 = make_tex(0x2a, 64, 64, 0x40, 0x1111);  // backend == NULL
+        NvnTexture tu1 = make_tex(0x2a, 64, 64, 0x40, 0x1111);  // sampled earlier, still !gpu_owned
+        vk_tex(&tu1, false); renderer_flush();
+        write_texel(&tu1, 10, 40, 0x25ab);
+        NvnTexEntry u_ents[3] = {[1] = {.tex = &tu0}, [2] = {.tex = &tu1}};
+        NvnDescPool u_tpool = {.count = 3, .entries = u_ents};
+        NvnSamplerDesc lr_smps[2] = {[0] = {.compare_mode = 0, .lod_min = 0.0f, .lod_bias = 0.0f},
+                                     [1] = {.compare_mode = 1}};
+        NvnDescPool lr_spool = {.count = 2, .entries = lr_smps};
+        ShaderInfo u_vs = {.stage = STAGE_VERTEX, .screen_uv_mask = 0x1u};
+        ShaderInfo u_fs = {
+            .stage = STAGE_FRAGMENT, .ntex = 1,
+            .tex = {[0] = {.handle_offset = 0x20, .type = TEXTYPE_2D, .sampled = true, .local_read_var = 1}},
+        };
+        Prog u_pr = {.vi = &u_vs, .fi = &u_fs, .fs_out_mask = 0xF};
+        ShaderKey fk_un = {0};
+
+        reset_pass(&tu0, NULL, 0xF, NULL);
+        st.viewport[0][2] = 64.0f; st.viewport[0][3] = 64.0f;
+        st.tpool = &u_tpool; st.spool = &lr_spool; st.tex[1][0] = 1ull;
+        stage_fill_local_read(&u_pr, 0x1234ull, &fk_un);
+        bool ok_unowned0 = (tu0.backend == NULL) && !fk_un.local_read_slot[0];
+
+        reset_pass(&tu1, NULL, 0xF, NULL);
+        st.viewport[0][2] = 64.0f; st.viewport[0][3] = 64.0f;
+        st.tpool = &u_tpool; st.spool = &lr_spool; st.tex[1][0] = 2ull;
+        memset(&fk_un, 0, sizeof fk_un);
+        stage_fill_local_read(&u_pr, 0x1234ull, &fk_un);
+        bool ok_unowned1_nomut = !((TexBackend *)tu1.backend)->gpu_owned &&
+                                 fk_un.local_read_slot[0] == 1 && fk_un.local_read_att[0] == 0;
+        stat_b2i = 0;
+        begin_pass(); vk_end_pass(); renderer_flush();
+        bool ok_unowned1_upload = ((TexBackend *)tu1.backend)->gpu_owned && (stat_b2i >= 1) &&
+                                  read_texel0(&tu1, 10, 40) == 0x25ab;
+
+        // 10b. Active pass + multi-slot tests
+        NvnTexture tc0 = make_tex(0x25, 64, 64, 0x0, 0x1111);  // RGBA8_UNORM
+        NvnTexture tc1 = make_tex(0x25, 64, 64, 0x0, 0x2222);
+        vk_tex(&tc0, false); vk_tex(&tc1, false); renderer_flush();
+        bool ok_att_flag = vk_tex_can_input_att(&tc0) && vk_tex_can_input_att(&tc1);
+
+        reset_pass(&tc0, &tc1, 0xFF, NULL);
+        st.viewport[0][0] = 0.0f; st.viewport[0][1] = 0.0f; st.viewport[0][2] = 64.0f; st.viewport[0][3] = 64.0f;
+        NvnTexEntry lr_ents[3] = {[1] = {.tex = &tc0}, [2] = {.tex = &tc1}};
+        NvnDescPool lr_tpool = {.count = 3, .entries = lr_ents};
+        st.tpool = &lr_tpool; st.spool = &lr_spool;
+        st.tex[1][0] = (1ull << 32) | 1ull;  // tic=1 (tc0), tsc=0
+        st.tex[1][1] = (1ull << 32) | 2ull;  // tic=2 (tc1), tsc=0
+
+        ShaderInfo lr_vs = {.stage = STAGE_VERTEX, .screen_uv_mask = 0x1u};
+        ShaderInfo lr_fs = {
+            .stage = STAGE_FRAGMENT, .ntex = 2,
+            .tex = {
+                [0] = {.handle_offset = 0x20, .type = TEXTYPE_2D, .sampled = true, .local_read_var = 1},
+                [1] = {.handle_offset = 0x28, .type = TEXTYPE_2D, .sampled = true, .local_read_var = 1},
+            },
+        };
+        Prog base_pr = {.vi = &lr_vs, .fi = &lr_fs, .fs_out_mask = 0xFF};
+
+        // Predict before opening pass (must leave gpu_owned false on both)
+        ShaderKey fk_pre = {0};
+        stage_fill_local_read(&base_pr, 0x1234ull, &fk_pre);
+        bool ok_pre_fill = !((TexBackend *)tc0.backend)->gpu_owned && !((TexBackend *)tc1.backend)->gpu_owned &&
+                           fk_pre.local_read_slot[0] == 1 && fk_pre.local_read_att[0] == 0 &&
+                           fk_pre.local_read_slot[1] == 2 && fk_pre.local_read_att[1] == 1;
+
+        begin_pass();
+        pass_written = 0x3u;
+        pass_local_dirty = 0x3u;
+        pass_local_read_mask = 0;
+
+        ShaderKey fk = {0};
+        stage_fill_local_read(&base_pr, 0x1234ull, &fk);
+        bool ok_fill = fk.local_read_slot[0] == 1 && fk.local_read_att[0] == 0 &&
+                       fk.local_read_slot[1] == 2 && fk.local_read_att[1] == 1 && !fk.local_read_slot[2];
+
+        // soft_linear bit 0 excludes slot 0 while keeping slot 1
+        ShaderKey fk_sl = {.soft_linear = 1ull};
+        stage_fill_local_read(&base_pr, 0x1234ull, &fk_sl);
+        bool ok_sl_guard = fk_sl.local_read_slot[0] == 2 && fk_sl.local_read_att[0] == 1 && !fk_sl.local_read_slot[1];
+
+        // maxInputAttachments limits cap local_read slot count cleanly without splitting interleaved same-texture slots {B, A, B}.
+        ShaderKey fk_cap = {0};
+        g_vk.props.limits.maxPerStageDescriptorInputAttachments = 1;
+        stage_fill_local_read(&base_pr, 0x1234ull, &fk_cap);
+        bool ok_cap1 = fk_cap.local_read_slot[0] == 1 && !fk_cap.local_read_slot[1];
+        g_vk.props.limits.maxPerStageDescriptorInputAttachments = 0;
+        stage_fill_local_read(&base_pr, 0x1234ull, &fk_cap);
+        bool ok_cap0 = !fk_cap.local_read_slot[0];
+
+        // Interleaved {B=tc1, A=tc0, B=tc1} with max_lr=2 must keep BOTH B slots (1 and 3) all-or-nothing, excluding A (slot 2).
+        ShaderInfo inter_fs = {
+            .stage = STAGE_FRAGMENT, .ntex = 3,
+            .tex = {
+                [0] = {.handle_offset = 0x20, .type = TEXTYPE_2D, .sampled = true, .local_read_var = 1},
+                [1] = {.handle_offset = 0x28, .type = TEXTYPE_2D, .sampled = true, .local_read_var = 1},
+                [2] = {.handle_offset = 0x30, .type = TEXTYPE_2D, .sampled = true, .local_read_var = 1},
+            },
+        };
+        Prog inter_pr = {.vi = &lr_vs, .fi = &inter_fs, .fs_out_mask = 0xFF};
+        st.tex[1][0] = 2ull; st.tex[1][1] = 1ull; st.tex[1][2] = 2ull;  // {tc1, tc0, tc1}
+        g_vk.props.limits.maxPerStageDescriptorInputAttachments = 2;
+        stage_fill_local_read(&inter_pr, 0x1234ull, &fk_cap);
+        bool ok_cap_inter = fk_cap.local_read_slot[0] == 1 && fk_cap.local_read_att[0] == 1 &&
+                            fk_cap.local_read_slot[1] == 3 && fk_cap.local_read_att[1] == 1 &&
+                            !fk_cap.local_read_slot[2];
+        st.tex[1][0] = (1ull << 32) | 1ull; st.tex[1][1] = (1ull << 32) | 2ull; st.tex[1][2] = 0ull;
+        g_vk.props.limits.maxPerStageDescriptorInputAttachments = 8;
+
+        // Non-local or viewport-mismatched guards fail closed cleanly.
+        ShaderKey fk_guard = {0};
+        st.viewport[0][0] = 4.0f;
+        stage_fill_local_read(&base_pr, 0x1234ull, &fk_guard);
+        bool ok_vp_guard = !fk_guard.local_read_slot[0];
+        st.viewport[0][0] = 0.0f;
+
+        // Swizzle / alpha-one / reduced-channel formats & view format override.
+        NvnTexture t_b10 = {.target = 1, .format = 0x3F, .swizzle = {2, 3, 4, 1}};
+        NvnTexture t_r32 = {.target = 1, .format = 0x0A, .swizzle = {2, 0, 0, 1}};
+        NvnTextureView sw_view = {.setmask = 8, .swizzle = {2, 2, 4, 5}};
+        NvnTextureView fmt_ov = {.setmask = 4 | 8, .format = 0x19, .swizzle = {2, 3, 4, 5}};  // RGB8 alpha_one
+        bool ok_swz_guard = vk_view_is_identity_swizzle(&tc0, NULL, false) &&
+                            !vk_view_is_identity_swizzle(&tc0, &sw_view, true) &&
+                            vk_view_is_identity_swizzle(&t_b10, NULL, false) &&
+                            vk_view_is_identity_swizzle(&t_r32, NULL, false) &&
+                            !vk_view_is_identity_swizzle(&tc0, &fmt_ov, true);
+
+        // Compare sampler disqualifies texture tc1 cleanly while tc0 stays local-read.
+        st.tex[1][1] = (1ull << 32) | (1ull << 20) | 2ull;
+        stage_fill_local_read(&base_pr, 0x1234ull, &fk_guard);
+        bool ok_smp_guard = fk_guard.local_read_slot[0] == 1 && fk_guard.local_read_att[0] == 0 && !fk_guard.local_read_slot[1];
+        st.tex[1][1] = (1ull << 32) | 2ull;
+
+        // pass_dup_null & multi-slot NvnTexture parity across !using_cur_pass and using_cur_pass.
+        vk_end_pass();
+        reset_pass(&tc0, &tc0, 0x0F, NULL);  // same view in slots 0/1, only slot 0 written -> slot 1 dropped
+        st.viewport[0][2] = 64.0f; st.viewport[0][3] = 64.0f;
+        st.tpool = &lr_tpool; st.spool = &lr_spool; st.tex[1][0] = 1ull; st.tex[1][1] = 1ull;
+        ShaderKey fk_dup_pre = {0}, fk_dup_cur = {0};
+        stage_fill_local_read(&u_pr, 0x1234ull, &fk_dup_pre);
+        begin_pass();
+        stage_fill_local_read(&u_pr, 0x1234ull, &fk_dup_cur);
+        bool ok_dup_parity = fk_dup_pre.local_read_slot[0] == 1 && fk_dup_pre.local_read_att[0] == 0 &&
+                             fk_dup_cur.local_read_slot[0] == 1 && fk_dup_cur.local_read_att[0] == 0;
+        vk_end_pass();
+
+        // Same NvnTexture bound at level 0 (slot 0) and level 1 (slot 1) -> NOT duplicate view -> both active -> MUST disqualify tc_mip in BOTH modes!
+        NvnTexture tc_mip = make_tex(0x25, 64, 64, 0x0, 0x1234);
+        tc_mip.levels = 2; tc_mip.layout.levels = 2; tegra_layout_init(&tc_mip.layout);
+        uint8_t *mip_mem = alloc_guest(tegra_total_size(&tc_mip.layout));
+        tc_mip.addr = (uint64_t)(uintptr_t)mip_mem;
+        tc_mip.pool_offset = (uint64_t)(size_t)(mip_mem - guest_mem);
+        vk_tex(&tc_mip, true); renderer_flush();
+        NvnTexEntry mip_ents[2] = {[1] = {.tex = &tc_mip}};
+        NvnDescPool mip_tpool = {.count = 2, .entries = mip_ents};
+        reset_pass(&tc_mip, &tc_mip, 0xFF, NULL);
+        st.rt.has_cview[1] = 1; st.rt.cview[1].setmask = 1; st.rt.cview[1].base_level = 1;
+        st.viewport[0][2] = 64.0f; st.viewport[0][3] = 64.0f;
+        st.tpool = &mip_tpool; st.spool = &lr_spool; st.tex[1][0] = 1ull;
+        ShaderKey fk_ms_pre = {0}, fk_ms_cur = {0};
+        stage_fill_local_read(&u_pr, 0x1234ull, &fk_ms_pre);
+        begin_pass();
+        stage_fill_local_read(&u_pr, 0x1234ull, &fk_ms_cur);
+        bool ok_ms_parity = !fk_ms_pre.local_read_slot[0] && !fk_ms_cur.local_read_slot[0];
+        vk_end_pass();
+
+        // Create 2D dummy outside an active pass (vk_dummy_view uses vk_upload_cmd) and verify INPUT_ATTACHMENT usage.
+        int n_imgs_before_dummy = n_imgs;
+        VkImageView dv = vk_dummy_view(TEXTYPE_2D);
+        renderer_flush();
+        bool ok_dummy_usage = dv != VK_NULL_HANDLE && n_imgs > n_imgs_before_dummy &&
+                              (m_imgs[n_imgs - 1].usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) != 0;
+
+        // Restore 2-attachment clean pass for descriptor/barrier checks
+        reset_pass(&tc0, &tc1, 0xFF, NULL);
+        st.viewport[0][2] = 64.0f; st.viewport[0][3] = 64.0f;
+        st.tpool = &lr_tpool; st.spool = &lr_spool;
+        st.tex[1][0] = (1ull << 32) | 1ull; st.tex[1][1] = (1ull << 32) | 2ull;
+        begin_pass();
+        pass_written = 0x3u; pass_local_dirty = 0x3u; pass_local_read_mask = 0;
+
+        // stage_set() with VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT
+        VkBindingInfo lr_binds[2] = {
+            {.set = 1, .binding = 32, .type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT},
+            {.set = 1, .binding = 33, .type = VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT},
+        };
+        Prog lr_pr = base_pr;
+        lr_pr.fkey = fk;
+        lr_pr.nbinds = 2;
+        memcpy(lr_pr.binds, lr_binds, sizeof lr_binds);
+        uint32_t lr_ndyn = 99;
+        n_last_wds = 0;
+        VkImageView saved_v1 = pass_color_view[1];
+        pass_color_view[1] = VK_NULL_HANDLE;  // exercise dummy fallback on binding 33
+        stage_set(&lr_pr, VK_NULL_HANDLE, 1, 1, &lr_fs, NULL, NULL, 0, 0, 0, NULL, NULL, &lr_ndyn);
+        pass_color_view[1] = saved_v1;
+        bool ok_stage_set = lr_ndyn == 0 && n_last_wds == 2 &&
+                            last_wds[0].binding == 32 && last_wds[0].type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT &&
+                            last_wds[0].ii.sampler == VK_NULL_HANDLE && last_wds[0].ii.imageView == pass_color_view[0] &&
+                            last_wds[0].ii.imageLayout == VK_IMAGE_LAYOUT_GENERAL &&
+                            last_wds[1].binding == 33 && last_wds[1].type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT &&
+                            last_wds[1].ii.sampler == VK_NULL_HANDLE && last_wds[1].ii.imageView == dv &&
+                            last_wds[1].ii.imageLayout == VK_IMAGE_LAYOUT_GENERAL;
+
+        // resolve_feedback skips local-read slots: 0 copies, 0 breaks, pass remains open.
+        uint64_t fb_before = stat_feedback_copies, brk_before = stat_inplace_breaks;
+        nfeedback = 0; ninplace = 0;
+        resolve_feedback(&lr_pr, 0x3u);
+        bool ok_no_copy_break = (stat_feedback_copies == fb_before) && (stat_inplace_breaks == brk_before) &&
+                                (nfeedback == 0) && !st.rt_dirty && in_pass;
+
+        // RAW barrier uses VK_DEPENDENCY_BY_REGION_BIT and clears pass_local_dirty.
+        VkCommandBuffer cb = vk_cmd();
+        MockCb *mc = find_cb(cb);
+        int ops0 = mc->nops;
+        emit_local_read_barrier(cb);
+        MockOp bar_op = mc->ops[ops0];
+        bool ok_bar = (mc->nops == ops0 + 1) && bar_op.op == MOP_BAR &&
+                      (bar_op.bflags == VK_DEPENDENCY_BY_REGION_BIT) &&
+                      (bar_op.mss == (VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT | VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT)) &&
+                      (bar_op.mds == (VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT | VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT)) &&
+                      (bar_op.mda & VK_ACCESS_2_INPUT_ATTACHMENT_READ_BIT) != 0 &&
+                      !pass_local_dirty && !pass_local_read_mask;
+
+        // clear() emits WAR BY_REGION_BIT barrier when pass_local_read_mask overlaps slot, then marks pass_local_dirty.
+        pass_local_read_mask = 0x1u;
+        pass_local_dirty = 0;
+        const float zclr[4] = {0};
+        int bar_clr0 = stat_bar;
+        clear(0, 0, zclr, 0xFu, false, 0.0f, false, 0, 0);
+        bool ok_clr_war = (stat_bar == bar_clr0 + 1) && !pass_local_read_mask && (pass_local_dirty == 0x1u);
+
+        vk_end_pass();
+        renderer_flush();
+        pass_local_dirty = 0x7u; pass_local_read_mask = 0x3u;
+        vk_exec_reset();
+        bool ok_lr_reset = !pass_local_dirty && !pass_local_read_mask && !pass_color_view[0] && !pass_color_tex[0];
+        g_vk.local_read = false;
+        g_vk.props.limits.maxPerStageDescriptorInputAttachments = 0;
+        g_vk.props.limits.maxDescriptorSetInputAttachments = 0;
+
+        check("tile-local read: unowned safety, caps, soft_linear/dup/multi parity, stage_set, barriers & reset",
+              ok_unowned0 && ok_unowned1_nomut && ok_unowned1_upload && ok_att_flag && ok_pre_fill && ok_fill &&
+              ok_sl_guard && ok_cap1 && ok_cap0 && ok_cap_inter && ok_vp_guard && ok_swz_guard && ok_smp_guard &&
+              ok_dup_parity && ok_ms_parity && ok_dummy_usage && ok_stage_set &&
+              ok_no_copy_break && ok_bar && ok_clr_war && ok_lr_reset);
     }
 
     check("Vulkan mock synchronization validator recorded 0 hazards", !mock_hazards);

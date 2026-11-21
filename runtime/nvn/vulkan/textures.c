@@ -526,7 +526,11 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     bool depthfmt = renderer_format_is_depth(t->format);
     VkImageUsageFlags usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT;
     if (depthfmt) usage |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
-    else if (format_supports(vf, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+    else if (format_supports(vf, VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT)) {
+        usage |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
+        if (g_vk.local_read && type == VK_IMAGE_TYPE_2D && samples == 1)
+            usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
+    }
     VkImageCreateFlags flags = 0;
     // Render targets (NVN's COMPRESSIBLE flag) without MUTABLE_FORMAT, but for their sRGB / UNORM twin named in a format
     // list: a Mali driver doesn't compress (AFBC) an image whose views may take any format - each pass's loads and
@@ -597,6 +601,7 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         depthfmt = false;
     }
     b->format = vf;
+    b->can_input_att = (ci.usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT) != 0;
     b->width = tw; b->height = th; b->depth = depth; b->layers = layers; b->levels = levels; b->samples = samples;
     b->aspect = depthfmt ? aspect_of(t->format) : VK_IMAGE_ASPECT_COLOR_BIT;
     b->base_type = type == VK_IMAGE_TYPE_1D ? (layers > 1 ? VK_IMAGE_VIEW_TYPE_1D_ARRAY : VK_IMAGE_VIEW_TYPE_1D)
@@ -1636,6 +1641,43 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     return vk_dummy_view(want_textype);
 }
 
+bool vk_tex_can_input_att(const NvnTexture *t) {
+    return t && t->backend && ((const TexBackend *)t->backend)->can_input_att;
+}
+
+static int fmt_channels(VkFormat vf) {
+    switch (vf) {
+    case VK_FORMAT_R8_UNORM: case VK_FORMAT_R8_SNORM: case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT:
+    case VK_FORMAT_R16_SFLOAT: case VK_FORMAT_R16_UNORM: case VK_FORMAT_R16_SNORM: case VK_FORMAT_R16_UINT:
+    case VK_FORMAT_R16_SINT: case VK_FORMAT_R32_SFLOAT: case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT:
+        return 1;
+    case VK_FORMAT_R8G8_UNORM: case VK_FORMAT_R8G8_SNORM: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
+    case VK_FORMAT_R16G16_SFLOAT: case VK_FORMAT_R16G16_UNORM: case VK_FORMAT_R16G16_SNORM:
+    case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R32G32_SFLOAT:
+    case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT:
+        return 2;
+    case VK_FORMAT_B10G11R11_UFLOAT_PACK32: case VK_FORMAT_E5B9G9R9_UFLOAT_PACK32:
+    case VK_FORMAT_R5G6B5_UNORM_PACK16:
+        return 3;
+    default:
+        return 4;
+    }
+}
+
+bool vk_view_is_identity_swizzle(const NvnTexture *t, const NvnTextureView *v, bool has_view) {
+    if (!t) return false;
+    uint32_t eff_fmt = (has_view && v && (v->setmask & 4)) ? v->format : t->format;
+    if (renderer_format_is_depth(t->format) || renderer_format_is_depth(eff_fmt)) return false;
+    if (fmt_of(t->format).alpha_one || fmt_of(eff_fmt).alpha_one) return false;
+    const uint8_t *s = (has_view && v && (v->setmask & 8)) ? v->swizzle : t->swizzle;
+    uint8_t c[4];
+    for (int i = 0; i < 4; i++) c[i] = s[i] <= 5 ? s[i] : (uint8_t)(2 + i);
+    if (!(c[0] || c[1] || c[2] || c[3])) return true;
+    int nch = fmt_channels(fmt_of(eff_fmt).vf);
+    return c[0] == 2 && (c[1] == 3 || (nch < 2 && c[1] == 0)) &&
+           (c[2] == 4 || (nch < 3 && c[2] == 0)) && (c[3] == 5 || (nch < 4 && c[3] == 1));
+}
+
 #ifdef __ANDROID__
 // ---- BC textures the GPU compresses into, on a GPU without BC. BOTW makes its 32x32x32 BC4 noise volume so, once
 // after loading: each slice and mip drawn through a view in a format of the block's size (8 bytes: a texel a block).
@@ -1920,6 +1962,7 @@ VkImageView vk_dummy_view(int textype) {
                             .format = VK_FORMAT_R8G8B8A8_UNORM, .extent = {1, 1, 1}, .mipLevels = 1, .arrayLayers = cube ? 6 : 1,
                             .samples = VK_SAMPLE_COUNT_1_BIT, .tiling = VK_IMAGE_TILING_OPTIMAL,
                             .usage = VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT};
+    if (g_vk.local_read && ci.imageType == VK_IMAGE_TYPE_2D) ci.usage |= VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT;
     VmaAllocationCreateInfo ai = {.usage = VMA_MEMORY_USAGE_AUTO_PREFER_DEVICE};
     VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
     VkCommandBuffer cb = vk_upload_cmd();

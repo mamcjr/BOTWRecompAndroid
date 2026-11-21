@@ -56,6 +56,7 @@ typedef struct {
     bool eds2;                    // extended dynamic state 2 in use; without it, depth bias and primitive restart are
                                   // pipeline state (exec.c PipeKey.prim_restart)
     bool dyn_vi;                  // VK_EXT_vertex_input_dynamic_state in use: vertex attributes/bindings set dynamically
+    bool local_read;              // VK_KHR_dynamic_rendering_local_read in use: tile-local input attachment reads
 #ifdef __ANDROID__
     bool map_placed;              // VK_EXT_map_memory_placed: the guest heap mapped as GPU memory (exec.c vk_heap_place)
     bool mem_fd;                  // VK_KHR_external_memory_fd: the same through an exported file mapped there (vk_heap_place)
@@ -135,6 +136,7 @@ typedef struct TexBackend {
     struct BcShadow *bc_shadow;  // (bc_vf) drawn into through a view of the block's size: the blocks (textures.c)
     VkFormat view_alt;  // (a render target made without MUTABLE_FORMAT: textures.c rt_formats) the one other format its
     bool fixed_fmt;     // views may have - its sRGB / UNORM twin, or none
+    bool can_input_att; // created with VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT (valid for subpassInput local reads)
     int tp;              // runtime/nvn/texpatch.c: 0 not checked yet, -1 none, else known UI texture + 1
     uint32_t tp_gen;     // texpatch_generation() it was last uploaded with
     int reg;  // slot in textures.c's live list + 1 (a reboot destroys them all)
@@ -164,6 +166,8 @@ VkImageView vk_bc_shadow_view(NvnTexture *t, const NvnTextureView *v, VkFormat *
 void vk_bc_shadows_resolve(NvnTexture *const *targets, const NvnTextureView *views, const uint8_t *has_view, int ntargets);
 #endif
 VkFormat vk_sampled_format(NvnTexture *t, const NvnTextureView *v, bool has_view);
+bool vk_view_is_identity_swizzle(const NvnTexture *t, const NvnTextureView *v, bool has_view);
+bool vk_tex_can_input_att(const NvnTexture *t);
 bool vk_format_filters_linear(VkFormat f);
 bool vk_format_is_int(VkFormat f);
 bool vk_any_format_no_linear(void);

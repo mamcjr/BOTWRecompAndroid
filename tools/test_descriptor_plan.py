@@ -19,8 +19,9 @@ typedef unsigned char uint8_t;
 typedef unsigned int uint32_t;
 #define MAX_BIND 96
 #define GMAP_BUFFER_INDEX 20
-enum { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER,
-       VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, UNUSED_STORAGE_IMAGE, UNUSED_SAMPLER };
+#define CBPATCH_BUFFER_INDEX 23
+enum { VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER, VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT,
+       VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, UNUSED_STORAGE_IMAGE, UNUSED_SAMPLER };
 typedef struct { uint32_t set, binding, type; } VkBindingInfo;
 '''
 test = r'''
@@ -30,13 +31,13 @@ int check(unsigned seed, int count, unsigned set) {
     VkBindingInfo binds[MAX_BIND], original[MAX_BIND];
     rng = seed;
     for (int i = 0; i < count; i++) {
-        binds[i] = (VkBindingInfo){(next() >> 16) % 3, (next() >> 16) % 100, (next() >> 16) % 5};
+        binds[i] = (VkBindingInfo){(next() >> 16) % 3, (next() >> 16) % 100, (next() >> 16) % 6};
         original[i] = binds[i];
     }
     // Include all special bindings and boundary cases regularly, across both sets.
-    const unsigned boundary[] = {0, 16, 17, 18, 19, 20, 21, 31, 32, 95};
-    for (int i = 0; i < count && i < 10; i++) {
-        binds[i].binding = boundary[i]; binds[i].type = seed % 5; binds[i].set = set;
+    const unsigned boundary[] = {0, 16, 17, 18, 19, 20, 21, 23, 31, 32, 95};
+    for (int i = 0; i < count && i < 11; i++) {
+        binds[i].binding = boundary[i]; binds[i].type = seed % 6; binds[i].set = set;
         original[i] = binds[i];
     }
     int legacy[MAX_BIND], n = 0;
@@ -44,13 +45,15 @@ int check(unsigned seed, int count, unsigned set) {
         const VkBindingInfo *b = &binds[i];
         if (b->set != set) continue;
         if (b->type == VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER && b->binding >= 32) legacy[n++] = i;
+        else if (b->type == VK_DESCRIPTOR_TYPE_INPUT_ATTACHMENT && b->binding >= 32) legacy[n++] = i;
         else if (b->type == VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER && b->binding < 17) legacy[n++] = i;
         else if (b->type == VK_DESCRIPTOR_TYPE_STORAGE_BUFFER) legacy[n++] = i;
     }
     for (int i = 0; i < count; i++) {
         const VkBindingInfo *b = &binds[i];
         if (b->set != set || b->type != VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER ||
-            (b->binding != 18 && b->binding != 19 && b->binding != GMAP_BUFFER_INDEX)) continue;
+            (b->binding != 18 && b->binding != 19 && b->binding != GMAP_BUFFER_INDEX &&
+             b->binding != CBPATCH_BUFFER_INDEX)) continue;
         legacy[n++] = i;
     }
     struct { unsigned before; DescriptorPlan plan; unsigned after; } checked;
