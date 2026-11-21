@@ -1,7 +1,8 @@
 # The benchmark's scenes (runtime/hle/benchmark.c): adb push this somewhere in the app's files, then
 #   adb shell am start -n com.botwrecomp.android/com.botwrecompandroid.BOTWRecompAndroidActivity --es env LARECOMP_BENCHMARK=<its path on the device>
 # The report goes to <its path>.out/. A save past the Great Plateau, in the main field, normal mode.
-# pos: X Y Z, a little above the ground is fine. time: 0..360 (180 noon). weather: 0 clear. yaw, pitch: the camera, degrees.
+# pos: X Y Z, Y the ground's height or a little above it: Link's height must stay within 2 units of it (after the
+# settle, at the window's start and end), else harness_error at "position". time: 0..360 (180 noon). weather: 0 clear. yaw, pitch: the camera, degrees.
 format = 1
 repeats = 3
 warmup_s = 20
