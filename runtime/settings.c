@@ -227,6 +227,7 @@ void settings_reset_defaults(void) {
     g_settings.motion = d->motion;
     g_settings.motion_source = d->motion_source;
     g_settings.motion_flat = d->motion_flat;
+    g_settings.pad_gyro_axes = d->pad_gyro_axes;
     g_settings.lsfg = d->lsfg;
     g_settings.lsfg_mult = d->lsfg_mult;
     g_settings.lsfg_flow = d->lsfg_flow;
@@ -280,6 +281,7 @@ void settings_load(void) {
         else if (!strcmp(key, "motion")) g_settings.motion = atoi(val) != 0;
         else if (!strcmp(key, "motion_source")) g_settings.motion_source = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
         else if (!strcmp(key, "motion_flat")) g_settings.motion_flat = atoi(val) != 0;
+        else if (!strcmp(key, "pad_gyro_axes")) g_settings.pad_gyro_axes = atoi(val) >= 0 && atoi(val) <= 3 ? atoi(val) : 0;
         else if (!strcmp(key, "frame_generation")) g_settings.lsfg = atoi(val) != 0;
         else if (!strcmp(key, "frame_generation_mult")) g_settings.lsfg_mult = atoi(val);
         else if (!strcmp(key, "frame_generation_flow")) g_settings.lsfg_flow = atoi(val);
@@ -401,6 +403,7 @@ void settings_save(void) {
     fprintf(f, "show_fps = %d\n", g_settings.show_fps);
     fprintf(f, "motion = %d\nmotion_source = %d\nmotion_flat = %d\n", g_settings.motion, g_settings.motion_source,
             g_settings.motion_flat);
+    fprintf(f, "pad_gyro_axes = %d\n", g_settings.pad_gyro_axes);
     fprintf(f, "frame_generation = %d\nframe_generation_mult = %d\nframe_generation_flow = %d\n", g_settings.lsfg,
             g_settings.lsfg_mult, g_settings.lsfg_flow);
 #ifdef __ANDROID__

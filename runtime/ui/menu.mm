@@ -899,6 +899,12 @@ static void tab_about(void) {
     }
     hint("Auto: a controller's gyroscope once it sends live readings, the phone's otherwise. Phone: always the phone's - "
          "for a controller that says it has a gyroscope but doesn't. Controller: only the controller's.");
+    {
+        static const char *const gyro_axes[] = {"As reported", "Swap left-right and up-down", "Swap up-down and tilt",
+                                                "Swap left-right and tilt"};
+        if (choice("Controller gyro axes", &g_settings.pad_gyro_axes, gyro_axes, 4)) settings_save();  // (hle/motion.c, #511 #521)
+    }
+    hint("If aiming with the controller's gyroscope moves the wrong way (left-right becomes up-down), try another order.");
     if (toggle("Phone motion like the Switch's screen", &g_settings.motion_flat)) settings_save();  // (hle/motion.c, #211 #247)
     hint("Off: the phone moves the aim as a controller would. On: as the Switch's own screen in handheld mode - try it if "
          "tilting the phone turns the aim, and turning it tilts.");

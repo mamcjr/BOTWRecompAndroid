@@ -246,8 +246,13 @@ void motion_open(void) {
 // A Nintendo Pro Controller aimed up when its left side was lifted (#338), while the phone's gyroscope was right: a
 // player can try orders through Settings > Driver compatibility > Driver variables, without a build.
 static void pad_axes(const float d[3], float out[3]) {
-    static int axis[3] = {-1}, sign[3];
-    if (axis[0] == -1) {
+    // (Settings > Controls > Controller gyro axes, settings.h pad_gyro_axes, #511 #521: used when the variable isn't set)
+    static const char *const setting_order[4] = {"x,y,z", "y,x,z", "z,y,x", "x,z,y"};
+    static int axis[3] = {-1}, sign[3], seen = -1;
+    int want = g_settings.pad_gyro_axes;
+    if (want < 0 || want > 3) want = 0;
+    if (axis[0] == -1 || want != seen) {
+        seen = want;
         for (int i = 0; i < 3; i++) axis[i] = i, sign[i] = 1;
         const char *e = ENV("LARECOMP_PAD_GYRO");
         int a[3], s[3], n = 0;
@@ -262,7 +267,14 @@ static void pad_axes(const float d[3], float out[3]) {
         if (n == 3 && a[0] != a[1] && a[1] != a[2] && a[0] != a[2]) {
             for (int i = 0; i < 3; i++) axis[i] = a[i], sign[i] = s[i];
             LOG("[motion] the controller's axes taken as %s (LARECOMP_PAD_GYRO)\n", e);
-        } else if (e) LOG("[motion] LARECOMP_PAD_GYRO=%s not understood (three of x, y, z, each with an optional -)\n", e);
+        } else {
+            if (e) LOG("[motion] LARECOMP_PAD_GYRO=%s not understood (three of x, y, z, each with an optional -)\n", e);
+            if (want) {
+                const char *o = setting_order[want];
+                for (int i = 0; i < 3; i++) axis[i] = o[i * 2] - 'x';
+                LOG("[motion] the controller's axes taken as %s (Settings)\n", o);
+            }
+        }
     }
     for (int i = 0; i < 3; i++) out[i] = sign[i] * d[axis[i]];
 }

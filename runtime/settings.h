@@ -41,6 +41,7 @@ typedef struct {
     bool show_fps;
     bool motion;          // the phone's (or a controller's) gyroscope as the controller's motion sensor (hle/motion.c)
     int motion_source;    // whose: 0 automatic (a controller's once its gyroscope is alive), 1 the phone's, 2 a controller's
+    int pad_gyro_axes;    // a controller's gyroscope axis order: 0 as reported, 1 y,x,z, 2 z,y,x, 3 x,z,y (hle/motion.c, #511)
     bool lsfg; int lsfg_mult, lsfg_flow;  // frame generation (vulkan/lsfg): on, frames per game frame 2..4, motion resolution % (0: the game's)
     bool motion_flat;     // the phone's sensors as the Switch's screen in handheld mode, not a flat controller (hle/motion.c)
 #ifdef __ANDROID__
