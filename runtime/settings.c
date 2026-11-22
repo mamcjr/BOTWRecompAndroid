@@ -1,6 +1,7 @@
 #include "settings.h"
 
 #include <math.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -35,6 +36,7 @@ Settings g_settings = {
     .reverb = true,
     .movie_audio = true,
     .motion = true,
+    .pad_gyro_axes_rev = PAD_GYRO_AXES_REV,
     .shadows = true,
 #ifdef __ANDROID__
     .show_fps = true,  // (the performance overlay, ui/perf_overlay.mm: on until turned off in the menu)
@@ -209,11 +211,16 @@ const char *settings_language_name(void) {
     return "English";
 }
 
+static pthread_mutex_t g_settings_lock = PTHREAD_MUTEX_INITIALIZER;
 static Settings g_defaults;  // (the defaults above, kept before the file overrides them: settings_reset_defaults)
 static bool g_have_defaults;
 
 void settings_reset_defaults(void) {
-    if (!g_have_defaults) return;
+    pthread_mutex_lock(&g_settings_lock);
+    if (!g_have_defaults) {
+        pthread_mutex_unlock(&g_settings_lock);
+        return;
+    }
     const Settings *d = &g_defaults;
     g_settings.aspect = d->aspect;
     g_settings.fullscreen = d->fullscreen;
@@ -230,6 +237,7 @@ void settings_reset_defaults(void) {
     g_settings.motion_source = d->motion_source;
     g_settings.motion_flat = d->motion_flat;
     g_settings.pad_gyro_axes = d->pad_gyro_axes;
+    g_settings.pad_gyro_axes_rev = d->pad_gyro_axes_rev;
     g_settings.lsfg = d->lsfg;
     g_settings.lsfg_mult = d->lsfg_mult;
     g_settings.lsfg_flow = d->lsfg_flow;
@@ -250,6 +258,7 @@ void settings_reset_defaults(void) {
     g_settings.core_turns = d->core_turns;
     g_settings.files_in_place = d->files_in_place;
 #endif
+    pthread_mutex_unlock(&g_settings_lock);
 }
 
 void settings_load(void) {
@@ -264,7 +273,7 @@ void settings_load(void) {
 #else
     char line[256];
 #endif
-    bool tip_key = false, aspect_key = false, output_key = false;
+    bool tip_key = false, aspect_key = false, output_key = false, pad_gyro_axes_rev_key = false;
     while (fgets(line, sizeof line, f)) {
         char key[64];
 #ifdef __ANDROID__
@@ -284,6 +293,7 @@ void settings_load(void) {
         else if (!strcmp(key, "motion_source")) g_settings.motion_source = atoi(val) >= 0 && atoi(val) <= 2 ? atoi(val) : 0;
         else if (!strcmp(key, "motion_flat")) g_settings.motion_flat = atoi(val) != 0;
         else if (!strcmp(key, "pad_gyro_axes")) g_settings.pad_gyro_axes = atoi(val) >= 0 && atoi(val) <= 3 ? atoi(val) : 0;
+        else if (!strcmp(key, "pad_gyro_axes_rev")) g_settings.pad_gyro_axes_rev = atoi(val), pad_gyro_axes_rev_key = true;
         else if (!strcmp(key, "frame_generation")) g_settings.lsfg = atoi(val) != 0;
         else if (!strcmp(key, "frame_generation_mult")) g_settings.lsfg_mult = atoi(val);
         else if (!strcmp(key, "frame_generation_flow")) g_settings.lsfg_flow = atoi(val);
@@ -388,6 +398,8 @@ void settings_load(void) {
         else bind_settings_load(key, val);  // bind_pad_* / bind_key_*: runtime/hle/bindings.c
     }
     fclose(f);
+    if (!pad_gyro_axes_rev_key)
+        g_settings.pad_gyro_axes_rev = g_settings.pad_gyro_axes ? 1 : PAD_GYRO_AXES_REV;
     if (!tip_key) g_settings.menu_tip_seen = true;  // (a settings file from before the note: not a first launch)
     if (!aspect_key) g_settings.aspect_asked = true;  // (likewise: the aspect ratio was chosen already)
     if (g_settings.volume < 0) g_settings.volume = 0;
@@ -395,7 +407,7 @@ void settings_load(void) {
     LOG("[settings] loaded %s\n", SETTINGS_FILE);
 }
 
-void settings_save(void) {
+static void settings_save_locked(void) {
     FILE *f = fopen(SETTINGS_FILE, "w");
     if (!f) { LOG("[settings] cannot write %s\n", SETTINGS_FILE); return; }
     fprintf(f, "# BOTWRecompAndroid settings (edited from the in-game menu: F1, Esc, or Minus+Plus on a controller)\n");
@@ -408,6 +420,9 @@ void settings_save(void) {
     fprintf(f, "motion = %d\nmotion_source = %d\nmotion_flat = %d\n", g_settings.motion, g_settings.motion_source,
             g_settings.motion_flat);
     fprintf(f, "pad_gyro_axes = %d\n", g_settings.pad_gyro_axes);
+    if (g_settings.pad_gyro_axes_rev >= PAD_GYRO_AXES_REV || g_settings.pad_gyro_axes == 0)
+        fprintf(f, "pad_gyro_axes_rev = %d\n",
+                g_settings.pad_gyro_axes_rev >= PAD_GYRO_AXES_REV ? g_settings.pad_gyro_axes_rev : PAD_GYRO_AXES_REV);
     fprintf(f, "frame_generation = %d\nframe_generation_mult = %d\nframe_generation_flow = %d\n", g_settings.lsfg,
             g_settings.lsfg_mult, g_settings.lsfg_flow);
 #ifdef __ANDROID__
@@ -473,6 +488,34 @@ void settings_save(void) {
     fprintf(f, "mods_off = %s\n", g_settings.mods_off);
     bind_settings_save(f);
     fclose(f);
+}
+
+void settings_save(void) {
+    pthread_mutex_lock(&g_settings_lock);
+    settings_save_locked();
+    pthread_mutex_unlock(&g_settings_lock);
+}
+
+bool settings_migrate_pad_gyro_axes(int *out_prev) {
+    pthread_mutex_lock(&g_settings_lock);
+    if (g_settings.pad_gyro_axes == 0 || g_settings.pad_gyro_axes_rev >= PAD_GYRO_AXES_REV) {
+        pthread_mutex_unlock(&g_settings_lock);
+        return false;
+    }
+    if (out_prev) *out_prev = g_settings.pad_gyro_axes;
+    g_settings.pad_gyro_axes = 0;
+    g_settings.pad_gyro_axes_rev = PAD_GYRO_AXES_REV;
+    settings_save_locked();
+    pthread_mutex_unlock(&g_settings_lock);
+    return true;
+}
+
+void settings_set_pad_gyro_axes(int val) {
+    pthread_mutex_lock(&g_settings_lock);
+    g_settings.pad_gyro_axes = (val >= 0 && val <= 3) ? val : 0;
+    g_settings.pad_gyro_axes_rev = PAD_GYRO_AXES_REV;
+    settings_save_locked();
+    pthread_mutex_unlock(&g_settings_lock);
 }
 
 #ifdef __ANDROID__

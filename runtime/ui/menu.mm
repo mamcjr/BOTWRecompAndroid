@@ -965,7 +965,8 @@ static void tab_about(void) {
     {
         static const char *const gyro_axes[] = {"As reported", "Swap left-right and up-down", "Swap up-down and tilt",
                                                 "Swap left-right and tilt"};
-        if (choice("Controller gyro axes", &g_settings.pad_gyro_axes, gyro_axes, 4)) settings_save();  // (hle/motion.c, #511 #521)
+        int axes = g_settings.pad_gyro_axes;
+        if (choice("Controller gyro axes", &axes, gyro_axes, 4)) settings_set_pad_gyro_axes(axes);  // (hle/motion.c, #511 #521)
     }
     hint("If aiming with the controller's gyroscope moves the wrong way (left-right becomes up-down), try another order.");
     if (toggle("Phone motion like the Switch's screen", &g_settings.motion_flat)) settings_save();  // (hle/motion.c, #211 #247)
