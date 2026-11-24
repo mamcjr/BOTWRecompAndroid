@@ -1837,10 +1837,10 @@ static void prelaunch_tab(float sc) {
             ImGui::TextDisabled("%s", tr("This driver can't export its memory: the option does nothing here."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Draw-target reads in place"));
-        changed |= tri("inplace", &g_settings.inplace_reads, a8);
+        changed |= tri("inplace", &g_settings.inplace_reads, a8 || vk_driver_is_mali());  // (Mali: #549)
         ImGui::TextDisabled("%s", tr("On: decals and effects read the image they draw on as it is, the fastest way. Off: a copy "
                                   "of it each time, slower (fewer fps) but by the Vulkan rules. Automatic: on for Adreno 8xx "
-                                  "GPUs, off for the others. Applies when the game starts."));
+                                  "and Mali GPUs, off for the others. Applies when the game starts."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Turnip low-resolution Z (LRZ)"));
         changed |= tri("lrz", &g_settings.turnip_lrz, a8);

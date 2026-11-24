@@ -4708,9 +4708,11 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
                 // bookkeeping) share that pass. Those passes of a few draws run in system memory on Turnip (~0.02 ms).
                 // Only the writes before the game's last barrier (NVN's rule) left the ground dark: its draws don't
                 // fence every write they then read. Sampling a target the pass writes is a feedback loop Vulkan leaves
-                // undefined (without VK_EXT_attachment_feedback_loop_layout): Automatic stays limited to Adreno 8xx
-                // Turnip, while ARM Mali allows explicit opt-in via settings.h inplace_reads > 0 ("On") or
-                // LARECOMP_FEEDBACK_INPLACE=1; LARECOMP_FEEDBACK_COPY=1 forces copies on any driver.
+                // undefined (without VK_EXT_attachment_feedback_loop_layout): Automatic is on for Adreno 8xx Turnip and
+                // for ARM's Mali driver (#549: a Mali-G615 r44p1 drew it right, 27.6 -> 29.7 fps and 25% -> 88% of the
+                // time at 30, the copies gone; TOTKRecompAndroid's G720 likewise), off elsewhere; settings.h
+                // inplace_reads On / Off over it, LARECOMP_FEEDBACK_INPLACE=1 / 0 too; LARECOMP_FEEDBACK_COPY=1 forces
+                // copies on any driver.
                 if (g_inplace_copy < 0) {
                     const char *fi_raw = getenv("LARECOMP_FEEDBACK_INPLACE");
                     const char *fi = (fi_raw && *fi_raw) ? fi_raw : NULL;
@@ -4723,7 +4725,7 @@ static void resolve_feedback(Prog *pr, uint32_t draw_written) {
                     extern bool vk_turnip_path_on(int setting);
                     int ir_set = g_settings.inplace_reads;
                     if (!fi) {
-                        bool mali_on = vk_driver_is_mali() && ir_set > 0;
+                        bool mali_on = vk_driver_is_mali() && ir_set != 0;  // (Automatic or On: #549)
                         inplace = (vk_driver_is_turnip() && vk_turnip_path_on(ir_set)) || mali_on;
                         if (!fb_copy)
                             why = ir_set < 0 ? "automatic" : "settings";
