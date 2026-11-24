@@ -14,7 +14,7 @@ It is built on the engine of **[LAS Recomp](https://github.com/peiikai/LASRecomp
 > [!WARNING]
 > **Beta.** Tested primarily on one phone (POCO F7 Ultra, Adreno 830, Mesa Turnip driver). Performance and compatibility
 > vary by device; expect bugs, especially on GPUs that have not been tested on physical hardware. See the
-> [0.4.11-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.11-beta) and the
+> [0.4.12-beta release notes](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.4.12-beta) and the
 > [development notes](docs/BOTW-PORT.md) (in Portuguese).
 
 ## Supported platform
@@ -86,6 +86,11 @@ Windows, Linux or macOS may still be used as development hosts with the Android 
 - **0.4.11:** on an Adreno 6xx with 8 GB of RAM or less, Automatic leaves the game's memory off the GPU, so the
   game no longer closes after a few minutes for lack of GPU memory (#520); a pipeline that fails for lack of memory
   is created again instead of being lost.
+- **0.4.12:** Settings > Controls > **Controller gyro axes** for controllers whose gyroscope reports its axes in
+  another order (#511, #521); **Wait for the screen (FIFO)** on the start screen, on by default for Adreno 7xx, where
+  the picture froze while the game went on (#367); the minimap-at-top group no longer jumps up and down in shrines
+  (#261); Mali: less memory-mapping growth from write tracking and 16 / 8-bit integer targets drawn right; PRs #507,
+  #537 and #480.
 - **Known issues:** short grass appears only up close; water reflections can move with the camera; the pause menu
   background can be black on Qualcomm's stock driver; Link may flicker on the first hit in Native Mode; rain falls
   slower than on the console.
@@ -140,7 +145,7 @@ icons read from your game files. The game's menus keep the classic buttons.
    Files > Vulkan driver**. If the app reports that the Vulkan driver is too old at startup, long-press the app icon
    and choose **Choose driver** before launching the game.
 
-Updating from 0.2.x to 0.4.11-beta does not require rebuilding game code. Shaders compile again once, so the first
+Updating from 0.2.x to 0.4.12-beta does not require rebuilding game code. Shaders compile again once, so the first
 minutes may stutter. To report a problem, open an [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) with
 your phone, GPU, driver, game version and a log from **Settings > Files > Save a log file**.
 
