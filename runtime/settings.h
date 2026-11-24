@@ -71,6 +71,9 @@ typedef struct {
                           // (its Automatic: on for any Turnip that can place it - vulkan/device.c vk_turnip_heap_on)
     int inplace_reads;    // Turnip (Automatic on 8xx) and Mali (manual On): draws sample targets they write as they are (vulkan/exec.c resolve_feedback); off: copies
     int turnip_lrz;       // Turnip's low-resolution Z; off: TU_DEBUG=nolrz before the driver loads (vulkan/device.c)
+    int present_fifo;     // the swapchain's present mode: 1 FIFO (each image waits for the screen), 0 MAILBOX; -1
+                          // Automatic: FIFO on Adreno 7xx (#367: the picture froze with MAILBOX while the game ran on),
+                          // MAILBOX elsewhere (vulkan/device.c present_mode; LARECOMP_VK_PRESENT over it)
     bool log_file;        // the log in a file as well (platform/android.c), to send with a report
     char gpu_model[64];   // the GPU of the last start ("Adreno (TM) 830v1"): turnip_lrz's Automatic, before the driver
     bool heap_file;       // the game's memory as GPU memory through an exported file mapped at its address, where the driver

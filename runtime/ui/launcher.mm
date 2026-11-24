@@ -620,6 +620,7 @@ static bool android_copy_document(const std::string &uri, const std::string &dst
 // (BOTWRecompAndroidActivity pickLogFolder / openLog), where a file manager can open it - Android/data/ is out of its reach
 extern "C" void android_log_file(bool on);
 extern "C" bool vk_adreno_8xx(const char *name);  // (Driver compatibility's Automatic: runtime/nvn/vulkan/device.c)
+extern "C" bool vk_adreno_7xx(const char *name);  // (the present mode's Automatic, #367)
 extern "C" bool vk_turnip_heap_on(int setting);
 extern "C" bool vk_turnip_heap_ram_off(void);  // (an Adreno 6xx with 8 GB or less: #520)
 extern "C" bool vk_lrz_at_start(void);
@@ -1846,6 +1847,13 @@ static void prelaunch_tab(float sc) {
         ImGui::TextDisabled("%s", tr("Turnip's early depth test, a little faster. Off can fix missing or broken drawing on "
                                   "some Adreno GPUs. Automatic: on for Adreno 8xx GPUs, off for the others. Applies when "
                                   "BOTWRecompAndroid restarts."));
+        ImGui::Spacing();
+        ImGui::Text("%s", tr("Wait for the screen (FIFO)"));  // (settings.h present_fifo, vulkan/device.c present_mode)
+        changed |= tri("fifo", &g_settings.present_fifo, vk_adreno_7xx(vk_gpu_name()));
+        ImGui::TextDisabled("%s", tr("On: each finished frame waits for the screen to show it. Off: a newer frame replaces "
+                                  "one still waiting, a little smoother. Turn it on if the picture freezes for seconds "
+                                  "while the sound and the game go on. Automatic: on for Adreno 7xx GPUs, off for the "
+                                  "others. Applies when the game starts."));
         ImGui::Spacing();
         ImGui::Text("%s", tr("Driver variables"));  // (#227: g_settings.driver_env, vulkan/device.c)
         ImGui::SetNextItemWidth(-FLT_MIN);

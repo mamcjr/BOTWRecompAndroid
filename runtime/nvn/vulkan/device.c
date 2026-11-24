@@ -1031,8 +1031,19 @@ static VkPresentModeKHR present_mode(void) {
     // queued behind the one waiting for a window image, so the game's fence waits followed the presentation engine:
     // a throttled / captured / busy compositor slowed the whole game (4-21 fps with the GPU mostly idle; mailbox:
     // 60). No tearing. LARECOMP_VK_PRESENT=fifo|immediate|mailbox to choose.
+    // Android: the start screen's "Wait for the screen (FIFO)" (g_settings.present_fifo); its Automatic is FIFO on
+    // Adreno 7xx, where with MAILBOX the picture froze for seconds at a time while the game ran on and its audio
+    // played (#367, Adreno 730: FIFO ended it).
     const char *e = getenv("LARECOMP_VK_PRESENT");
-    VkPresentModeKHR want = !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
+    bool fifo = false;
+#ifdef __ANDROID__
+    if (!e) {
+        extern bool vk_adreno_7xx(const char *name);
+        fifo = g_settings.present_fifo < 0 ? vk_adreno_7xx(g_vk.props.deviceName) : g_settings.present_fifo != 0;
+    }
+#endif
+    VkPresentModeKHR want = fifo ? VK_PRESENT_MODE_FIFO_KHR
+                          : !e || !strcmp(e, "mailbox") ? VK_PRESENT_MODE_MAILBOX_KHR
                           : !strcmp(e, "immediate") ? VK_PRESENT_MODE_IMMEDIATE_KHR : VK_PRESENT_MODE_FIFO_KHR;
     uint32_t n = 0;
     vkGetPhysicalDeviceSurfacePresentModesKHR(g_vk.phys, g_vk.surface, &n, NULL);
@@ -2107,6 +2118,14 @@ bool vk_adreno_8xx(const char *name) {
     while (*a && (*a < '0' || *a > '9')) a++;
     int n = atoi(a);
     return n >= 800 && n < 900;
+}
+// An Adreno 7xx (the present mode's Automatic: present_mode, #367)
+bool vk_adreno_7xx(const char *name) {
+    const char *a = name ? strstr(name, "Adreno") : NULL;
+    if (!a) return false;
+    while (*a && (*a < '0' || *a > '9')) a++;
+    int n = atoi(a);
+    return n >= 700 && n < 800;
 }
 // A Turnip path's setting (-1 Automatic, 1 on, 0 off) for this GPU
 bool vk_turnip_path_on(int setting) { return setting < 0 ? vk_adreno_8xx(g_vk.props.deviceName) : setting != 0; }
