@@ -5201,7 +5201,9 @@ static VkDescriptorBufferInfo cbuf_info(int stage, ShaderInfo *si, int k, uint32
             float ly = pane ? f[23]
                      : text ? (vert_plus && !fixed ? f[7] / f[15] * 360.0f / g : f[7] / f[15] * 360.0f)
                             : 0;
-            if (pane && g_cur_fs_hash == 0xd1d87dfe0c81ad63ull && lx > 290.0f && ly < -140.0f) {
+            // (the disc itself, at 510, -240: the same shader draws another piece of the group at 328, -302 - in a shrine,
+            // with no minimap, it came and went and took the group up and down with it every second, #261)
+            if (pane && g_cur_fs_hash == 0xd1d87dfe0c81ad63ull && fabsf(lx - 510.0f) < 30.0f && fabsf(ly + 240.0f) < 30.0f) {
                 extern void widescreen_minimap_seen(void);  // (the minimap's disc, at 510, -240: it's on screen)
                 widescreen_minimap_seen();
             }
