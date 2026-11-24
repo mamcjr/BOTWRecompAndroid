@@ -14,14 +14,14 @@ O documento tem três partes:
 - **Jogo:** 1.8.2, modo Nativo, arquivos no lugar. Só a 1.8.2 foi testada.
 - **Configuração de uso:** 30 fps, saída 720p, resolução "Igual à tela", SGSR 1, sem anti-aliasing.
 
-| Mudança | PR | Estado (18/11/2026) |
+| Mudança | PR | Estado (24/11/2026) |
 |---|---|---|
 | Relógio: o último uso de um pipeline pelo `g_exec_s` | #452 | **mesclado** |
 | Fences anotados durante a cópia da lista | #456 | **mesclado** |
-| Janela de constant buffers com uma cópia por submissão | #453 | proposto |
-| Slots de textura na fila em todos os aparelhos | #454 | proposto |
-| Modo 40 / 45 pela maior taxa da tela (JNI) | #455 | proposto |
-| Opção Vídeo > Sombras | #457 | proposto |
+| Janela de constant buffers com uma cópia por submissão | #453 | **mesclado** (18/11) |
+| Slots de textura na fila em todos os aparelhos | #454 | **mesclado** (20/11) |
+| Modo 40 / 45 pela maior taxa da tela (JNI) | #455 | **mesclado** (18/11) |
+| Opção Vídeo > Sombras | #457 | **mesclado** (18/11) |
 
 ## Como foi medido
 
@@ -63,16 +63,17 @@ também rodava a cada lista.
 64 fences, ou quando uma chamada mais funda que 8 é copiada como registro, volta a passada completa. `getenv` lido uma
 vez. Ganho não medido isoladamente (estimativa ~0,4 ms por quadro na thread do jogo).
 
-## 3. Janela de constant buffers com uma cópia por submissão (`exec.c`, `cbwin_bind`) - #453, proposto
+## 3. Janela de constant buffers com uma cópia por submissão (`exec.c`, `cbwin_bind`) - #453, mesclado
 
 **Problema.** O buffer de 64 KB que o jogo reescreve (16 bytes antes de quase todo draw) é copiado inteiro por draw:
 **~1.200 MB a cada 2 s** (`LARECOMP_LOG_CBUF_BYTES`). O `LARECOMP_CB_WINDOW` evita isso, mas liga o buffer **no lugar**
 do heap, e com o Sync lag a CPU já escreve o quadro seguinte ali: água branca, "cortinas" (o motivo de estar desligado
 desde 27/10).
 
-**Proposta.** No `cbwin_bind`, o resto do buffer vem de **uma cópia por submissão** (cache por endereço, tamanho e
-`vk_pending_seq()`), que as atualizações não invalidam - as linhas atualizadas já vêm do patch buffer da janela. Com o
-PR, `LARECOMP_CBWIN_SNAPSHOT=0` volta à leitura no lugar.
+**Como entrou.** No `cbwin_bind`, o resto do buffer vem de **uma cópia por submissão** (cache por endereço, tamanho e
+`vk_pending_seq()`), que as atualizações não invalidam - as linhas atualizadas já vêm do patch buffer da janela.
+`LARECOMP_CBWIN_SNAPSHOT=0` volta à leitura no lugar. A janela continua desligada por padrão no Adreno
+(`LARECOMP_CB_WINDOW=1` liga); depois, o #506 levou o cache aos Mali em modo de cópia, onde ela passou a vir ligada.
 
 **Resultado** (`LARECOMP_CB_WINDOW=1`, A/B `cbwin`):
 
@@ -85,24 +86,36 @@ PR, `LARECOMP_CBWIN_SNAPSHOT=0` volta à leitura no lugar.
 mas é tráfego de memória a menos. Água e terreno conferidos em jogo na 1.8.2, sem artefatos; o usuário joga com a janela
 ligada desde então.
 
-## 4. Slots de textura na fila, sem esperar a thread de render (`objects.c`) - #454, proposto
+## 4. Slots de textura na fila, sem esperar a thread de render (`objects.c`) - #454, mesclado
 
-**Problema.** Fora do low-RAM, `register_texture` com o slot já ocupado chama `vk_async_drain()`: a thread do jogo
-espera a thread de render **ficar ociosa** (terminar a lista e apresentar). ~940 vezes por segundo. Na linha do tempo
-(`LARECOMP_FRAME_TIMELINE`) o jogo só mandava a lista seguinte ~1,5 ms depois do `present end`: jogo e render nunca se
-sobrepunham, e a GPU ficava ~3,4 ms parada por quadro (`LARECOMP_LOG_GPU_IDLE`).
+**Problema.** Fora do low-RAM e do Mali, `register_texture` com o slot já ocupado chamava `vk_async_drain()`: a thread
+do jogo esperava a thread de render **ficar ociosa** (terminar a lista e apresentar). ~940 vezes por segundo. Na linha
+do tempo (`LARECOMP_FRAME_TIMELINE`) o jogo só mandava a lista seguinte ~1,5 ms depois do `present end`: jogo e render
+nunca se sobrepunham, e a GPU ficava ~3,4 ms parada por quadro (`LARECOMP_LOG_GPU_IDLE`).
 
-**Proposta.** O caminho da fila (`vk_async_call(slot_apply)`), padrão no low-RAM desde a 0.4.1, em todos os aparelhos.
-Hoje dá para testar com `LARECOMP_SLOT_DRAIN=0`.
+**Como entrou.** O caminho da fila (`vk_async_call(slot_apply)`), que era o padrão no low-RAM desde a 0.4.1 e no Mali
+desde o #485, vale para todos os aparelhos (`vk_slot_async_default()` em `device.c`). `LARECOMP_SLOT_DRAIN=1` volta à
+espera.
 
-**Resultado a 60 fps** (rodadas seguidas):
+**Resultado a 60 fps na versão que entrou** (0.4.7 + o PR, parado numa casa de Kakariko, 2 min por rodada, alternando):
+
+| | fps | thread de render | GPU parada no quadro |
+|---|---|---|---|
+| na fila (padrão agora) | **54,9 / 51,9** | 15,8 / 17,0 ms | **0,9 / 0,9 ms** |
+| `LARECOMP_SLOT_DRAIN=1` | 43,7 / 44,7 | 18,0 / 17,5 ms | 5,0 / 4,9 ms |
+
+Em média 53,4 × 44,2 fps (+21%). O lado na fila gasta mais watts porque faz mais quadros; por quadro fica igual
+(~0,145 J).
+
+**Primeira medição, na 0.4.6** (rodadas seguidas):
 
 | | fps | render | GPU | GPU parada no quadro |
 |---|---|---|---|---|
 | esvaziando (padrão) | 45,4 | 18,4 ms | 18,7 ms | 3,4 ms |
 | **na fila** | **52,4 (+15%)** | 17,8 ms | 18,9 ms | **0,15 ms** |
 
-**Loops de inventário a 30 fps** (abre a Algibeira, troca de tela 3 vezes, fecha; 19 ciclos em 2 min, com cooler):
+**Loops de inventário a 30 fps, na 0.4.6** (abre a Algibeira, troca de tela 3 vezes, fecha; 19 ciclos em 2 min, com
+cooler):
 
 | | quadros > 40 ms | render | GPU | potência |
 |---|---|---|---|---|
@@ -112,28 +125,41 @@ Hoje dá para testar com `LARECOMP_SLOT_DRAIN=0`.
 **Sessão longa na fila:** 15 min de ciclos (149), 27.314 quadros a 30,0 fps, nenhum acima de 40 ms, potência estável
 (2,11 W no 1º minuto, 2,04 W no 15º). Sem textura trocada ou faltando.
 
-## 5. Modo 40 / 45 fps pela maior taxa que a tela oferece (`device.c`, JNI) - #455, proposto
+Na 0.4.7 o inventário ficou em 30,0 fps nos dois modos, sem textura trocada, mas a fila gastou um pouco **mais** (2,78 ×
+2,44 W e 2,57 × 2,20 W), o contrário da 0.4.6. Causa não encontrada (ruído de rodadas curtas ou mudança da 0.4.7); por
+isso o ganho que vale é o de 60 fps.
+
+## 5. Modo 40 / 45 fps pela maior taxa que a tela oferece (`device.c`, JNI) - #455, mesclado
 
 **Problema.** O HyperOS deixa um jogo em 60 Hz numa tela de 120 Hz até a janela pedir mais. O `vk_between_fps()`
 decide pela taxa **atual**; com a tela em 60 Hz o modo saía 30, a janela não pedia nada e a tela nunca ia a 120 Hz.
 O SDL registra só o modo atual (`SDL_androidvideo.c`), então a resposta não pode vir dele.
 
-**Proposta.** `BOTWRecompAndroidActivity.maxRefreshRate()` (a maior taxa de `Display.getSupportedModes()` na resolução
-atual), lida uma vez pelo JNI, decide o que o `android_frame_rate` pede. A taxa do jogo continua seguindo a taxa atual
-da tela: fica em 30 até o sistema trocar, e num sistema que não troca.
+**A primeira versão do PR não tinha efeito no Android:** pegava a maior taxa pelo `SDL_GetFullscreenDisplayModes`, e o
+SDL só registra o modo atual - a "maior taxa" era sempre a atual. O log de 40 fps que a justificava veio de uma rodada
+com a tela já em 120 Hz.
 
-**Resultado.** Abrindo do zero com a tela em 60 Hz, a tela foi a 120 Hz e o jogo a 40,0 fps em 11 a 25 s, em 4 de 5
-rodadas. A que falhou foi com o celular quente: a tela ficou em 60 Hz e o jogo em 30, como antes (suspeita de limite
-térmico do HyperOS, não confirmada).
+**Como entrou** (refeito pelo JNI no mesmo PR). `BOTWRecompAndroidActivity.maxRefreshRate()` (a maior taxa de
+`Display.getSupportedModes()` na resolução atual), lida uma vez por `plat_max_refresh_hz()`, decide o que o
+`android_frame_rate` pede. A taxa do jogo continua seguindo a taxa atual da tela: fica em 30 até o sistema trocar, e num
+sistema que não troca.
+
+**Resultado (versão JNI).** Abrindo do zero com a tela em 60 Hz, a tela foi a 120 Hz e o jogo a 40,0 fps em 11 a 25 s,
+em 4 de 5 rodadas. A que falhou foi com o celular quente: a tela ficou em 60 Hz e o jogo em 30, como antes (suspeita de
+limite térmico do HyperOS, não confirmada).
 
 Sustentado: 40 fps nos 4 primeiros minutos (5,3-5,6 W, SoC estabiliza em ~66 °C); depois o HyperOS limita a GPU a
 629 MHz e fica em 38-39 fps.
 
-## 6. Opção Vídeo > Sombras (`exec.c`, `settings`) - #457, proposto
+**Conferido de novo na 0.4.13** (24/11, celular frio e na bateria, Frame rate 45): ao abrir, `the screen offers up to
+120 Hz` e `the window asks for 40 fps content`; ainda no carregamento, `40 fps on a 120 Hz screen`. Em jogo, 2 min:
+39,9 fps (25,07 ms de média, GPU 19,0 ms), 10 de 4.794 quadros acima de 40 ms.
 
-**Proposta.** Ligada por padrão; desligada, pula os draws de passes só de profundidade em alvos fora do grupo de escala
-da cena - os shadow maps. Critério só estrutural, sem hash de shader. Na 1.8.2 pega um único alvo, as cascatas do sol
-(896x896, 3 camadas); nenhum pré-passe de profundidade nem passe de oclusão. Visual: a cena fica toda iluminada por
+## 6. Opção Vídeo > Sombras (`exec.c`, `settings`) - #457, mesclado
+
+**Como entrou.** Ligada por padrão; desligada, pula os draws de passes só de profundidade em alvos fora do grupo de
+escala da cena - os shadow maps. Critério só estrutural, sem hash de shader. Na 1.8.2 pega um único alvo, as cascatas do
+sol (896x896, 3 camadas); nenhum pré-passe de profundidade nem passe de oclusão. Visual: a cena fica toda iluminada por
 igual.
 
 **Resultado** (A/B na mesma partida, 720p):
