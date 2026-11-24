@@ -22,3 +22,11 @@ Reverb3d (Copyright (c) Ryujinx Team and Contributors, MIT).
 **From [peanuts-native](https://github.com/igawa6/peanuts-native)** (MIT, Copyright (c) seedds, Swap2-Native contributors,
 EddizEge): the lock test in `runtime/native.c` (`lock_without_acquire`, native mode) is a C port of its
 `dm/tools/patch_nso.py` `acquire_lock_sites`.
+
+**From [Savage Wind Recomp](https://github.com/Revivedx/SavageWindRecomp)** (MIT, Copyright (c) 2026 Revivedx and the
+Savage Wind Recomp contributors; Copyright (c) 2026 Peiikai): the low bits of 16 / 8-bit integer colour targets on Mali
+(`rt_kind_key` in `runtime/nvn/vulkan/exec.c` and the narrow outputs in `runtime/nvn/maxwell/translate.c`) follow its
+commit 9950b9e (branch `mali-fixes`, StonedEdge).
+
+**From Swap2-Native's Banana Native** (MIT): the write-fault run in `runtime/platform/android.c` (`wt_frun`) follows its
+`fault_run` (6624426f).
