@@ -1079,6 +1079,11 @@ static void adpf_work_locked(int slot, uint64_t work_ns, uint64_t target_ns, uin
         report2 = (int (*)(APerformanceHintSession *, AWorkDuration *))dlsym(lib, "APerformanceHint_reportActualWorkDuration2");
         if (wd_create && wd_start && wd_total && wd_cpu && wd_gpu && report2) wd = wd_create();
         LOG("[android] performance hints with the GPU's time: %s\n", wd ? "yes" : "no (API < 35)");
+        {   // (whether the GPU's clock can be read, logged once: below)
+            void plat_gpu_clock_mhz(int *now_mhz, int *cap_mhz);
+            int g, cap;
+            plat_gpu_clock_mhz(&g, &cap);
+        }
         loaded = 1;
     }
     if (s_split < 0) s_split = getenv("LARECOMP_ADPF_SPLIT") != NULL;
@@ -1237,6 +1242,38 @@ void plat_frame_work_gpu(uint64_t cpu_ns, uint64_t gpu_ns, uint64_t target_ns, u
     adpf_work(0, cpu_ns, target_ns, gpu_ns, game_ns);
 }
 void plat_render_work(uint64_t work_ns, uint64_t target_ns) { adpf_work(1, work_ns, target_ns, 0, 0); }
+
+// The GPU's clock now and the system's cap on it, MHz, from the kernel (Adreno: kgsl-3d0 gpuclk and max_gpuclk, in Hz),
+// for the log - where the frame rate drops to 20 fps and the tries at 30 fail, whether the clock sat low (#557, #367;
+// Swap2-Native saw an Adreno 830's cap walked down by the system after a menu). -1 each when the system doesn't let
+// the app read them (adb's shell can't on the POCO F7 Ultra); the first call logs which.
+static int gpu_clock_file(const char *name) {
+    char p[96];
+    snprintf(p, sizeof p, "/sys/class/kgsl/kgsl-3d0/%s", name);
+    return open(p, O_RDONLY | O_CLOEXEC);
+}
+static int gpu_clock_read(int fd) {
+    char b[32];
+    ssize_t n = fd >= 0 ? pread(fd, b, sizeof b - 1, 0) : -1;
+    if (n <= 0) return -1;
+    b[n] = 0;
+    long long hz = atoll(b);
+    return hz > 1000000 ? (int)(hz / 1000000) : hz > 0 ? (int)hz : -1;  // (Hz; some kernels say MHz)
+}
+void plat_gpu_clock_mhz(int *now_mhz, int *cap_mhz) {
+    static int fd_now = -2, fd_cap = -2;
+    if (fd_now == -2) {
+        fd_now = gpu_clock_file("gpuclk");
+        int e1 = fd_now < 0 ? errno : 0;
+        fd_cap = gpu_clock_file("max_gpuclk");
+        int a = gpu_clock_read(fd_now), c = gpu_clock_read(fd_cap);
+        LOG("[android] GPU clock: %s%s\n", a > 0 ? "readable" : "not readable",
+            a > 0 ? "" : e1 == EACCES ? " (permission denied)" : e1 ? " (no kgsl-3d0)" : "");
+        if (a > 0) LOG("[android] GPU clock now %d MHz, cap %d MHz\n", a, c);
+    }
+    *now_mhz = gpu_clock_read(fd_now);
+    *cap_mhz = gpu_clock_read(fd_cap);
+}
 
 void plat_adpf_stats(PlatAdpfStats *out) {
     if (!out) return;

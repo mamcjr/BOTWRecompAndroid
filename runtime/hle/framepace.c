@@ -323,7 +323,16 @@ void rt_vfr_update(uint64_t vfr) {
         if (iv == 2 && tried_at && now - tried_at > 10000000000ull) wait_ns = 4000000000ull, tried_at = 0;
         if (iv == 3 && g_vfr_iv == 3 && fps_mode_now() != 3 && !no_escape && !old_rules && at3_since &&
             now - at3_since > wait_ns && w > 0 && w < 45.0) {
-            LOG("[framepace] 20 fps for %.0f s, work %.1f ms: trying 30 again\n", (now - at3_since) / 1e9, w);
+            char clk[48] = "";
+#ifdef __ANDROID__
+            {   // (the GPU's clock and cap there, when the system lets the app read them: platform/android.c)
+                extern void plat_gpu_clock_mhz(int *now_mhz, int *cap_mhz);
+                int g, cap;
+                plat_gpu_clock_mhz(&g, &cap);
+                if (g > 0) snprintf(clk, sizeof clk, ", GPU %d MHz (cap %d)", g, cap);
+            }
+#endif
+            LOG("[framepace] 20 fps for %.0f s, work %.1f ms%s: trying 30 again\n", (now - at3_since) / 1e9, w, clk);
             iv = 2, slow = 1.0f, tried_at = now, at3_since = 0;
         }
     }
