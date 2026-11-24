@@ -78,9 +78,10 @@ void vk_shader_build_report(const char *where);
 
 // ---- rendering: dynamic rendering, or classic render passes without it (rpcompat.c)
 // colors / ds_format: the attachments' view formats (VK_FORMAT_UNDEFINED: an unused slot), as the pipelines get them
-void vk_begin_rendering(VkCommandBuffer cb, const VkRenderingInfo *ri, const VkFormat *colors, VkFormat ds_format,
+bool vk_begin_rendering(VkCommandBuffer cb, const VkRenderingInfo *ri, const VkFormat *colors, VkFormat ds_format,
                         VkSampleCountFlagBits samples);
 void vk_end_rendering(VkCommandBuffer cb);
+bool vk_rendering_active(void);
 // A render pass a pipeline is made against (VK_NULL_HANDLE with dynamic rendering: VkPipelineRenderingCreateInfo then)
 VkRenderPass vk_rp_compat(uint32_t ncolor, const VkFormat *colors, VkFormat depth, VkFormat stencil, VkSampleCountFlagBits samples);
 void vk_rp_forget_view(VkImageView v);  // (a view destroyed: the framebuffers holding it go)

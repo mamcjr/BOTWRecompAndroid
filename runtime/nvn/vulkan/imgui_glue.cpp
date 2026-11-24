@@ -31,8 +31,13 @@ extern "C" bool vk_imgui_backend_init(void) {
     ii.PipelineRenderingCreateInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_RENDERING_CREATE_INFO_KHR;
     ii.PipelineRenderingCreateInfo.colorAttachmentCount = 1;
     ii.PipelineRenderingCreateInfo.pColorAttachmentFormats = &g_vk.sc_format;
-    if (!g_vk.dyn_render)  // (no dynamic rendering: the window image's render pass, rpcompat.c)
+    if (!g_vk.dyn_render) {  // (no dynamic rendering: the window image's render pass, rpcompat.c)
         ii.RenderPass = vk_rp_compat(1, &g_vk.sc_format, VK_FORMAT_UNDEFINED, VK_FORMAT_UNDEFINED, VK_SAMPLE_COUNT_1_BIT);
+        if (!ii.RenderPass) {
+            LOG("[vk] ImGui Vulkan backend init failed: no compatible render pass\n");
+            return false;
+        }
+    }
     bool ok = ImGui_ImplVulkan_Init(&ii);
     if (!ok) LOG("[vk] ImGui Vulkan backend init failed\n");
     return ok;
@@ -46,6 +51,7 @@ extern "C" void vk_imgui_backend_shutdown(void) {
 
 // A static RGBA8 image for ImGui (start screen background). Returns the ImTextureID.
 extern "C" uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h) {
+    if (!ImGui::GetIO().BackendRendererUserData) return 0;
     VkImageCreateInfo ci = {VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO};
     ci.imageType = VK_IMAGE_TYPE_2D;
     ci.format = VK_FORMAT_R8G8B8A8_UNORM;
