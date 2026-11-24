@@ -3830,6 +3830,29 @@ static int rt_kind(uint32_t f) {
     }
 }
 
+// The shader key's kind for an output into format f: rt_kind's, and on a Mali 5 / 6 (unsigned) and 7 / 8 (signed) for
+// 16 / 8-bit integer components, so the fragment shader writes the register's low bits (translate.c) as NVIDIA's
+// hardware stores them. Mali saturates a wider value instead: BOTW draws BC4 blocks through an RGBA16_UINT view with
+// bits above 16 left over (SavageWindRecomp 9950b9e: NPC speech bubbles came out 0xFFFF). Other GPUs: as before (their
+// shaders and pipeline keys unchanged). LARECOMP_RT_NARROW=0 / 1: off / on any GPU.
+static int rt_kind_key(uint32_t f) {
+    int k = rt_kind(f);
+    if (!k) return 0;
+    static int on = -1;
+    if (on < 0) {
+        const char *e = getenv("LARECOMP_RT_NARROW");
+        on = e ? atoi(e) != 0 : vk_driver_is_mali();
+    }
+    if (!on) return k;
+    switch (vk_format(f)) {
+    case VK_FORMAT_R16_UINT: case VK_FORMAT_R16G16_UINT: case VK_FORMAT_R16G16B16_UINT: case VK_FORMAT_R16G16B16A16_UINT: return 5;
+    case VK_FORMAT_R8_UINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8B8_UINT: case VK_FORMAT_R8G8B8A8_UINT: return 6;
+    case VK_FORMAT_R16_SINT: case VK_FORMAT_R16G16_SINT: case VK_FORMAT_R16G16B16_SINT: case VK_FORMAT_R16G16B16A16_SINT: return 7;
+    case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_SINT: case VK_FORMAT_R8G8B8_SINT: case VK_FORMAT_R8G8B8A8_SINT: return 8;
+    default: return k;
+    }
+}
+
 // Colour target i's format as the draws write it: its view's, when the view names one. BOTW draws its BC4 noise volume
 // through a view as RGBA16_UINT (a texel a block); typed by the texture's own format (BC: float), the fragment shader
 // wrote floats to an integer target - zero blocks on Mali.
@@ -7887,7 +7910,7 @@ static void draw_(CmdRec *r, bool indexed) {
     vkey.flip_y = fkey.flip_y = nvn_window_origin() == 0;
     vkey.depth_minus_one = nvn_depth_mode() == 0;
     for (int i = 0; i < st.nattrib; i++) vkey.attr_kind[i] = (uint8_t)attr_kind(st.attrib[i] & 0xFF);
-    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind(rt_format(i));
+    for (int i = 0; i < st.rt.ncolor; i++) if (st.rt.color[i]) fkey.rt_kind[i] = (uint8_t)rt_kind_key(rt_format(i));
 #ifdef __ANDROID__
     if (gmem_miss_log_on())  // (copy mode: early depth tests for the shaders that log misses - ShaderKey)
         fkey.no_ds_write = !st.rt.depth || !((st.ds[0] && st.ds[1]) || (st.ds[3] && ((st.stencil_mask[0] | st.stencil_mask[1]) & 0xFF)));
