@@ -6045,7 +6045,8 @@ static void gfast_finish(VkCommandBuffer cb) {
 // What a storing shader wrote goes back to guest memory once its submission is done (gcopy_retire: from vk_transient
 // before the ring reuses a chunk, and after every wait). Without this, global loads read zero: the game's text is
 // drawn by a vertex shader that reads its vertices that way (nothing of it showed).
-typedef struct { const uint8_t *src; uint64_t addr, len, seq; uint8_t *shadow; const uint64_t *bseq; } GcBack;  // (arena)
+// (shadow, bseq: the arena's; pre: outside it, the range as it was when copied for the GPU - gcopy_back_changed)
+typedef struct { const uint8_t *src; uint64_t addr, len, seq; uint8_t *shadow; const uint64_t *bseq; uint8_t *pre; } GcBack;
 static GcBack gc_back[256];
 static int gc_nback;
 static pthread_mutex_t gc_lock = PTHREAD_MUTEX_INITIALIZER;
@@ -6082,6 +6083,48 @@ static void ga_back_block(uint8_t *g, const uint8_t *src, uint8_t *sh, uint64_t 
     }
 }
 
+// Outside the arena (on a Mali whose driver offers the host import the arena is off: device.c), what a storing shader
+// wrote went back as a whole-range memcpy of the copy it worked on, taken when the call was translated: every word the
+// game's threads wrote since - in the 4 KB margin before each bound buffer and the gaps merged in (gcopy_ranges), where
+// the game's heap keeps its block headers and free-list links - went back to its old value. #401 (Mali-G1, 0.4.10 and
+// 0.4.11, Native and Recompiled alike) hung walking the heap's free list that looped, after a few minutes of fights;
+// 0.4.10's fix was only in the arena, which never started on that phone. Now only the 8-byte words the GPU changed
+// (src against pre, the range as it was copied) go back, each by compare-and-swap expecting pre's value: a word the game
+// wrote meanwhile stays the game's (counted, the first ones logged). Unaligned ends byte by byte, the same rule.
+// LARECOMP_GCOPY_WHOLE=1: the whole range, as before.
+static void gcopy_back_changed(uint8_t *g, const uint8_t *src, const uint8_t *pre, uint64_t n) {
+    static uint64_t kept, told;
+    uint64_t k0 = kept, i = 0;
+    for (; i < n && ((uintptr_t)(g + i) & 7); i++) {  // (the head, to 8-byte alignment)
+        if (src[i] == pre[i]) continue;
+        if (g[i] == pre[i]) g[i] = src[i]; else kept++;
+    }
+    for (; i + 8 <= n; i += 8) {
+        uint64_t s, p;
+        memcpy(&s, src + i, 8);
+        memcpy(&p, pre + i, 8);
+        if (s == p) continue;  // (the GPU didn't change it: the game's, whatever it holds now)
+        uint64_t expect = p;
+        if (__atomic_compare_exchange_n((uint64_t *)(g + i), &expect, s, false, __ATOMIC_RELAXED, __ATOMIC_RELAXED)) continue;
+        kept++;  // (the game wrote it since the copy: kept - the whole-range copy undid it)
+        if (told < 20) {
+            told++;
+            LOG("[vk] copy-back: a word the game wrote meanwhile kept, at heap+%llx (GPU %016llx, game %016llx, before %016llx)\n",
+                (unsigned long long)((uintptr_t)(g + i) - HEAP_BASE), (unsigned long long)s, (unsigned long long)expect,
+                (unsigned long long)p);
+        }
+    }
+    for (; i < n; i++) {  // (the tail)
+        if (src[i] == pre[i]) continue;
+        if (g[i] == pre[i]) g[i] = src[i]; else kept++;
+    }
+    static uint64_t next_log = 1;
+    if (kept != k0 && kept >= next_log) {  // (1, 2, 4, 8... so far)
+        next_log = kept * 2;
+        LOG("[vk] copy-back: %llu game writes kept so far (the whole-range copy undid them)\n", (unsigned long long)kept);
+    }
+}
+
 static void gcopy_retire(uint64_t done) {
     pthread_mutex_lock(&gc_lock);
     bool any_ready = false;
@@ -6095,7 +6138,10 @@ static void gcopy_retire(uint64_t done) {
     for (int i = 0; i < gc_nback; i++) {
         if (gc_back[i].seq <= done) {
             if (!gc_back[i].shadow) {
-                memcpy((void *)(uintptr_t)gc_back[i].addr, gc_back[i].src, gc_back[i].len);
+                if (gc_back[i].pre) {
+                    gcopy_back_changed((uint8_t *)(uintptr_t)gc_back[i].addr, gc_back[i].src, gc_back[i].pre, gc_back[i].len);
+                    free(gc_back[i].pre);
+                } else memcpy((void *)(uintptr_t)gc_back[i].addr, gc_back[i].src, gc_back[i].len);
                 continue;
             }
             // (the arena: 256 bytes at a time, what the GPU changed since the last upload - the shadow - and the CPU
@@ -6607,6 +6653,7 @@ static VkDescriptorBufferInfo gmiss_info(void) {
 
 static void gres_reset(void) {
     pthread_mutex_lock(&gc_lock);
+    for (int i = 0; i < gc_nback; i++) free(gc_back[i].pre);
     gc_nback = 0;  // (their shadow / bseq pointers and guest addresses belong to the boot being torn down)
     pthread_mutex_unlock(&gc_lock);
     for (int i = 0; i < ga_nres; i++) { free(ga_res[i].shadow); free(ga_res[i].bseq); }
@@ -6823,8 +6870,14 @@ static void gcopy_prepare(unsigned stage_mask, bool store) {
         gmap_tab[i * 4 + 0] = (uint32_t)r[i].lo;
         gmap_tab[i * 4 + 1] = (uint32_t)len;
         gmap_tab[i * 4 + 2] = (uint32_t)(off >> 2);
-        if (r[i].store && !gres_init() && gc_nback < 256)
-            gc_back[gc_nback++] = (GcBack){(const uint8_t *)gc_span.ptr + off, HEAP_BASE + r[i].lo, len, seq, NULL, NULL};
+        if (r[i].store && !gres_init() && gc_nback < 256) {
+            // (the range as it is now, kept: gcopy_retire writes back only what the GPU changed from it - #401)
+            static int whole = -1;
+            if (whole < 0) whole = getenv("LARECOMP_GCOPY_WHOLE") && atoi(getenv("LARECOMP_GCOPY_WHOLE"));
+            uint8_t *pre = whole ? NULL : malloc(len);
+            if (pre) memcpy(pre, (const uint8_t *)gc_span.ptr + off, len);
+            gc_back[gc_nback++] = (GcBack){(const uint8_t *)gc_span.ptr + off, HEAP_BASE + r[i].lo, len, seq, NULL, NULL, pre};
+        }
         off += (len + 255) & ~255ull;
     }
     pthread_mutex_unlock(&gc_lock);
