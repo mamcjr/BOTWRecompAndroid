@@ -1,0 +1,124 @@
+# Extended MainField benchmark set: 12 loaded places that exercise distinct GPU workloads.
+# Game 1.9.0; normal-mode MainField save past the Great Plateau. Scratch copies only.
+# Same format as benchmark-scenes.txt. X Y Z in world units; Y is the ground measured on the device + ~0.5, so the
+# harness's height check (2 units) catches a fall, water or a roof. time = 15 * hour. weather: 0 clear, 3 heavy rain.
+# yaw: 0 looks to +Z (south on the map), 90 to +X (east); pitch is positive looking up.
+# Every scene is on open ground or an indoor floor: no heat or cold damage, water, cliff edge, enemies in reach,
+# guards, shrine pads, Divine Beast areas or story triggers. Night scenes checked for night spawns.
+format = 1
+repeats = 2
+warmup_s = 20
+calm_s = 20
+warmup_max_s = 180
+window_s = 45
+thermal_max = 0
+thermal_wait_s = 300
+
+# Kakariko at 09:00: houses, lanterns, trees, fences and grass, villagers and chickens walking through the frame.
+# Noisy: NPC. Moving villagers push spread above 2%; keep for town CPU/render coverage, not small deltas.
+[scene]
+name = kakariko-day
+pos = 1822 219.0 991
+time = 135
+weather = 0
+yaw = 100
+pitch = 0
+
+# Hateno at 21:30: night lighting, street lamps and lit windows between the houses.
+[scene]
+name = hateno-night
+pos = 3438 226.8 2125
+time = 322
+weather = 0
+yaw = -100
+pitch = 0
+
+# Riverside Stable at 22:00: the stable building, its lamps and a campfire in the open at night.
+[scene]
+name = riverside-stable-night
+pos = 311.8 115.8 1088.6
+time = 330
+weather = 0
+yaw = 76
+pitch = 0
+
+# Inside Hateno Dye Shop at 12:00: indoor lighting, beams, banners/cloth, dye bottles, posters and NPC. MainField room.
+[scene]
+name = hateno-dye-interior
+pos = 3401.5 230.2 2154.5
+time = 180
+weather = 0
+yaw = 135
+pitch = 0
+
+# Hyrule Field at 13:00: a large tree, grass slopes to the horizon, rocks.
+[scene]
+name = field-grass
+pos = 42 133.9 1037
+time = 195
+weather = 0
+yaw = -150
+pitch = 0
+
+# Korok Plaza (Deku Tree archway) at 12:00: volumetric sunlight beams, forest fog, grass, flowers and canopy.
+[scene]
+name = korok-plaza
+pos = 447.5 252.0 -2038.5
+time = 180
+weather = 0
+yaw = 180
+pitch = 0
+
+# South Akkala Stable overlook at 08:00: autumn red/gold trees, drifting leaf particles, ground leaf decals and cliff shadows.
+[scene]
+name = akkala-foliage
+pos = 3126.96 307.26 -1692.38
+time = 120
+weather = 0
+yaw = -90
+pitch = 0
+
+# Faron jungle at 12:00: dense palm trunks, fern understory and layered canopy alpha overdraw.
+[scene]
+name = faron-jungle
+pos = 1563.82 166.49 3338.38
+time = 180
+weather = 0
+yaw = 0
+pitch = 0
+
+# Zora's Domain plaza at 10:00 in heavy rain: wet specular flagstones, fountain and glowing translucent Zora architecture.
+[scene]
+name = zora-plaza
+pos = 3296.97 245.36 -452.76
+time = 150
+weather = 3
+yaw = 180
+pitch = 0
+
+# Lake Hylia pier at 17:00: open sunlit water reflections, wooden pier/raft and distant Bridge of Hylia stone pillars.
+[scene]
+name = lake-hylia-shore
+pos = 76 91.2 2664
+time = 255
+weather = 0
+yaw = -80
+pitch = 0
+
+# Lurelin beach at 07:00: coastal bay water, docks, palms, sandy shore, campfire and NPC (a "Take" prompt shows near fish).
+[scene]
+name = lurelin-shore
+pos = 2979.34 107.2 3450.89
+time = 105
+weather = 0
+yaw = 0
+pitch = -5
+
+# Kara Kara Bazaar at 06:30, from the west shore: the oasis pond, palms, campfire and NPCs (a "Talk" prompt shows).
+[scene]
+name = karakara-oasis
+pos = -3270 129.5 2556
+time = 98
+weather = 0
+yaw = 95
+pitch = -12

@@ -75,6 +75,7 @@
 #define SETTLE_S 3             // after the load, before the stick: the camera finishes its own move
 #define ARRIVE_TOLERANCE 1.0   // units in X and Z (the probe's error: 0.02)
 #define MOVE_TOLERANCE 3.0     // in the window: Link stands still
+#define Y_TOLERANCE 2.0        // units: Link at the scene's height (on the ground: not fallen, swimming or on a roof)
 #define CAM_TOLERANCE 0.5      // degrees, the stick stops there
 #define CAM_DRIFT 2.0          // degrees, the window's end against the target
 #define TIME_DRIFT 0.01        // of the held time, at the window's end
@@ -90,6 +91,7 @@ typedef struct {
     bool ok;
     char step[24], why[120];
     double load_s, camera_s, warmup_s, fps, low1, low01, hz_start, hz_end, cam_err, moved;
+    double y_settle, y_start, y_end;  // Link's height after the settle, at the window's start and end
     Pct frame, gpu, cpu, game, render;
     BenchStats trace;
     double cooling_s;
@@ -231,8 +233,9 @@ static void write_report(const char *status) {
         json_pct(f, "cpu_ms", &r->cpu);
         json_pct(f, "game_thread_ms", &r->game);
         json_pct(f, "render_thread_ms", &r->render);
-        fprintf(f, "\"skipped_draws\":%llu,\"skipped_building\":%llu,\"shader_compiles\":%llu,\"display_hz_start\":%.1f,\"display_hz_end\":%.1f,\"camera_err_deg\":%.2f,\"moved\":%.2f,",
-                (unsigned long long)r->skipped, (unsigned long long)r->skipped_building, (unsigned long long)r->compiles, r->hz_start, r->hz_end, r->cam_err, r->moved);
+        fprintf(f, "\"skipped_draws\":%llu,\"skipped_building\":%llu,\"shader_compiles\":%llu,\"display_hz_start\":%.1f,\"display_hz_end\":%.1f,\"camera_err_deg\":%.2f,\"moved\":%.2f,\"y_settle\":%.2f,\"y_window_start\":%.2f,\"y_window_end\":%.2f,",
+                (unsigned long long)r->skipped, (unsigned long long)r->skipped_building, (unsigned long long)r->compiles, r->hz_start, r->hz_end, r->cam_err, r->moved,
+                r->y_settle, r->y_start, r->y_end);
         json_power(f, "power_start", &r->start, ",");
         json_power(f, "power_end", &r->end, "");
         fprintf(f, "}%s\n", i + 1 < nresults ? "," : "");
@@ -260,13 +263,14 @@ static void write_report(const char *status) {
     snprintf(tmp, sizeof tmp, "%s/report.csv.tmp", out_dir);
     if (!(f = fopen(tmp, "w"))) return;
     fprintf(f, "scene,repeat,status,step,frames,fps,frame_p50,frame_p95,frame_p99,low_1pct_fps,low_01pct_fps,over_50ms,gpu_p50,gpu_p95,gpu_p99,"
-               "cpu_p50,cpu_p95,cpu_p99,skipped_draws,skipped_building,shader_compiles,warmup_s,display_hz,thermal_start,thermal_end\n");
+               "cpu_p50,cpu_p95,cpu_p99,skipped_draws,skipped_building,shader_compiles,warmup_s,display_hz,thermal_start,thermal_end,y_settle,y_window_start,y_window_end\n");
     for (int i = 0; i < nresults; i++) {
         const Result *r = &results[i];
-        fprintf(f, "%s,%d,%s,%s,%d,%.2f,%.3f,%.3f,%.3f,%.2f,%.2f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%.1f,%.1f,%d,%d\n",
+        fprintf(f, "%s,%d,%s,%s,%d,%.2f,%.3f,%.3f,%.3f,%.2f,%.2f,%d,%.3f,%.3f,%.3f,%.3f,%.3f,%.3f,%llu,%llu,%llu,%.1f,%.1f,%d,%d,%.2f,%.2f,%.2f\n",
                 scenes[r->scene].name, r->repeat, r->ok ? "ok" : "harness_error", r->ok ? "" : r->step, r->frames, r->fps, r->frame.p50, r->frame.p95,
                 r->frame.p99, r->low1, r->low01, r->over50, r->gpu.p50, r->gpu.p95, r->gpu.p99, r->cpu.p50, r->cpu.p95, r->cpu.p99,
-                (unsigned long long)r->skipped, (unsigned long long)r->skipped_building, (unsigned long long)r->compiles, r->warmup_s, r->hz_end, r->start.thermal, r->end.thermal);
+                (unsigned long long)r->skipped, (unsigned long long)r->skipped_building, (unsigned long long)r->compiles, r->warmup_s, r->hz_end, r->start.thermal, r->end.thermal,
+                r->y_settle, r->y_start, r->y_end);
     }
     fclose(f);
     snprintf(path, sizeof path, "%s/report.csv", out_dir);
@@ -487,6 +491,7 @@ static int good;
 static uint64_t skipped_t0, compiles_t0, building_t0;
 static double hz_start, load_s, camera_s, warm_s;
 static float pos0[3];
+static double y_settle;
 static Power power_start;
 
 static void set_step(const char *step) {
@@ -685,6 +690,13 @@ static Result *measure(void) {
     return r;
 }
 
+// Link's height against the scene's: off by more than Y_TOLERANCE, the reason for a harness_error at "position"
+static bool off_height(const char *when, float y, const Scene *s, char *why, size_t n) {
+    if (fabs(y - s->pos[1]) <= Y_TOLERANCE) return false;
+    snprintf(why, n, "Link at height %.2f %s, the scene's %.2f (tolerance %.1f): fell, swimming or on something?", y, when, s->pos[1], Y_TOLERANCE);
+    return true;
+}
+
 void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t *ry) {
     extern bool widescreen_world_play(void);
     extern bool framepace_in_event(void);
@@ -748,6 +760,9 @@ void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t
         break;
     case S_SETTLE:
         if (since >= SETTLE_S) {
+            char why[120];
+            y_settle = pos[1];
+            if (off_height("after the settle", pos[1], s, why, sizeof why)) { end_scene(NULL, false, "position", why); break; }
             phase_t = t;
             state = S_CAMERA;
             set_step("camera");
@@ -786,6 +801,8 @@ void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t
         warm_s = (t - warm_t) / 1e9;
         if ((since >= warmup_s && (t - calm_t) / 1e9 >= calm_s) || warm_s >= warmup_max_s) {
             extern double vk_display_hz(void);
+            char why[120];
+            if (off_height("at the window's start", pos[1], s, why, sizeof why)) { end_scene(NULL, false, "position", why); break; }
             int cap = window_s * 130 + 64;  // (more than the panel's 120 Hz could present)
             if (cap > win_cap) {
                 free(win), free(g_sort);
@@ -818,8 +835,12 @@ void benchmark_input(uint64_t *b, int32_t *lx, int32_t *ly, int32_t *rx, int32_t
         Result *r = measure();
         r->cam_err = hypot(ey, ep);
         r->moved = hypot(pos[0] - pos0[0], pos[2] - pos0[2]);
+        r->y_settle = y_settle, r->y_start = pos0[1], r->y_end = pos[1];
+        char why[120];
+        bool off_y = off_height("at the window's end", pos[1], s, why, sizeof why);
         double drift = fabs(RDF(time_mgr + TM_TIME) - s->time);
         if (!angles) end_scene(r, false, "check", "the camera can't be read");
+        else if (off_y) end_scene(r, false, "position", why);
         else if (r->moved > MOVE_TOLERANCE) end_scene(r, false, "check", "Link moved in the window");
         else if (r->cam_err > CAM_DRIFT) end_scene(r, false, "check", "the camera drifted in the window");
         else if (drift > TIME_DRIFT) end_scene(r, false, "check", "the time of day didn't hold");
