@@ -35,6 +35,7 @@ extern "C" {
 uint64_t vk_imgui_texture_rgba(const void *rgba, int w, int h);
 bool menu_input_captured(void);  // ui/menu.mm
 void menu_test_open(void);       // ui/menu.mm: opens the in-game menu
+int nfp_reader_state(void);      // services/nfp.c: 1 while the game looks for an amiibo
 void menu_request_close(void);   // ui/menu.mm
 bool input_pad_present(void);    // hle/input.c: a controller with axes (not a fingerprint sensor, #477)
 bool input_pad_usable(uint32_t id);
@@ -491,13 +492,16 @@ static void recompute(void) {  // (t_lock held; also once a frame: the power's h
 }
 
 // (icon layout) a finger off an icon control: a tap shorter than PULSE_MS keeps its button that long; the power's
-// tap is L, sent now (none when it was held into the rune wheel, nor when the touch was cancelled)
-static void icon_release(int f, bool cancelled) {  // (t_lock held)
+// tap is L, sent now (none when it was held into the rune wheel, nor when the touch was cancelled). While the game
+// looks for an amiibo (the amiibo rune out, aimed), the tap that would put the rune away opens the menu on the amiibo
+// picker instead (true: the caller opens it, after the lock)
+static bool icon_release(int f, bool cancelled) {  // (t_lock held)
     int c = fingers[f].ctl;
-    if (editing || c < C_ICON || c >= C_ICON + I_N) return;
+    if (editing || c < C_ICON || c >= C_ICON + I_N) return false;
     int k = c - C_ICON;
     uint64_t now = SDL_GetTicks();
     if (k == I_POWER) {
+        if (!fingers[f].wheel && !cancelled && nfp_reader_state() == 1) { fan_open = false; return true; }
         if (!fingers[f].wheel && !cancelled) pulse_until[TB_L] = now + PULSE_MS;
         if (fingers[f].wheel && fan_open && !cancelled && fan_sel >= 0 && fan_items[fan_sel] != rune_now) {  // (the fan's pick)
             rune_goal = fan_items[fan_sel], goal_start = now, goal_done = 0, flick_until = flick_gap_until = 0;
@@ -511,6 +515,7 @@ static void icon_release(int f, bool cancelled) {  // (t_lock held)
     if (k == I_WEAPON || k == I_SHIELD || k == I_ARROWS || (k == I_POWER && fingers[f].wheel)) keep_icons_until = now + 5000;
     if (k == I_INVENTORY) keep_icons_until = 0;
     if (k == I_BLOCK) block_up_ms = now;  // (a second touch soon: shield surfing)
+    return false;
 }
 
 static void release_all(void) {
@@ -611,7 +616,6 @@ extern "C" bool touch_controls_visible(void) {
 // ---- the performance overlay (ui/perf_overlay.mm), dragged with a finger anywhere on the screen - with or without the
 // on-screen controls (a controller connected) - and kept there (g_settings.overlay_pos); LASRecompAndroid's
 extern float g_perf_rect[4];  // where it was last drawn (pixels)
-extern float g_amiibo_rect[4];  // ui/menu.mm: the "Touch the amiibo" button
 static SDL_FingerID overlay_finger;
 static bool overlay_dragging;
 static float overlay_dx, overlay_dy;
@@ -672,12 +676,6 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
         extern volatile int g_debug_frame_request;  // (hle/input.c)
         if (n == 3) g_debug_frame_request = 1, fprintf(stderr, "[touch] debug frame requested\n");
     }
-    if (e->type == SDL_EVENT_FINGER_DOWN && !editing && !menu_input_captured() && g_amiibo_rect[2] > 0) {
-        // (the game looks for an amiibo: the "Touch the amiibo" button at the top - ui/menu.mm - opens the menu on it)
-        float x = e->tfinger.x * disp_w, y = e->tfinger.y * disp_h;
-        const float *r = g_amiibo_rect;
-        if (x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]) { menu_test_open(); return true; }
-    }
     if (!editing && !menu_input_captured() && overlay_drag(e, e->tfinger.x * disp_w, e->tfinger.y * disp_h)) return true;
     if (!editing && (menu_input_captured() || !g_settings.touch_controls || hide_auto)) { release_all(); return false; }  // (the menu's clicks)
     used = true;
@@ -710,6 +708,8 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
             else stick_update(s);
         }
         if (ctl == C_MENU && !editing) act = C_MENU;
+        if (ctl == TB_L && !editing && nfp_reader_state() == 1)  // (the classic layout's L: the amiibo's, as the power's)
+            fingers[nfingers - 1].ctl = C_NONE, act = C_MENU;
         if (is_bar(ctl)) act = ctl;
     } else if (e->type == SDL_EVENT_FINGER_MOTION && f >= 0) {
         float px = fingers[f].x, py = fingers[f].y;
@@ -743,7 +743,7 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
         }
     } else if ((e->type == SDL_EVENT_FINGER_UP || e->type == SDL_EVENT_FINGER_CANCELED) && f >= 0) {
         if ((fingers[f].ctl == C_STICK || fingers[f].ctl == C_RSTICK) && !editing) stick_release(fingers[f].ctl == C_RSTICK);
-        icon_release(f, e->type == SDL_EVENT_FINGER_CANCELED);
+        if (icon_release(f, e->type == SDL_EVENT_FINGER_CANCELED)) act = C_MENU;
         fingers[f] = fingers[--nfingers];
     }
     recompute();

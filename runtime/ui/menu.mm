@@ -59,7 +59,6 @@ static std::vector<QEvent> q_events;
 static float g_pixel_density = 1;
 float g_screen_dp = 0;  // the screen's density (Android: px a dp) and height in pixels, for ui/perf_overlay.mm
 int g_screen_h_px = 0;
-float g_amiibo_rect[4];  // (the "Touch the amiibo" button while the game looks for one, pixels; [2] = 0: none - ui/touch_controls.mm)
 
 static void push(const QEvent &e) {
     pthread_mutex_lock(&q_lock);
@@ -905,7 +904,8 @@ static void tab_quit(float scale, bool in_game) {
 }
 
 // amiibo (services/nfp.c): a figure picked here is "touched" on the game's virtual reader. At the top of Controls while
-// the game looks for one (the amiibo rune; the menu opens itself then: menu_render), lower down otherwise.
+// the game looks for one (the amiibo rune: a second tap on the touch controls' power opens the menu here), lower down
+// otherwise.
 extern "C" int nfp_amiibo_count(void);
 extern "C" const char *nfp_amiibo_name(int i);
 extern "C" int nfp_reader_state(void);
@@ -923,7 +923,8 @@ static void amiibo_section(int state) {
          : state == 2 ? "An amiibo is on the reader."
                       : "Use the amiibo rune in the game and place it, then open this menu and touch an amiibo here. "
                         "Each figure gives its items once a day, as on the Switch.");
-    if (state == 1 && ImGui::Button(tr("Touch the amiibo"))) {  // (only while the game looks: read at once)
+    // (a big button, the page's width: a finger's)
+    if (state == 1 && ImGui::Button(tr("Touch the amiibo"), ImVec2(-FLT_MIN, ImGui::GetFontSize() * 2.6f))) {
         nfp_touch(pick);
         set_open(false);  // (back to the game, which reads it)
     }
@@ -1528,16 +1529,15 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     const double tw = target_w, th = target_h;
 #endif
     bool open = g_open.load();
-    // The game looks for an amiibo (the amiibo rune): a line at the top says so (drawn below); the menu isn't opened by
-    // itself - it covered the rune's aiming, where the figure's items land
-    bool amiibo_wait = !open && nfp_reader_state() == 1;
+    // (the game looks for an amiibo - the amiibo rune out: the menu isn't opened by itself, it covered the rune's aiming;
+    // a second tap on the power - ui/touch_controls.mm - opens it on the amiibo picker)
     bool kbd = g_kbd.load() == 1;
 #ifdef __ANDROID__
     bool touch = touch_controls_visible();
 #else
     bool touch = false;
 #endif
-    if (!open && !kbd && !g_settings.show_fps && !touch && !amiibo_wait) {
+    if (!open && !kbd && !g_settings.show_fps && !touch) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -1606,23 +1606,6 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         touch_controls_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     }
 #endif
-    {   // A big "Touch the amiibo" button at the top while the game looks for one: a tap on it (ui/touch_controls.mm,
-        // g_amiibo_rect) opens the menu on the amiibo; the rest of the screen stays the game's, for the rune's aiming
-        g_amiibo_rect[2] = 0;
-        if (amiibo_wait) {
-            const char *t = tr("Touch the amiibo");
-            ImFont *f = g_font_big ? g_font_big : ImGui::GetFont();
-            float fs = f->FontSize * 1.1f, padx = 46 * scale, pady = 22 * scale;
-            ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, t);
-            ImVec2 a(io.DisplaySize.x * 0.5f - ts.x * 0.5f - padx, 30 * scale), b(a.x + ts.x + 2 * padx, a.y + ts.y + 2 * pady);
-            ImDrawList *fg = ImGui::GetForegroundDrawList();
-            ui_sheikah_frame_filled(fg, a, b, IM_COL32(10, 22, 26, 225), 14 * scale);
-            ui_sheikah_frame(fg, a, b, IM_COL32(65, 222, 246, 240), 14 * scale, 3 * scale);
-            fg->AddText(f, fs, ImVec2(a.x + padx, a.y + pady), IM_COL32(240, 235, 218, 255), t);
-            g_amiibo_rect[0] = a.x, g_amiibo_rect[1] = a.y, g_amiibo_rect[2] = b.x - a.x, g_amiibo_rect[3] = b.y - a.y;
-        }
-    }
-
     if (open) {
         // dim the game behind the menu
         ImGui::GetBackgroundDrawList()->AddRectFilled(ImVec2(0, 0), io.DisplaySize, IM_COL32(0, 0, 0, 110));
