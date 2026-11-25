@@ -72,6 +72,7 @@ extern "C" bool touch_controls_visible(void);  // ui/touch_controls.mm
 extern "C" void touch_controls_draw(ImVec2 display, ImFont *font);
 #endif
 static void set_open(bool open);
+extern "C" int nfp_reader_state(void);  // (services/nfp.c: the game looks for an amiibo)
 extern "C" void menu_test_open(void) {
     set_open(true);
     if (getenv("LARECOMP_MENU_TAB")) { extern int g_tab_request_ext; g_tab_request_ext = atoi(getenv("LARECOMP_MENU_TAB")); }
@@ -91,6 +92,8 @@ static void set_open(bool open) {
         static bool opened;  // the controller's cursor: the first tab (Controls) the first time this session, later the
         menu_tabs_focus(!opened);  // selected one
         opened = true;
+        extern int g_tab_request_ext;
+        if (nfp_reader_state() == 1) g_tab_request_ext = 8;  // (the game looks for an amiibo: Controls, amiibo on top)
     }
     else { settings_save(); osk_cancel(); g_text_busy = false; }
 }
@@ -917,9 +920,9 @@ static void amiibo_section(int state) {
     choice("amiibo", &pick, names.data(), (int)names.size());
     hint(state == 1 ? "The game is looking for an amiibo: pick one and touch it."
          : state == 2 ? "An amiibo is on the reader."
-                      : "Use the amiibo rune in the game, then touch an amiibo here (touched first, it's read as soon as "
-                        "the game looks for one). Each figure gives its items once a day, as on the Switch.");
-    if (ImGui::Button(tr("Touch the amiibo"))) {
+                      : "Use the amiibo rune in the game and place it, then open this menu and touch an amiibo here. "
+                        "Each figure gives its items once a day, as on the Switch.");
+    if (state == 1 && ImGui::Button(tr("Touch the amiibo"))) {  // (only while the game looks: read at once)
         nfp_touch(pick);
         set_open(false);  // (back to the game, which reads it)
     }
@@ -1524,19 +1527,16 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     const double tw = target_w, th = target_h;
 #endif
     bool open = g_open.load();
-    {   // The game starts looking for an amiibo (the amiibo rune): the menu opens on Controls, its amiibo at the top
-        static int last_nfp;
-        int s = nfp_reader_state();
-        if (s == 1 && last_nfp != 1 && !open) set_open(true), g_tab_request_ext = 8, open = true;
-        last_nfp = s;
-    }
+    // The game looks for an amiibo (the amiibo rune): a line at the top says so (drawn below); the menu isn't opened by
+    // itself - it covered the rune's aiming, where the figure's items land
+    bool amiibo_wait = !open && nfp_reader_state() == 1;
     bool kbd = g_kbd.load() == 1;
 #ifdef __ANDROID__
     bool touch = touch_controls_visible();
 #else
     bool touch = false;
 #endif
-    if (!open && !kbd && !g_settings.show_fps && !touch) {
+    if (!open && !kbd && !g_settings.show_fps && !touch && !amiibo_wait) {
         if (g_inited) { pthread_mutex_lock(&q_lock); q_events.clear(); pthread_mutex_unlock(&q_lock); }
         return;
     }
@@ -1605,6 +1605,17 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         touch_controls_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     }
 #endif
+    if (amiibo_wait) {  // (on top of the game, takes no touch: the menu, opened as usual, starts on the amiibo)
+        const char *t = tr("Looking for an amiibo: open the menu to touch one");
+        ImFont *f = g_font_big ? g_font_big : ImGui::GetFont();
+        float fs = f->FontSize * 0.8f;
+        ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, t);
+        ImVec2 p(io.DisplaySize.x * 0.5f - ts.x * 0.5f, 40 * scale);
+        ImDrawList *fg = ImGui::GetForegroundDrawList();
+        fg->AddRectFilled(ImVec2(p.x - 18 * scale, p.y - 10 * scale), ImVec2(p.x + ts.x + 18 * scale, p.y + ts.y + 10 * scale),
+                          IM_COL32(10, 22, 26, 210), 10 * scale);
+        fg->AddText(f, fs, p, IM_COL32(65, 222, 246, 255), t);
+    }
 
     if (open) {
         // dim the game behind the menu

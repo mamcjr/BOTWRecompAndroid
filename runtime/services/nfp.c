@@ -371,13 +371,12 @@ int nfp_reader_state(void) {
     return s;
 }
 
-// The player touches figure i: on the reader now if the game is looking, else as soon as it starts to
+// The player touches figure i while the game looks for one (the menu shows the button only then)
 void nfp_touch(int i) {
     if (i < 0 || i >= N_AMIIBO) return;
     KEvent *e = NULL;
     pthread_mutex_lock(&nfp.mtx);
-    if (nfp.dev_state == DS_SEARCHING) e = tag_arrive(i);
-    else nfp.pending = i, LOG("[nfp] amiibo waiting for the game: %s\n", k_amiibo[i].name);
+    if (nfp.dev_state == DS_SEARCHING) e = tag_arrive(i);  // (not before: the game may look while the rune aims)
     pthread_mutex_unlock(&nfp.mtx);
     signal_event(e);
 }
