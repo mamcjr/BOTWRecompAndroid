@@ -33,7 +33,7 @@ enum { ASPECT_UNLOCKED = 0, ASPECT_ORIGINAL = 1 };
 enum { RES_MATCH = 0, RES_1X = 1, RES_Q75 = 9, RES_Q50 = 10, RES_Q25 = 11, RES_DYNAMIC = 12 };
 enum { OUT_AUTO = 0 };
 
-static struct { int aspect, res_mode, out_lines; } g_settings = {ASPECT_UNLOCKED, RES_MATCH, OUT_AUTO};
+static struct { int aspect, res_mode, out_lines; bool center_world_map; } g_settings = {ASPECT_UNLOCKED, RES_MATCH, OUT_AUTO, false};
 static int g_game_version = 190;
 static bool title, menu, touch, low_ram_flag;
 static uint64_t frame = 100, scene = 100;
@@ -552,10 +552,10 @@ int main(int argc, char **argv) {
     title = false;
 
     /* Even with LARECOMP_NO_SCOPE_BARS (cropped==false), menu==false keeps 1280x608 0xe91b1fb6 out of map_open */
-    g_map_frame = 0;
+    map_frame = 0;
     init_f_defaults(f, 1.6f); f[132] = 1280; f[133] = 608; f[134] = -640; f[135] = 304; g_cur_fs_hash = 0xe91b1fb6e1eb920bull;
     assert(!run_cbuf(f, sizeof f, &target));
-    assert(g_map_frame == 0);
+    assert(map_frame == 0);
     g_cur_fs_hash = 0;
 
     /* Loading screen cream top band (1280x275 at y=360, f[135]=0.0, fixed) at g=0.9 and g=0.75 */
@@ -596,7 +596,41 @@ int main(int argc, char **argv) {
     st.scissor[0][0] = 100; st.scissor[0][1] = 90; st.scissor[0][2] = 1720; st.scissor[0][3] = 900;
     VkRect2D sr = run_scissor_blocks();
     assert(sr.offset.y == 89 && sr.extent.height == 901);
-    menu = false; g_map_frame = 0; frame += 31; scene = frame;
+    /* Centered map is opt-in. Check the fitted terrain, marker, scissor and final viewport
+       at both the HONOR Magic V5 inner-screen size and 4:3. */
+    const int displays[][2] = {{2352, 2172}, {2048, 1536}};
+    for (int i = 0; i < 2; ++i) {
+        double w = displays[i][0], h = displays[i][1], shape = w / h / base;
+        widescreen_set_shape(shape); widescreen_set_factor(shape);
+        g_cur_fs_hash = 0xe91b1fb6e1eb920bull;
+        init_f_defaults(f, base * shape);
+        f[132] = 1280; f[133] = 608; f[134] = -640; f[135] = 304;
+        g_settings.center_world_map = false;
+        assert(run_cbuf(f, sizeof f, &target)); eqf(copied[5], base);
+        assert(!widescreen_cropped());
+        g_settings.center_world_map = true;
+        assert(!run_cbuf(f, sizeof f, &target));  /* terrain already fits */
+        assert(widescreen_cropped());
+        vx = vy = 0; vw = w; vh = h;
+        widescreen_present_crop(frame, shape, crop, &vx, &vy, &vw, &vh);
+        eqf(vw, w); eqf(vx, 0); eqf(vw / vh, base); eqf(2 * vy + vh, h);
+        g_cur_fs_hash = 0x2222;
+        init_f_defaults(f, base); f[19] = 100; f[23] = 180;
+        assert(run_cbuf(f, sizeof f, &target));
+        eqf(copied[23], 180); eqf(copied[5], base * shape);
+        pass_w = (uint32_t)w; pass_h = (uint32_t)h;
+        vp_sx = (float)w / target.width; vp_sy = (float)h / target.height;
+        sr = run_scissor_blocks();
+        double scale = w / target.width;
+        assert(fabs(sr.offset.y - ((h - target.height * scale) / 2 + 90 * scale)) <= 1);
+        assert(fabs(sr.extent.height - 900 * scale) < 2);
+        frame += 4; scene = frame;
+        assert(!widescreen_cropped());
+    }
+    pass_w = 1728; pass_h = 1080; vp_sx = 0.9f; vp_sy = 1.0f;
+    g_settings.center_world_map = false;
+    widescreen_set_shape(0.9f); widescreen_set_factor(0.9f);
+    menu = false; map_frame = 0; frame += 31; scene = frame;
     touch = true; widescreen_minimap_seen();
     st.scissor[0][0] = 1625; st.scissor[0][1] = 800; st.scissor[0][2] = 200; st.scissor[0][3] = 200;
     sr = run_scissor_blocks();
@@ -634,11 +668,13 @@ int main(int argc, char **argv) {
     init_f_defaults(f, base * 1.25f); f[19] = -574.0f; f[23] = 320.0f;
     assert(run_cbuf(f, sizeof f, &target));
     eqf(copied[19], -574.0f - 160.0f);
-    menu = true; g_map_frame = frame;
+    menu = true; widescreen_map_seen();
+    g_settings.center_world_map = true; assert(!widescreen_cropped());
     target.width = 1920; target.height = 1080; pass_w = 2400; pass_h = 1080; vp_sx = 1.25f; vp_sy = 1.0f; vp_ox = 0; vp_oy = 0;
     st.scissor[0][0] = 160; st.scissor[0][1] = 100; st.scissor[0][2] = 1600; st.scissor[0][3] = 880;
     sr = run_scissor_blocks();
     assert(sr.offset.x == 200 && sr.extent.width == 2000);
+    g_settings.center_world_map = false;
 
     /* 4j. draw_() narrow tall_ui viewport bypass & g_wide_backdrop scale-divergence check */
     boot(0.9f, ASPECT_UNLOCKED);
@@ -671,7 +707,7 @@ int main(int argc, char **argv) {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--wsl', action='store_true')
-    parser.add_argument('--negative-control', choices=['camera', 'ui', 'anchor', 'map', 'crop', 'band', 'crop_title', 'oob_guard', 'tall_ui', 'backdrop'])
+    parser.add_argument('--negative-control', choices=['camera', 'ui', 'anchor', 'map', 'center_map', 'crop', 'band', 'crop_title', 'oob_guard', 'tall_ui', 'backdrop'])
     args = parser.parse_args()
 
     out_scale_src = (ROOT / 'runtime/nvn/output_scale.c').read_text(encoding='utf-8')
@@ -691,10 +727,6 @@ def main():
     wh_start = ex.index('static float wide_half(void)')
     wh_end = ex.index('// LARECOMP_LOG_PANEFIX=1', wh_start)
     wide_helpers = ex[wh_start:wh_end]
-
-    mo_start = ex.index('static uint64_t g_map_frame;')
-    mo_end = ex.index('static VkRect2D scissor_rect(void) {', mo_start)
-    map_open_block = ex[mo_start:mo_end]
 
     sc1_start = ex.index('    {   // The minimap group up top')
     sc1_end = ex.index('    if (sx != 1 || sy != 1 || ox != 0 || oy != 0) {', sc1_start)
@@ -721,7 +753,6 @@ def main():
         + dev_func + '\n'
         + UI_STUBS
         + wide_helpers
-        + map_open_block
         + BACKDROP_HEAD + backdrop_block + '}\n'
         + VIEWPORT_HEAD + viewport_block + '}\n'
         + EXEC_WRAPPERS + cb_block + EXEC_WRAPPER_MID
@@ -745,6 +776,10 @@ def main():
         old = 'if (vert_plus) { for (int i = 4; i < 8; i++) m[i] /= g; }'
         assert old in source
         source = source.replace(old, 'if (vert_plus) { /* negative control */ }', 1)
+    elif args.negative_control == 'center_map':
+        old = 'g_settings.center_world_map && wide < 0.999f'
+        assert old in source
+        source = source.replace(old, 'g_settings.center_world_map && wide < 0.5f', 1)
     elif args.negative_control == 'crop':
         old = 'crop[3] = (float)shape, crop[1] = (1.0f - crop[3]) * 0.5f;'
         assert old in source
@@ -754,9 +789,9 @@ def main():
         assert old in source
         source = source.replace(old, 'bool top_band = false &&', 1)
     elif args.negative_control == 'crop_title':
-        old = 'return scope || framepace_on_title();'
+        old = 'scope || framepace_on_title()'
         assert old in source
-        source = source.replace(old, 'return scope;', 1)
+        source = source.replace(old, 'scope', 1)
     elif args.negative_control == 'oob_guard':
         old = 'bool is_cover = !cropped && pane && tall_full_cover(f);'
         assert old in source

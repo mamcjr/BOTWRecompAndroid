@@ -1,4 +1,8 @@
 // The menus' text in French (ui/i18n.mm): {English as in the code, French}.
+{"Center world map at 16:9",
+ "Centrer la carte au format 16:9"},
+{"On narrow landscape screens, show the map with its original proportions and bars above and below.",
+ "Sur les écrans étroits en mode paysage, affiche la carte dans ses proportions d’origine avec des bandes en haut et en bas."},
 {"\n\nChosen: ",
  "\n\nChoisi : "},
 {"\n\nProgress since your last save is lost.",

@@ -1,4 +1,8 @@
 // The menus' text in Korean (ui/i18n.mm): {English as in the code, Korean}.
+{"Center world map at 16:9",
+ "월드 맵을 16:9로 가운데 표시"},
+{"On narrow landscape screens, show the map with its original proportions and bars above and below.",
+ "가로 모드에서 화면 너비가 좁으면 위아래에 여백을 두고 지도를 원래 비율로 표시합니다."},
 {"\n\nChosen: ",
  "\n\n선택됨: "},
 {"\n\nProgress since your last save is lost.",

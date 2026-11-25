@@ -80,6 +80,8 @@ float widescreen_hud_anchor_text(float x, float y) { (void)x, (void)y; return 0.
 float widescreen_hud_shift(float x, float y) { (void)x, (void)y; return 0.0f; }
 float widescreen_hud_shift_text(float x, float y) { (void)x, (void)y; return 0.0f; }
 bool widescreen_narrow_vert_plus(void) { return false; }
+void widescreen_map_seen(void) {}
+bool widescreen_map_open(float wide) { (void)wide; return false; }
 bool widescreen_cropped(void) { return false; }
 void widescreen_band_seen(void) {}
 void widescreen_backdrop_seen(uint64_t h) { (void)h; }

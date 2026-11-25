@@ -1,4 +1,8 @@
 // The menus' text in Japanese (ui/i18n.mm): {English as in the code, Japanese}.
+{"Center world map at 16:9",
+ "ワールドマップを16:9で中央に表示"},
+{"On narrow landscape screens, show the map with its original proportions and bars above and below.",
+ "横向きで横幅が狭い画面では、上下に帯を入れてマップを元の縦横比で表示します。"},
 {"\n\nChosen: ",
  "\n\n選択中: "},
 {"\n\nProgress since your last save is lost.",

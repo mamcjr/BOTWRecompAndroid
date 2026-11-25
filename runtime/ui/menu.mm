@@ -555,6 +555,9 @@ static void tab_display(void) {
                "edges (menus stay in the middle). Game versions 1.8.2 and 1.9.0 (1.0.0 and 1.6.0 keep 16:9 with bars); a change applies "
                "when the game starts again (Quit -> Return to start, then Play). Original 16:9: the game's own framing, "
                "with bars.");
+    if (g_settings.aspect == ASPECT_UNLOCKED)
+        opt_toggle("Center world map at 16:9", &g_settings.center_world_map, false,
+                   "On narrow landscape screens, show the map with its original proportions and bars above and below.");
 #ifndef __ANDROID__  // (Android: always the whole screen)
     bool fs = g_settings.fullscreen;
     if (opt_toggle("Fullscreen", &fs, false, "Fills the screen. Also: F11, Alt+Enter or Cmd+Ctrl+F.")) {
