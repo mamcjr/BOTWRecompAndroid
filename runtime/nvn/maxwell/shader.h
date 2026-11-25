@@ -139,6 +139,10 @@ extern bool maxwell_cb_window;
 // (GLSL) fmin / fmax / saturate as GLSL min / max / clamp: the GPU returns the non-NaN operand and saturates NaN to 0
 // (Adreno, as D3D requires) - what the NaN-testing helpers do. Set by the Android backend.
 extern bool maxwell_fast_minmax;
+// (GLSL, Mali) Dead .CC / as_u/as_f call / tsize macro / entry IPA.MUL 1/w cleanup passes (LARECOMP_MALI_SPIRV_CLEANUP).
+extern bool maxwell_mali_cleanup;
+// (GLSL fragment, Mali) Unreachable KIL pruning and entry KIL hoisting (LARECOMP_MALI_DISCARD_OPT).
+extern bool maxwell_mali_discard_opt;
 // Debug: when translating the shader whose code starts at maxwell_dbg_code, output register
 // maxwell_dbg_reg as captured after the instruction at maxwell_dbg_pc (greyscale, all targets).
 extern const uint8_t *maxwell_dbg_code;

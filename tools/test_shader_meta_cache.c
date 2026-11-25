@@ -155,6 +155,9 @@ int main(void) {
 
     for (unsigned bit = 0; bit <= 22; bit++)
         assert_key_differs_vs(blob_a, cmax, const_sz, STAGE_VERTEX, &vkey, tf ^ (1u << bit), 0x100000000ull, 0x80000000ull, TEST_BUILD_ID, h1a, h2a);
+    assert_key_differs_vs(blob_a, cmax, const_sz, STAGE_VERTEX, &vkey, tf ^ MW_TF_MALI_CLEANUP, 0x100000000ull, 0x80000000ull, TEST_BUILD_ID, h1a, h2a);
+    assert_key_differs_vs(blob_a, cmax, const_sz, STAGE_VERTEX, &vkey, tf ^ MW_TF_MALI_DISCARD_OPT, 0x100000000ull, 0x80000000ull, TEST_BUILD_ID, h1a, h2a);
+    assert_key_differs_vs(blob_a, cmax, const_sz, STAGE_VERTEX, &vkey, tf ^ MW_TF_SHADER_TERMINATE, 0x100000000ull, 0x80000000ull, TEST_BUILD_ID, h1a, h2a);
 
     // Fragment ShaderKey fields
     ShaderKey fkey = {.glsl = 1, .flip_y = true, .vs_out_mask = 0x3fu};

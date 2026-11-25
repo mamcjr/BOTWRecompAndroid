@@ -48,6 +48,9 @@ enum {
     MW_TF_NO_DISCARD       = 1u << 20,
     MW_TF_NO_STEP_CLAMP    = 1u << 21,
     MW_TF_NO_UNORM_ROUND   = 1u << 22,
+    MW_TF_MALI_CLEANUP     = 1u << 25,
+    MW_TF_MALI_DISCARD_OPT = 1u << 26,
+    MW_TF_SHADER_TERMINATE = 1u << 27,
 };
 
 enum {

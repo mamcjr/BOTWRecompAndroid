@@ -62,6 +62,9 @@ typedef struct {
     bool mem_dmabuf;              // VK_EXT_external_memory_dma_buf: that file as a dma-buf, when the opaque one won't do
     uint64_t placed_align;
     bool exec_stats;              // (Android, LARECOMP_SHADER_STATS=1) the compiler's statistics of each pipeline, logged
+    bool shader_terminate;        // VK_KHR_shader_terminate_invocation / Vulkan 1.3 core
+    bool mali_spirv_cleanup;      // !BC && ASTC: Maxwell/SPIR-V cleanup pass (LARECOMP_MALI_SPIRV_CLEANUP)
+    bool mali_discard_opt;        // !BC && ASTC: discard pruning/hoisting & terminate opt (LARECOMP_MALI_DISCARD_OPT)
     uint32_t api;                 // the device's Vulkan version as used: 1.3, or 1.1 / 1.2 with extensions (device.c)
 #endif
     // window

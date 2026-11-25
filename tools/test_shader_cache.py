@@ -47,6 +47,11 @@ int check(void) {
     if (normal == vk_shader_source_hash("void main(){}",0,true)) return 15;
     if (normal == vk_shader_source_hash("void main(){}",1,false)) return 16;
     if (normal == vk_shader_source_hash("void main(){ }",0,false)) return 17;
+    if (normal != vk_shader_source_hash_ex("void main(){}",0,false,0)) return 18;
+    if (normal == vk_shader_source_hash_ex("void main(){}",0,false,1)) return 19;
+    if (vk_shader_source_hash_ex("void main(){}",0,false,1) == vk_shader_source_hash_ex("void main(){}",0,false,2)) return 20;
+    if (vk_shader_source_hash_ex("void main(){}",0,false,1) == vk_shader_source_hash_ex("void main(){}",0,false,3)) return 21;
+    if (vk_shader_source_hash_ex("void main(){}",0,false,2) == vk_shader_source_hash_ex("void main(){}",0,false,3)) return 22;
     return 0;
 }
 ''')
@@ -59,7 +64,7 @@ const fs = require('fs');
 WebAssembly.instantiate(fs.readFileSync(process.argv[2])).then(({instance}) => {
   const code = instance.exports.check();
   if (code) throw new Error(`Shader cache check ${code} failed`);
-  console.log('17 shader cache checks passed (production C)');
+  console.log('22 shader cache checks passed (production C)');
 }).catch(e => {console.error(e); process.exit(1);});
 ''')
 subprocess.run(['node', str(out / 'run.cjs'), str(out / 'test.wasm')], check=True)

@@ -123,6 +123,7 @@ unsigned maxwell_gmem_miss_stages = ~0u;
 bool maxwell_no_int64 = false, maxwell_gmem_map_all = false, maxwell_gmem_miss_log = false, maxwell_brx_window = true;
 bool maxwell_static_stacks = true, maxwell_structured = true, maxwell_struct_skips = true, maxwell_no_switch = false;
 bool maxwell_no_local_struct = false, maxwell_native_half = true, maxwell_fast_minmax = true, maxwell_cb_window = false;
+bool maxwell_mali_cleanup = false, maxwell_mali_discard_opt = false;
 int g_game_version = 0x190;
 volatile int g_debug_frame_request = 0;
 VkShaderModule vk_builtin_shader(const char *name) { (void)name; return VK_NULL_HANDLE; }

@@ -7,6 +7,9 @@
 
 #include "shaders.h"
 #include "shader_cache.h"
+#ifdef __ANDROID__
+#include "spirv_opt_mali.h"
+#endif
 
 void vk_shaders_init(void) {  // (compilers are per thread: check shaderc works at all)
     shaderc_compiler_t c = shaderc_compiler_initialize();
@@ -148,8 +151,14 @@ static void strip_names(uint32_t *spv, size_t *nwords) {
 uint32_t *vk_glsl_to_spirv_ex(const char *src, int stage, const char *name, size_t *nwords, uint64_t *out_hash) {
     bool optimized = getenv("LARECOMP_VK_OPT") != NULL;
 #ifdef __ANDROID__
-    uint64_t h = vk_shader_source_hash(src, stage, optimized);
     uint32_t api = g_vk.api ? g_vk.api : VK_API_VERSION_1_3;  // (0: no device yet - as 1.3)
+    uint32_t post_flags = 0u;
+    if (stage != STAGE_VERTEX) {
+        if (g_vk.mali_spirv_cleanup && (stage == STAGE_FRAGMENT || stage == STAGE_COMPUTE)) post_flags |= 1u;
+        if (g_vk.mali_discard_opt && stage == STAGE_FRAGMENT && api >= VK_API_VERSION_1_3 && g_vk.shader_terminate)
+            post_flags |= 2u;
+    }
+    uint64_t h = vk_shader_source_hash_ex(src, stage, optimized, post_flags);
     if (api < VK_API_VERSION_1_3) h ^= (uint64_t)api << 32;  // (older SPIR-V for a device below 1.3, below)
 #else
     uint64_t h = src_hash(src, stage);
@@ -190,6 +199,10 @@ uint32_t *vk_glsl_to_spirv_ex(const char *src, int stage, const char *name, size
         *nwords = n / 4;
         strip_names(out, nwords);
         if (stage == STAGE_VERTEX) out = no_contraction(out, nwords);
+#ifdef __ANDROID__
+        if (post_flags & 2u) spirv_mali_demote_to_terminate(&out, nwords);
+        if (post_flags & 1u) spirv_mali_cleanup(&out, nwords);
+#endif
         if (!nocache) cache_store(h, out, *nwords);
     }
     shaderc_result_release(r);
