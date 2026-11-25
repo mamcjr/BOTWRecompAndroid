@@ -611,6 +611,7 @@ extern "C" bool touch_controls_visible(void) {
 // ---- the performance overlay (ui/perf_overlay.mm), dragged with a finger anywhere on the screen - with or without the
 // on-screen controls (a controller connected) - and kept there (g_settings.overlay_pos); LASRecompAndroid's
 extern float g_perf_rect[4];  // where it was last drawn (pixels)
+extern float g_amiibo_rect[4];  // ui/menu.mm: the "Touch the amiibo" button
 static SDL_FingerID overlay_finger;
 static bool overlay_dragging;
 static float overlay_dx, overlay_dy;
@@ -670,6 +671,12 @@ extern "C" bool touch_controls_event(const SDL_Event *e) {
         if (tap) SDL_free(SDL_GetTouchFingers(e->tfinger.touchID, &n));
         extern volatile int g_debug_frame_request;  // (hle/input.c)
         if (n == 3) g_debug_frame_request = 1, fprintf(stderr, "[touch] debug frame requested\n");
+    }
+    if (e->type == SDL_EVENT_FINGER_DOWN && !editing && !menu_input_captured() && g_amiibo_rect[2] > 0) {
+        // (the game looks for an amiibo: the "Touch the amiibo" button at the top - ui/menu.mm - opens the menu on it)
+        float x = e->tfinger.x * disp_w, y = e->tfinger.y * disp_h;
+        const float *r = g_amiibo_rect;
+        if (x >= r[0] && x <= r[0] + r[2] && y >= r[1] && y <= r[1] + r[3]) { menu_test_open(); return true; }
     }
     if (!editing && !menu_input_captured() && overlay_drag(e, e->tfinger.x * disp_w, e->tfinger.y * disp_h)) return true;
     if (!editing && (menu_input_captured() || !g_settings.touch_controls || hide_auto)) { release_all(); return false; }  // (the menu's clicks)

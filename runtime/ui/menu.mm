@@ -59,6 +59,7 @@ static std::vector<QEvent> q_events;
 static float g_pixel_density = 1;
 float g_screen_dp = 0;  // the screen's density (Android: px a dp) and height in pixels, for ui/perf_overlay.mm
 int g_screen_h_px = 0;
+float g_amiibo_rect[4];  // (the "Touch the amiibo" button while the game looks for one, pixels; [2] = 0: none - ui/touch_controls.mm)
 
 static void push(const QEvent &e) {
     pthread_mutex_lock(&q_lock);
@@ -1605,16 +1606,21 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
         touch_controls_draw(io.DisplaySize, g_font_big ? g_font_big : ImGui::GetFont());
     }
 #endif
-    if (amiibo_wait) {  // (on top of the game, takes no touch: the menu, opened as usual, starts on the amiibo)
-        const char *t = tr("Looking for an amiibo: open the menu to touch one");
-        ImFont *f = g_font_big ? g_font_big : ImGui::GetFont();
-        float fs = f->FontSize * 0.8f;
-        ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, t);
-        ImVec2 p(io.DisplaySize.x * 0.5f - ts.x * 0.5f, 40 * scale);
-        ImDrawList *fg = ImGui::GetForegroundDrawList();
-        fg->AddRectFilled(ImVec2(p.x - 18 * scale, p.y - 10 * scale), ImVec2(p.x + ts.x + 18 * scale, p.y + ts.y + 10 * scale),
-                          IM_COL32(10, 22, 26, 210), 10 * scale);
-        fg->AddText(f, fs, p, IM_COL32(65, 222, 246, 255), t);
+    {   // A big "Touch the amiibo" button at the top while the game looks for one: a tap on it (ui/touch_controls.mm,
+        // g_amiibo_rect) opens the menu on the amiibo; the rest of the screen stays the game's, for the rune's aiming
+        g_amiibo_rect[2] = 0;
+        if (amiibo_wait) {
+            const char *t = tr("Touch the amiibo");
+            ImFont *f = g_font_big ? g_font_big : ImGui::GetFont();
+            float fs = f->FontSize * 1.1f, padx = 46 * scale, pady = 22 * scale;
+            ImVec2 ts = f->CalcTextSizeA(fs, FLT_MAX, 0, t);
+            ImVec2 a(io.DisplaySize.x * 0.5f - ts.x * 0.5f - padx, 30 * scale), b(a.x + ts.x + 2 * padx, a.y + ts.y + 2 * pady);
+            ImDrawList *fg = ImGui::GetForegroundDrawList();
+            ui_sheikah_frame_filled(fg, a, b, IM_COL32(10, 22, 26, 225), 14 * scale);
+            ui_sheikah_frame(fg, a, b, IM_COL32(65, 222, 246, 240), 14 * scale, 3 * scale);
+            fg->AddText(f, fs, ImVec2(a.x + padx, a.y + pady), IM_COL32(240, 235, 218, 255), t);
+            g_amiibo_rect[0] = a.x, g_amiibo_rect[1] = a.y, g_amiibo_rect[2] = b.x - a.x, g_amiibo_rect[3] = b.y - a.y;
+        }
     }
 
     if (open) {
