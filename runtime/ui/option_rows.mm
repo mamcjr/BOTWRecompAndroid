@@ -81,31 +81,48 @@ static void chevron(ImDrawList *dl, float x, float cy, float s, ImU32 col) {
     dl->AddLine(ImVec2(x + s * 0.5f, cy), ImVec2(x - s * 0.5f, cy + s), col, fmaxf(1.5f, s * 0.28f));
 }
 
+// A finger dragged up / down scrolls the window it started in (pages, the description pane, a choice's open list),
+// and a flick keeps it going, slowing down, as phone lists do - not only the scrollbar, whose grab got small on long
+// pages. A new touch stops the glide.
 void ui_touch_scroll() {
 #ifdef __ANDROID__
     ImGuiIO &io = ImGui::GetIO();
     static ImGuiContext *context;
     static ImGuiID owner;
     static ImVec2 origin;
-    static float start_scroll;
+    static float start_scroll, velocity;  // velocity: px a second, upward finger motion positive
     static bool dragging;
+    static ImGuiID glide;                 // the window still gliding after the finger left, and its speed
+    static float glide_v;
     ImGuiWindow *window = ImGui::GetCurrentWindow();
+    float dt = io.DeltaTime > 0 && io.DeltaTime < 0.1f ? io.DeltaTime : 1.0f / 60;
+    if (glide == window->ID && !io.MouseDown[0]) {
+        float y = window->Scroll.y + glide_v * dt;
+        glide_v *= expf(-dt * 3.5f);
+        if (y <= 0 || y >= window->ScrollMax.y || fabsf(glide_v) < 30) glide = 0;
+        ImGui::SetScrollY(fminf(fmaxf(y, 0), window->ScrollMax.y));
+    }
     if (io.MouseSource != ImGuiMouseSource_TouchScreen) return;
+    if (ImGui::IsMouseClicked(0)) glide = 0;  // (a new touch stops any glide)
     if (ImGui::IsMouseClicked(0) && ImGui::IsWindowHovered(ImGuiHoveredFlags_AllowWhenBlockedByActiveItem) &&
         (!ImGui::IsPopupOpen("", ImGuiPopupFlags_AnyPopupId) || (window->Flags & ImGuiWindowFlags_Popup))) {
         context = ImGui::GetCurrentContext(); owner = window->ID;
-        origin = io.MousePos; start_scroll = window->Scroll.y; dragging = false;
+        origin = io.MousePos; start_scroll = window->Scroll.y; dragging = false; velocity = 0;
     }
     if (context != ImGui::GetCurrentContext() || owner != window->ID) return;
     float dx = io.MousePos.x - origin.x, dy = io.MousePos.y - origin.y;
     if (io.MouseDown[0] && fabsf(dy) > ImGui::GetFontSize() * 0.4f && fabsf(dy) > fabsf(dx) * 1.3f && window->ScrollMax.y > 0 &&
         !g_drag_id)
         dragging = true;
-    if (dragging) {
+    if (dragging && io.MouseDown[0]) {
         ImGui::ClearActiveID();  // a swipe must not activate the row when the finger lifts
         ImGui::SetScrollY(start_scroll - dy);
+        velocity = velocity * 0.6f + (-io.MouseDelta.y / dt) * 0.4f;  // (smoothed over the last frames)
     }
-    if (!io.MouseDown[0]) { owner = 0; dragging = false; }
+    if (!io.MouseDown[0]) {
+        if (dragging && fabsf(velocity) > 200) glide = window->ID, glide_v = velocity;
+        owner = 0; dragging = false;
+    }
 #endif
 }
 
@@ -438,6 +455,7 @@ void opt_end(void) {
     ImGui::BeginChild("##desc", ImVec2(0, avail.y), ImGuiChildFlags_AlwaysUseWindowPadding, ImGuiWindowFlags_NoNav);
     ImGui::PopStyleColor();
     ImGui::PopStyleVar();
+    ui_touch_scroll();  // (a long description scrolls with a finger too)
     ImVec2 cp = ImGui::GetWindowPos(), cs = ImGui::GetWindowSize();
     // the watermark first: the Sheikah eye, faint, low in the pane
     ui_sheikah_eye(dl = ImGui::GetWindowDrawList(), ImVec2(cp.x + cs.x * 0.5f, cp.y + cs.y * 0.7f), fminf(cs.x * 0.17f, 70 * s),

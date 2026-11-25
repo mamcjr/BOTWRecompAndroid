@@ -511,7 +511,14 @@ static bool choice(const char *label, int *value, const char *const *names, int 
     ImGui::SameLine(ImGui::GetContentRegionAvail().x * 0.45f);
     bool changed = false;
     ImGui::SetNextItemWidth(reserve > 0 ? -reserve : -1);
-    if (ImGui::BeginCombo("##c", tr(names[*value]))) {
+    // (the open list: taller, its scrollbar wide and its grab long enough for a finger, and it scrolls with a finger -
+    // the amiibo list had only a thin scrollbar to drag)
+    ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, ImGui::GetFontSize() * 0.9f);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, ImGui::GetFontSize() * 2.0f);
+    bool open_list = ImGui::BeginCombo("##c", tr(names[*value]), ImGuiComboFlags_HeightLarge);
+    ImGui::PopStyleVar(2);
+    if (open_list) {
+        ui_touch_scroll();
         for (int i = 0; i < n; i++) {
             ImGui::PushID(i);  // (the shown names may repeat once translated)
             if (ImGui::Selectable(tr(names[i]), i == *value)) { *value = i; changed = true; }
@@ -566,8 +573,16 @@ static void tab_display(void) {
     opt_toggle("Show FPS", &g_settings.show_fps, false,
                "Shows the performance overlay: the frame rate and how the phone is doing. Drag it with a finger to move it; "
                "double-tap it to switch compact / detailed.");
+    // (folded by default: nine rows under Show FPS crowded the page. The what-it-shows rows only for the detailed
+    // style - the compact line always shows the same five readings)
+    static bool overlay_open;
     if (g_settings.show_fps) {  // (ui/perf_overlay.mm; LASRecompAndroid's, with Swap2-Native's overlay's settings)
         opt_indent(1);
+        if (opt_action("Overlay settings", overlay_open ? "Hide" : "Show",
+                       "The overlay's style, size and opacity, and what the detailed style shows."))
+            overlay_open = !overlay_open;
+    }
+    if (g_settings.show_fps && overlay_open) {
         static const char *styles[] = {"Detailed", "Compact"};
         opt_choice("Overlay style", &g_settings.overlay_style, styles, 2, 0,
                    "Detailed: the GPU, frame rate and frame time with 48 s charts, CPU clock caps, temperatures, battery, "
@@ -588,13 +603,14 @@ static void tab_display(void) {
             {OVERLAY_BATTERY, "Battery and temperatures", "The SoC's and the battery's temperature, and the battery's level."},
             {OVERLAY_MEMORY, "Memory", "The game's memory (and its chart) and the phone's free memory."},
         };
-        for (const auto &it : items) {
-            bool on = (g_settings.overlay_items & it.bit) != 0;
-            if (opt_toggle(it.label, &on, true, it.desc))
-                g_settings.overlay_items = on ? g_settings.overlay_items | it.bit : g_settings.overlay_items & ~it.bit;
-        }
-        opt_indent(-1);
+        if (g_settings.overlay_style == 0)
+            for (const auto &it : items) {
+                bool on = (g_settings.overlay_items & it.bit) != 0;
+                if (opt_toggle(it.label, &on, true, it.desc))
+                    g_settings.overlay_items = on ? g_settings.overlay_items | it.bit : g_settings.overlay_items & ~it.bit;
+            }
     }
+    if (g_settings.show_fps) opt_indent(-1);
 #else
     opt_toggle("Show FPS", &g_settings.show_fps, false, "Shows the frame rate in the top right corner.");
 #endif
@@ -1340,6 +1356,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
     ImGui::PushStyleVar(ImGuiStyleVar_FramePadding, ImVec2(18 * scale, 18 * scale));
     ImGui::PushStyleVar(ImGuiStyleVar_ItemSpacing, ImVec2(14 * scale, 14 * scale));
     ImGui::PushStyleVar(ImGuiStyleVar_ScrollbarSize, 22 * scale);
+    ImGui::PushStyleVar(ImGuiStyleVar_GrabMinSize, 48 * scale);  // (the scrollbar's grab: long enough for a finger on long pages)
     float bottom = 84 * scale, height = fmaxf(1, ImGui::GetContentRegionAvail().y - bottom);
     ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0, 0, 0, 0));
     ImGui::BeginChild("##touchpage", ImVec2(0, height), ImGuiChildFlags_None);
@@ -1385,7 +1402,7 @@ static void tabs_body(float scale, bool in_game, void (*prelaunch)(float)) {
         ImGui::PopStyleVar();
         ImGui::PopStyleColor();
     }
-    ImGui::PopStyleVar(3);
+    ImGui::PopStyleVar(4);
     g_tab_request = -2;
     opt_focus_first(false);
     return;
