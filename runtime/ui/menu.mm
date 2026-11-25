@@ -884,7 +884,39 @@ static void tab_quit(float scale, bool in_game) {
     opt_end();
 }
 
+// amiibo (services/nfp.c): a figure picked here is "touched" on the game's virtual reader. At the top of Controls while
+// the game looks for one (the amiibo rune; the menu opens itself then: menu_render), lower down otherwise.
+extern "C" int nfp_amiibo_count(void);
+extern "C" const char *nfp_amiibo_name(int i);
+extern "C" int nfp_reader_state(void);
+extern "C" void nfp_touch(int i);
+extern "C" void nfp_lift(void);
+static void set_open(bool open);
+static void amiibo_section(int state) {
+    static int pick;
+    static std::vector<const char *> names;
+    if (names.empty())
+        for (int i = 0; i < nfp_amiibo_count(); i++) names.push_back(nfp_amiibo_name(i));
+    header("amiibo");
+    choice("amiibo", &pick, names.data(), (int)names.size());
+    hint(state == 1 ? "The game is looking for an amiibo: pick one and touch it."
+         : state == 2 ? "An amiibo is on the reader."
+                      : "Use the amiibo rune in the game, then touch an amiibo here (touched first, it's read as soon as "
+                        "the game looks for one). Each figure gives its items once a day, as on the Switch.");
+    if (ImGui::Button(tr("Touch the amiibo"))) {
+        nfp_touch(pick);
+        set_open(false);  // (back to the game, which reads it)
+    }
+    if (state == 2) {
+        ImGui::SameLine();
+        if (ImGui::Button(tr("Lift the amiibo"))) nfp_lift();
+    }
+    ImGui::Spacing();
+}
+
 static void tab_about(void) {
+    int nfp_state = nfp_reader_state();
+    if (nfp_state) amiibo_section(nfp_state);
     header("System language");
     {
         // what the game is told the console's language is: its text follows this (runtime/settings.c)
@@ -933,6 +965,7 @@ static void tab_about(void) {
     }
 #endif
     ImGui::Spacing();
+    if (!nfp_state) amiibo_section(0);
     controls_bindings_draw(ImGui::GetFontSize() / 34);
     ImGui::Spacing();
     header("Menu");
@@ -1474,6 +1507,12 @@ void menu_render(void *cmd, uint32_t target_w, uint32_t target_h) {
     const double tw = target_w, th = target_h;
 #endif
     bool open = g_open.load();
+    {   // The game starts looking for an amiibo (the amiibo rune): the menu opens on Controls, its amiibo at the top
+        static int last_nfp;
+        int s = nfp_reader_state();
+        if (s == 1 && last_nfp != 1 && !open) set_open(true), g_tab_request_ext = 8, open = true;
+        last_nfp = s;
+    }
     bool kbd = g_kbd.load() == 1;
 #ifdef __ANDROID__
     bool touch = touch_controls_visible();

@@ -64,27 +64,4 @@ SERVICE("aoc:u", aoc_u) {
     }
 }
 
-// ------------------------------------------------------------------ nfp:user (amiibo)
-// No amiibo reader: the interface initializes, lists no devices and hands out events that never fire. BOTW opens it at
-// boot (the logging stub returned no IUser object: a null session).
-static void nfp_user(Service *s, IpcReq *req, IpcResp *resp) {
-    (void)s;
-    switch (req->cmd) {
-    case 0: case 1: break;                                  // Initialize / Finalize
-    case 2: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;  // ListDevices: none
-    case 17: case 18: case 23:                              // Attach{Activate,Deactivate,AvailabilityChange}Event
-        resp->copy_handles[resp->ncopy++] = new_event_handle();
-        break;
-    case 19: OUT(uint32_t, 0) = 1; resp_size(resp, 4); break;  // GetState: initialized
-    case 20: OUT(uint32_t, 0) = 0; resp_size(resp, 4); break;  // GetDeviceState: none
-    default:
-        LOG("[nfp] IUser cmd %u (ok)\n", req->cmd);
-        resp_size(resp, 0x10);
-    }
-}
-
-SERVICE("nfp:user", nfp_user_manager) {
-    (void)s;
-    if (req->cmd == 0) ipc_return_object(resp, service_new("nfp:IUser", nfp_user, NULL));  // CreateUserInterface
-    else LOG("[nfp] nfp:user cmd %u (ok)\n", req->cmd);
-}
+// (nfp:user, amiibo: services/nfp.c)
