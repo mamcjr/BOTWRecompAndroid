@@ -99,7 +99,8 @@ static void test_bc_task(void *ctx, uint32_t start, uint32_t count) {
 }
 
 typedef struct {
-    const uint8_t *bc1;
+    int mode;  // 0: BC1->ASTC, 1: BC3->ASTC, 2: BC5u->ASTC LA
+    const uint8_t *bc;
     uint8_t *astc;
     _Atomic uint64_t *cpu_chunks;
 } TestAstcCtx;
@@ -112,7 +113,12 @@ static void test_astc_task(void *ctx, uint32_t start, uint32_t count) {
         if (cpu >= 0 && cpu < 64) atomic_fetch_add_explicit(&c->cpu_chunks[cpu], 1, memory_order_relaxed);
     }
 #endif
-    bc1_to_astc(c->bc1 + (uint64_t)start * 8, c->astc + (uint64_t)start * 16, count);
+    if (c->mode == 0)
+        bc1_to_astc(c->bc + (uint64_t)start * 8, c->astc + (uint64_t)start * 16, count);
+    else if (c->mode == 1)
+        bc3_to_astc(c->bc + (uint64_t)start * 16, c->astc + (uint64_t)start * 16, count);
+    else
+        bc5_unorm_to_astc_la(c->bc + (uint64_t)start * 16, c->astc + (uint64_t)start * 16, count);
 }
 
 static void cover_task(void *ctx, uint32_t start, uint32_t count) {
@@ -435,8 +441,8 @@ int main(void) {
         assert(astc1 && astc4);
         memset(astc1, 0xA5, astc_sz);
         memset(astc4, 0x5A, astc_sz);
-        TestAstcCtx a1 = {blocks, astc1, NULL};
-        TestAstcCtx a4 = {blocks, astc4, NULL};
+        TestAstcCtx a1 = {0, blocks, astc1, NULL};
+        TestAstcCtx a4 = {0, blocks, astc4, NULL};
         vk_bc_pool_run(NULL, test_astc_task, &a1, (uint32_t)nblocks, 256, 1);
         vk_bc_pool_run(&pool, test_astc_task, &a4, (uint32_t)nblocks, 256, 4);
         assert(memcmp(astc1, astc4, astc_sz) == 0);
@@ -492,29 +498,41 @@ int main(void) {
         free(out4);
     }
 
-    // Wall-clock BC1 -> ASTC 1T vs 4T benchmark on 1024x1024 (256x256 blocks = 65536 blocks)
+    // Wall-clock BC1/BC3/BC5_UNORM -> ASTC 1T vs 4T bit-exact parity & benchmark on 1024x1024 (65536 blocks)
     {
         uint32_t wb = 256, hb = 256;
         size_t nblocks = (size_t)wb * hb;
-        uint8_t *bc1 = malloc(nblocks * 8);
+        uint8_t *bc = malloc(nblocks * 16);
         uint8_t *astc1 = malloc(nblocks * 16);
         uint8_t *astc4 = malloc(nblocks * 16);
-        assert(bc1 && astc1 && astc4);
-        fill_prng(bc1, nblocks * 8, 0x0badc0de12345678ull);
+        assert(bc && astc1 && astc4);
+        fill_prng(bc, nblocks * 16, 0x0badc0de12345678ull);
 
         _Atomic uint64_t cpu_chunks[64];
         for (int c = 0; c < 64; c++) atomic_init(&cpu_chunks[c], 0);
 
-        for (int w = 0; w < 2; w++) bc1_to_astc(bc1, astc1, nblocks);
+        // BC3 -> ASTC 4x4 1T vs 4T bit-exact parity
+        bc3_to_astc(bc, astc1, nblocks);
+        TestAstcCtx a3 = {1, bc, astc4, NULL};
+        vk_bc_pool_run(&pool, test_astc_task, &a3, (uint32_t)nblocks, 256, 4);
+        assert(memcmp(astc1, astc4, nblocks * 16) == 0);
+
+        // BC5_UNORM -> ASTC 4x4 LA 1T vs 4T bit-exact parity
+        bc5_unorm_to_astc_la(bc, astc1, nblocks);
+        TestAstcCtx a5 = {2, bc, astc4, NULL};
+        vk_bc_pool_run(&pool, test_astc_task, &a5, (uint32_t)nblocks, 256, 4);
+        assert(memcmp(astc1, astc4, nblocks * 16) == 0);
+
+        for (int w = 0; w < 2; w++) bc1_to_astc(bc, astc1, nblocks);
         uint64_t t1_best = UINT64_MAX;
         for (int it = 0; it < 5; it++) {
             uint64_t t0 = now_ns();
-            bc1_to_astc(bc1, astc1, nblocks);
+            bc1_to_astc(bc, astc1, nblocks);
             uint64_t dt1 = now_ns() - t0;
             if (dt1 < t1_best) t1_best = dt1;
         }
 
-        TestAstcCtx a4 = {bc1, astc4, NULL};
+        TestAstcCtx a4 = {0, bc, astc4, NULL};
         for (int w = 0; w < 2; w++) vk_bc_pool_run(&pool, test_astc_task, &a4, (uint32_t)nblocks, 256, 4);
         a4.cpu_chunks = cpu_chunks;
         uint64_t t4_best = UINT64_MAX;
@@ -527,16 +545,17 @@ int main(void) {
         assert(memcmp(astc1, astc4, nblocks * 16) == 0);
         double ms1 = t1_best / 1e6, ms4 = t4_best / 1e6;
         spd_astc = ms1 / ms4;
-        printf("[bench] BC1->ASTC 1024x1024 (256x256 blocks): 1T %.2f ms vs 4T %.2f ms (%.2fx)", ms1, ms4, spd_astc);
+        printf("[bench] BC1/BC3/BC5u->ASTC 1024x1024 (256x256 blocks): BC1 1T %.2f ms vs 4T %.2f ms (%.2fx)",
+               ms1, ms4, spd_astc);
         print_cpu_chunks(cpu_chunks);
         printf("\n");
-        free(bc1);
+        free(bc);
         free(astc1);
         free(astc4);
     }
 
     vk_bc_pool_destroy(&pool);
-    printf("PASS: test_bc_parallel (policy, chunking, coverage, bit-exact 12 BC + ASTC, 512x512 %.2fx / 1024x1024 %.2fx / ASTC %.2fx)\n",
+    printf("PASS: test_bc_parallel (policy, chunking, coverage, bit-exact 12 BC + BC1/BC3/BC5u ASTC, 512x512 %.2fx / 1024x1024 %.2fx / ASTC %.2fx)\n",
            spd512, spd1024, spd_astc);
     return 0;
 }

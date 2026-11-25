@@ -133,6 +133,7 @@ typedef struct TexBackend {
     uint8_t astc_bw, astc_bh;  // ASTC without GPU support: decoded to RGBA8 on upload (runtime/nvn/astc.c)
     bool astc_srgb;
     VkFormat bc_vf;  // (Android) a BC format the GPU lacks (Mali): decoded on upload into b->format (textures.c)
+    uint8_t bc_astc_mode;  // (Android) VK_BC_ASTC_*: 0 decoded/native, 1 RGBA ASTC 4x4, 2 LA ASTC 4x4 (BC5_UNORM)
     struct BcShadow *bc_shadow;  // (bc_vf) drawn into through a view of the block's size: the blocks (textures.c)
     VkFormat view_alt;  // (a render target made without MUTABLE_FORMAT: textures.c rt_formats) the one other format its
     bool fixed_fmt;     // views may have - its sRGB / UNORM twin, or none

@@ -18,6 +18,8 @@
 #include "../renderer.h"
 #include "../texpatch.h"
 #ifdef __ANDROID__
+#include "device_compat.h"
+#include "bc_astc_policy.h"
 #include "bc_parallel.h"
 #endif
 
@@ -202,37 +204,77 @@ static bool format_supports(VkFormat f, VkFormatFeatureFlags want) {
 #include "../bcdec.h"
 #include "../bc1_astc.h"
 
-// BC1 (most of BOTW's textures: ~150 MB of them around a village, ~1.1 GB as RGBA8 - the Mali phones' "low memory"
-// kills and 1-5 fps after a few minutes, #143 #155 #162) into ASTC 4x4 instead where the GPU samples it (every Mali):
-// the same block, 2x BC1's size, the colours within a step or two (bc1_astc.c). LARECOMP_BC1_ASTC=0: RGBA8 as before.
-static bool bc1_astc(void) {
-    static int ok = -1;
-    if (ok < 0) {
-        const char *e = getenv("LARECOMP_BC1_ASTC");
+// BC1 / BC3 / BC5_UNORM -> ASTC 4x4 on BC-less ASTC-capable GPUs (Mali):
+// - BC1 -> ASTC 4x4 (2x BC1 size instead of 8x RGBA8); LARECOMP_BC1_ASTC=0 disables.
+// - BC3 -> ASTC 4x4 (1x BC3 size instead of 4x RGBA8); LARECOMP_BC3_ASTC=0/1 overrides LARECOMP_BC_ASTC_EXT.
+// - BC5_UNORM -> ASTC 4x4 LA (1x BC5 size instead of 2x RG8); LARECOMP_BC5_ASTC=0/1 overrides LARECOMP_BC_ASTC_EXT.
+static bool astc_4x4_supported(void) {
+    static _Atomic int ok = -1;
+    int v = atomic_load_explicit(&ok, memory_order_acquire);
+    if (v < 0) {
         VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
-        ok = (!e || atoi(e)) && format_supports(VK_FORMAT_ASTC_4x4_UNORM_BLOCK, need) &&
-             format_supports(VK_FORMAT_ASTC_4x4_SRGB_BLOCK, need);
-        if (ok) LOG("[vk] BC1 textures as ASTC 4x4\n");
+        v = (format_supports(VK_FORMAT_ASTC_4x4_UNORM_BLOCK, need) &&
+             format_supports(VK_FORMAT_ASTC_4x4_SRGB_BLOCK, need)) ? 1 : 0;
+        atomic_store_explicit(&ok, v, memory_order_release);
     }
-    return ok;
+    return v != 0;
 }
 
-// The format a BC texture is decoded into without BC; *bpp: its bytes per texel (0: ASTC 4x4 blocks - bc1_to_astc)
-static VkFormat bc_target(VkFormat bc, uint32_t *bpp) {
+static void bc_astc_cfg(bool *bc1_on, bool *bc3_on, bool *bc5_on) {
+    static _Atomic int state = 0;  // bit 0: initialized, bit 1: BC1, bit 2: BC3, bit 3: BC5_UNORM
+    int m = atomic_load_explicit(&state, memory_order_acquire);
+    if (!(m & 1)) {
+        bool sup = astc_4x4_supported();
+        bool b1 = true, b_ext = true, b3 = true, b5 = true;
+        bool has_e1 = vk_compat_parse_env_bool(getenv("LARECOMP_BC1_ASTC"), &b1);
+        bool has_ext = vk_compat_parse_env_bool(getenv("LARECOMP_BC_ASTC_EXT"), &b_ext);
+        bool has_e3 = vk_compat_parse_env_bool(getenv("LARECOMP_BC3_ASTC"), &b3);
+        bool has_e5 = vk_compat_parse_env_bool(getenv("LARECOMP_BC5_ASTC"), &b5);
+        bool ext_def = has_ext ? b_ext : true;
+        bool s1 = sup && (has_e1 ? b1 : true);
+        bool s3 = sup && (has_e3 ? b3 : ext_def);
+        bool s5 = sup && (has_e5 ? b5 : ext_def);
+        m = 1 | (s1 ? 2 : 0) | (s3 ? 4 : 0) | (s5 ? 8 : 0);
+        int expected = 0;
+        if (atomic_compare_exchange_strong_explicit(&state, &expected, m, memory_order_acq_rel, memory_order_acquire)) {
+            if (sup) LOG("[vk] BC -> ASTC 4x4: BC1=%s BC3=%s BC5u=%s\n",
+                         s1 ? "on" : "off", s3 ? "on" : "off", s5 ? "on" : "off");
+        } else {
+            m = expected;
+        }
+    }
+    if (bc1_on) *bc1_on = (m & 2) != 0;
+    if (bc3_on) *bc3_on = (m & 4) != 0;
+    if (bc5_on) *bc5_on = (m & 8) != 0;
+}
+
+// The format a BC texture is decoded into without BC; *bpp: bytes per texel (0: ASTC 4x4 blocks).
+static VkFormat bc_target_ex(VkFormat bc, bool allow_astc, uint32_t *bpp, uint8_t *astc_mode) {
+    bool bc1_on = false, bc3_on = false, bc5_on = false;
+    if (allow_astc) bc_astc_cfg(&bc1_on, &bc3_on, &bc5_on);
+    if (astc_mode) *astc_mode = VK_BC_ASTC_NONE;
     switch (bc) {
     case VK_FORMAT_BC1_RGB_UNORM_BLOCK: case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
-        if (bc1_astc()) { *bpp = 0; return VK_FORMAT_ASTC_4x4_UNORM_BLOCK; }
+        if (bc1_on) { *bpp = 0; if (astc_mode) *astc_mode = VK_BC_ASTC_RGBA; return VK_FORMAT_ASTC_4x4_UNORM_BLOCK; }
         *bpp = 4; return VK_FORMAT_R8G8B8A8_UNORM;
     case VK_FORMAT_BC1_RGB_SRGB_BLOCK: case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
-        if (bc1_astc()) { *bpp = 0; return VK_FORMAT_ASTC_4x4_SRGB_BLOCK; }
+        if (bc1_on) { *bpp = 0; if (astc_mode) *astc_mode = VK_BC_ASTC_RGBA; return VK_FORMAT_ASTC_4x4_SRGB_BLOCK; }
         *bpp = 4; return VK_FORMAT_R8G8B8A8_SRGB;
+    case VK_FORMAT_BC3_UNORM_BLOCK:
+        if (bc3_on) { *bpp = 0; if (astc_mode) *astc_mode = VK_BC_ASTC_RGBA; return VK_FORMAT_ASTC_4x4_UNORM_BLOCK; }
+        *bpp = 4; return VK_FORMAT_R8G8B8A8_UNORM;
+    case VK_FORMAT_BC3_SRGB_BLOCK:
+        if (bc3_on) { *bpp = 0; if (astc_mode) *astc_mode = VK_BC_ASTC_RGBA; return VK_FORMAT_ASTC_4x4_SRGB_BLOCK; }
+        *bpp = 4; return VK_FORMAT_R8G8B8A8_SRGB;
+    case VK_FORMAT_BC5_UNORM_BLOCK:
+        if (bc5_on) { *bpp = 0; if (astc_mode) *astc_mode = VK_BC_ASTC_LA; return VK_FORMAT_ASTC_4x4_UNORM_BLOCK; }
+        *bpp = 2; return VK_FORMAT_R8G8_UNORM;
     case VK_FORMAT_BC4_UNORM_BLOCK: *bpp = 1; return VK_FORMAT_R8_UNORM;
     case VK_FORMAT_BC4_SNORM_BLOCK: *bpp = 1; return VK_FORMAT_R8_SNORM;
-    case VK_FORMAT_BC5_UNORM_BLOCK: *bpp = 2; return VK_FORMAT_R8G8_UNORM;
     case VK_FORMAT_BC5_SNORM_BLOCK: *bpp = 2; return VK_FORMAT_R8G8_SNORM;
     case VK_FORMAT_BC6H_UFLOAT_BLOCK: case VK_FORMAT_BC6H_SFLOAT_BLOCK: *bpp = 8; return VK_FORMAT_R16G16B16A16_SFLOAT;
     case VK_FORMAT_BC2_SRGB_BLOCK:
-    case VK_FORMAT_BC3_SRGB_BLOCK: case VK_FORMAT_BC7_SRGB_BLOCK: *bpp = 4; return VK_FORMAT_R8G8B8A8_SRGB;
+    case VK_FORMAT_BC7_SRGB_BLOCK: *bpp = 4; return VK_FORMAT_R8G8B8A8_SRGB;
     default: *bpp = 4; return VK_FORMAT_R8G8B8A8_UNORM;
     }
 }
@@ -327,13 +369,24 @@ static void bc_decode_task(void *ctx, uint32_t start, uint32_t count) {
 }
 
 typedef struct {
-    const uint8_t *bc1;
+    VkFormat bc;
+    const uint8_t *blocks;
     uint8_t *astc;
 } BcAstcTask;
 
-static void bc1_astc_task(void *ctx, uint32_t start, uint32_t count) {
+static void bc_astc_task(void *ctx, uint32_t start, uint32_t count) {
     const BcAstcTask *t = (const BcAstcTask *)ctx;
-    bc1_to_astc(t->bc1 + (uint64_t)start * 8, t->astc + (uint64_t)start * 16, count);
+    switch (t->bc) {
+    case VK_FORMAT_BC3_UNORM_BLOCK: case VK_FORMAT_BC3_SRGB_BLOCK:
+        bc3_to_astc(t->blocks + (uint64_t)start * 16, t->astc + (uint64_t)start * 16, count);
+        break;
+    case VK_FORMAT_BC5_UNORM_BLOCK:
+        bc5_unorm_to_astc_la(t->blocks + (uint64_t)start * 16, t->astc + (uint64_t)start * 16, count);
+        break;
+    default:
+        bc1_to_astc(t->blocks + (uint64_t)start * 8, t->astc + (uint64_t)start * 16, count);
+        break;
+    }
 }
 
 static void bc_decode(VkFormat bc, const uint8_t *blocks, uint32_t wb, uint32_t hb, uint32_t bsize, uint8_t *out, uint32_t bpp) {
@@ -515,10 +568,11 @@ void vk_collect_dead(void) {
     vk_rp_collect(done);
 }
 
-static VkFormat resolve_tex_format(const NvnTexture *t, VkFormat *bc_vf_out, bool *astc_out, bool quiet) {
+static VkFormat resolve_tex_format(const NvnTexture *t, VkFormat *bc_vf_out, uint8_t *bc_astc_out, bool *astc_out, bool quiet) {
     VkFormat vf = fmt_of(t->format).vf;
     VkFormatFeatureFlags need = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
     VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+    uint8_t bc_am = 0;
     bool astc_used = false;
 #ifdef __ANDROID__
     static int no_bc = -1;  // LARECOMP_NO_BC=1 (a test): as a GPU without BC - the CPU decode on an Adreno
@@ -531,15 +585,18 @@ static VkFormat resolve_tex_format(const NvnTexture *t, VkFormat *bc_vf_out, boo
         const FormatInfo *fi = t->layout.fmt;
 #ifdef __ANDROID__
         uint32_t bpp;
+        bool allow_astc = !(t->flags & 8) && t->target != 0 && t->target != 2 && t->target != 3 && t->samples <= 1;
+        VkFormat target_vf = is_bc(vf) ? bc_target_ex(vf, allow_astc, &bpp, &bc_am) : VK_FORMAT_UNDEFINED;
         if (is_bc(vf) && fi && (fi->bpb == 8 || fi->bpb == 16) && fi->bw == 4 && fi->bh == 4 &&
-            format_supports(bc_target(vf, &bpp), need)) {
+            format_supports(target_vf, need)) {
             if (!quiet) {
                 static bool told;
                 if (!told) { told = true; LOG("[vk] no BC textures on this GPU: decoded on the CPU at upload\n"); }
             }
             bc_vf = vf;
-            vf = bc_target(vf, &bpp);
-        } else
+            vf = target_vf;
+        } else {
+            bc_am = 0;
 #endif
         if (astc && fi && fi->bpb == 16) {  // desktop GPUs: decoded on the CPU into an RGBA8 image of the same colour space
             astc_used = true;
@@ -551,8 +608,12 @@ static VkFormat resolve_tex_format(const NvnTexture *t, VkFormat *bc_vf_out, boo
             }
             vf = VK_FORMAT_R8G8B8A8_UNORM;
         }
+#ifdef __ANDROID__
+        }
+#endif
     }
     if (bc_vf_out) *bc_vf_out = bc_vf;
+    if (bc_astc_out) *bc_astc_out = bc_am;
     if (astc_out) *astc_out = astc_used;
     return vf;
 }
@@ -589,10 +650,14 @@ static void create_image(NvnTexture *t, TexBackend *b) {
     if (samples > 1) levels = 1;
     b->astc_bw = b->astc_bh = 0;
     VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+    uint8_t bc_am = 0;
     bool astc_used = false;
-    VkFormat vf = resolve_tex_format(t, &bc_vf, &astc_used, false);
+    VkFormat vf = resolve_tex_format(t, &bc_vf, &bc_am, &astc_used, false);
 #ifdef __ANDROID__
     b->bc_vf = bc_vf;
+    b->bc_astc_mode = bc_am;
+#else
+    (void)bc_am;
 #endif
     if (astc_used) {
         const FormatInfo *fi = t->layout.fmt;
@@ -672,6 +737,12 @@ static void create_image(NvnTexture *t, TexBackend *b) {
         ci.flags |= VK_IMAGE_CREATE_MUTABLE_FORMAT_BIT, ci.pNext = NULL, b->fixed_fmt = false;
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &b->image, &b->mem, NULL));
         depthfmt = false;
+        b->astc_bw = b->astc_bh = 0;
+        b->astc_srgb = false;
+#ifdef __ANDROID__
+        b->bc_vf = VK_FORMAT_UNDEFINED;
+        b->bc_astc_mode = VK_BC_ASTC_NONE;
+#endif
     }
     b->format = vf;
     b->width = tw; b->height = th; b->depth = depth; b->layers = layers; b->levels = levels; b->samples = samples;
@@ -738,7 +809,7 @@ static void bc_shadow_destroy(TexBackend *b);
 static uint64_t bc_upload_blocks(VkCommandBuffer cb, TexBackend *b, const uint8_t *blocks, uint32_t wb, uint32_t hb,
                                  uint32_t bsize, uint32_t lv, uint32_t layer, uint32_t z, uint64_t *decode_ns) {
     uint32_t bpp;
-    bc_target(b->bc_vf, &bpp);
+    bc_target_ex(b->bc_vf, b->bc_astc_mode != VK_BC_ASTC_NONE, &bpp, NULL);
     uint64_t out_size = bpp ? (uint64_t)wb * 4 * hb * 4 * bpp : (uint64_t)wb * hb * 16;
     VkSpan s = vk_transient(out_size, 16);
     bool measure_decode = bench_on();
@@ -749,12 +820,22 @@ static uint64_t bc_upload_blocks(VkCommandBuffer cb, TexBackend *b, const uint8_
         uint64_t nblocks = (uint64_t)wb * hb;
         int threads = bc_parallel_threads_cfg();
         if (nblocks <= UINT32_MAX && vk_bc_parallel_should_split(b->bc_vf, wb, hb, true, threads)) {
-            BcAstcTask task = {blocks, s.ptr};
+            BcAstcTask task = {b->bc_vf, blocks, s.ptr};
             WdMark wm = vk_wd_enter(WD_R_BC_DECODE, (uint64_t)b->bc_vf);
-            vk_bc_pool_run(&g_bc_pool, bc1_astc_task, &task, (uint32_t)nblocks, 256, threads);
+            vk_bc_pool_run(&g_bc_pool, bc_astc_task, &task, (uint32_t)nblocks, 256, threads);
             vk_wd_leave(wm);
         } else {
-            bc1_to_astc(blocks, s.ptr, nblocks);
+            switch (b->bc_vf) {
+            case VK_FORMAT_BC3_UNORM_BLOCK: case VK_FORMAT_BC3_SRGB_BLOCK:
+                bc3_to_astc(blocks, s.ptr, nblocks);
+                break;
+            case VK_FORMAT_BC5_UNORM_BLOCK:
+                bc5_unorm_to_astc_la(blocks, s.ptr, nblocks);
+                break;
+            default:
+                bc1_to_astc(blocks, s.ptr, nblocks);
+                break;
+            }
         }
     }
     if (decode_start) {
@@ -1587,15 +1668,24 @@ static int rt3d_mode(void) {
 
 // render: attachment view (one level, one layer). Otherwise a sampled view of type want_textype (TEXTYPE_*),
 // with the NVN component swizzle, converting between compatible types the way renderer.m does.
-static VkFormat view_format(VkFormat base_fmt, VkFormat bc_vf, VkImageAspectFlags aspect, bool fixed_fmt, VkFormat view_alt,
-                            const NvnTexture *t, const NvnTextureView *v, bool has_view, bool warn) {
+static VkFormat view_format(VkFormat base_fmt, VkFormat bc_vf, uint8_t bc_astc_mode, VkImageAspectFlags aspect,
+                            bool fixed_fmt, VkFormat view_alt, const NvnTexture *t, const NvnTextureView *v,
+                            bool has_view, bool warn) {
     if (!has_view) v = NULL;
     VkFormat fmt = base_fmt;
     if (v && (v->setmask & 4) && !(aspect & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT))) {
         VkFormat vf = fmt_of(v->format).vf;
         if (vk_format(t->format) == base_fmt) fmt = vf;  // (fallback images keep their own format)
 #ifdef __ANDROID__
-        else if (bc_vf && is_bc(vf)) { uint32_t bpp; fmt = bc_target(vf, &bpp); }  // (decoded BC: its sRGB / UNORM view)
+        else if (bc_vf && is_bc(vf)) {
+            bool img_astc = bc_astc_mode != VK_BC_ASTC_NONE;
+            uint32_t bpp;
+            uint8_t vm = VK_BC_ASTC_NONE;
+            VkFormat cand = bc_target_ex(vf, img_astc, &bpp, &vm);
+            if (!img_astc || vm == bc_astc_mode) fmt = cand;
+        }  // (decoded BC: its sRGB / UNORM view)
+#else
+        (void)bc_astc_mode;
 #endif
         if (fixed_fmt && fmt != base_fmt && fmt != view_alt) {  // (not in its format list: create_image)
             if (warn) {
@@ -1615,15 +1705,18 @@ VkFormat vk_sampled_format(NvnTexture *t, const NvnTextureView *v, bool has_view
         const TexBackend *b = (const TexBackend *)t->backend;
 #ifdef __ANDROID__
         VkFormat bc_vf = b->bc_vf;
+        uint8_t bc_am = b->bc_astc_mode;
 #else
         VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+        uint8_t bc_am = 0;
 #endif
-        return view_format(b->format, bc_vf, b->aspect, b->fixed_fmt, b->view_alt, t, v, has_view, false);
+        return view_format(b->format, bc_vf, bc_am, b->aspect, b->fixed_fmt, b->view_alt, t, v, has_view, false);
     }
     VkFormat bc_vf = VK_FORMAT_UNDEFINED;
-    VkFormat vf = resolve_tex_format(t, &bc_vf, NULL, true);
+    uint8_t bc_am = 0;
+    VkFormat vf = resolve_tex_format(t, &bc_vf, &bc_am, NULL, true);
     VkImageAspectFlags asp = renderer_format_is_depth(t->format) ? aspect_of(t->format) : VK_IMAGE_ASPECT_COLOR_BIT;
-    return view_format(vf, bc_vf, asp, false, VK_FORMAT_UNDEFINED, t, v, has_view, false);
+    return view_format(vf, bc_vf, bc_am, asp, false, VK_FORMAT_UNDEFINED, t, v, has_view, false);
 }
 
 VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool render, int want_textype) {
@@ -1631,10 +1724,12 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
     if (!has_view) v = NULL;
 #ifdef __ANDROID__
     VkFormat bc_vf = b->bc_vf;
+    uint8_t bc_am = b->bc_astc_mode;
 #else
     VkFormat bc_vf = VK_FORMAT_UNDEFINED;
+    uint8_t bc_am = 0;
 #endif
-    VkFormat fmt = view_format(b->format, bc_vf, b->aspect, b->fixed_fmt, b->view_alt, t, v, has_view, true);
+    VkFormat fmt = view_format(b->format, bc_vf, bc_am, b->aspect, b->fixed_fmt, b->view_alt, t, v, has_view, true);
     uint32_t lv0 = v && (v->setmask & 1) ? v->base_level : 0;
     uint32_t nlv = v && (v->setmask & 1) && v->num_levels ? v->num_levels : b->levels + b->skip - lv0;
     if (b->skip) {  // (the guest's levels, the image's from b->skip on: create_image)
@@ -1694,6 +1789,9 @@ VkImageView vk_view(NvnTexture *t, const NvnTextureView *v, bool has_view, bool 
         } else if (fmt_of(t->format).alpha_one) {
             sw.a = VK_COMPONENT_SWIZZLE_ONE;
         }
+#ifdef __ANDROID__
+        if (b->bc_astc_mode == VK_BC_ASTC_LA) sw = vk_bc5_la_remap_swizzle(sw);
+#endif
     }
     VkImageViewType want = view_type_for(want_textype);
     VkImageViewType have = b->base_type;

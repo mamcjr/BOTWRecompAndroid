@@ -32,13 +32,18 @@ void renderer_flush(void) {}
 uint64_t vk_pending_seq(void) { return 1; }
 uint64_t vk_frame_counter(void) { return 1; }
 void vk_rp_forget_view(VkImageView v) { (void)v; }
+static int bc3_transcodes, bc5_transcodes;
+static VkComponentMapping last_view_swizzle;
+static VkFormat last_view_fmt;
 void bc1_to_astc(const uint8_t *bc1, uint8_t *astc, uint64_t n) { (void)bc1, (void)astc, (void)n; }
-static const FormatInfo bc4 = {.bw = 4, .bh = 4, .bpb = 8}, texel8 = {.bw = 1, .bh = 1, .bpb = 8};
+void bc3_to_astc(const uint8_t *bc3, uint8_t *astc, uint64_t n) { (void)bc3, (void)astc, (void)n; bc3_transcodes++; }
+void bc5_unorm_to_astc_la(const uint8_t *bc5, uint8_t *astc, uint64_t n) { (void)bc5, (void)astc, (void)n; bc5_transcodes++; }
+static const FormatInfo bc4 = {.bw = 4, .bh = 4, .bpb = 8}, texel8 = {.bw = 1, .bh = 1, .bpb = 8}, texel16 = {.bw = 1, .bh = 1, .bpb = 16};
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { (void)img, (void)w, (void)h, (void)lv; }
 bool vk_driver_is_qualcomm(void) { return false; }
 uint64_t SDL_GetTicksNS(void) { return 0; }
 uint64_t prof_views_created;
-const FormatInfo *nvn_format_info(uint32_t f) { return f == 0x49 ? &bc4 : &texel8; }
+const FormatInfo *nvn_format_info(uint32_t f) { return f == 0x49 ? &bc4 : f == 0x2F ? &texel16 : &texel8; }
 
 static NvnTexture tex;
 static TexBackend be;
@@ -71,19 +76,27 @@ static VKAPI_ATTR void VKAPI_CALL copy_i2i(VkCommandBuffer cb, VkImage s, VkImag
 }
 static VKAPI_ATTR void VKAPI_CALL barrier2(VkCommandBuffer cb, const VkDependencyInfo *d) { (void)cb, (void)d; }
 static VKAPI_ATTR VkResult VKAPI_CALL create_view(VkDevice d, const VkImageViewCreateInfo *ci, const VkAllocationCallbacks *a, VkImageView *v) {
-    (void)d, (void)ci, (void)a;
+    (void)d, (void)a;
+    last_view_swizzle = ci->components;
+    last_view_fmt = ci->format;
     static uintptr_t n;
     *v = (VkImageView)(0x10000 + ++n);
     return VK_SUCCESS;
 }
 static VKAPI_ATTR void VKAPI_CALL destroy_view(VkDevice d, VkImageView v, const VkAllocationCallbacks *a) { (void)d, (void)v, (void)a; }
+static VKAPI_ATTR void VKAPI_CALL get_fmt_props(VkPhysicalDevice pd, VkFormat f, VkFormatProperties *p) {
+    (void)pd, (void)f;
+    *p = (VkFormatProperties){
+        .optimalTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT,
+    };
+}
 PFN_vkCmdCopyImageToBuffer vkCmdCopyImageToBuffer = copy_i2b;
 PFN_vkCmdCopyBufferToImage vkCmdCopyBufferToImage = copy_b2i;
 PFN_vkCmdCopyImage vkCmdCopyImage = copy_i2i;
 PFN_vkCmdPipelineBarrier2 vkCmdPipelineBarrier2 = barrier2;
 PFN_vkCreateImageView vkCreateImageView = create_view;
 PFN_vkDestroyImageView vkDestroyImageView = destroy_view;
-PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties;
+PFN_vkGetPhysicalDeviceFormatProperties vkGetPhysicalDeviceFormatProperties = get_fmt_props;
 
 static int failures;
 static void check(const char *name, bool ok) {
@@ -191,6 +204,46 @@ int main(void) {
         for (size_t i = 0; i < sizeof sentinel; i++) clean &= sentinel[i] == 0xA5;
         check("bc_decode_rows pitch64 overflow guard returns without writing", clean);
     }
+#ifdef __ANDROID__
+    {   // BC3 and BC5_UNORM ASTC shadow resolve dispatches respective transcoders; BC5 LA view remaps swizzle.
+        static const FormatInfo bc16 = {.bw = 4, .bh = 4, .bpb = 16};
+        setup();
+        tex.depth = be.depth = 1; tex.levels = be.levels = 1; tex.format = 0x4B;
+        be.base_type = VK_IMAGE_VIEW_TYPE_2D;
+        tex.layout = (TexLayout){.width = 32, .height = 32, .depth = 1, .layers = 1, .levels = 1, .fmt = &bc16};
+        tegra_layout_init(&tex.layout);
+        be.bc_vf = VK_FORMAT_BC5_UNORM_BLOCK; be.bc_astc_mode = VK_BC_ASTC_LA;
+        be.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+        bc3_transcodes = bc5_transcodes = 0;
+        setenv("LARECOMP_BC_PARALLEL", "0", 1);
+        draw(0x2F, 0);
+        outside();
+        check("BC5_UNORM shadow resolve invokes bc5_unorm_to_astc_la", bc5_transcodes == 1 && uploads == 1);
+
+        VkComponentMapping la_sw = vk_bc5_la_remap_swizzle((VkComponentMapping){
+            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY,
+            VK_COMPONENT_SWIZZLE_IDENTITY, VK_COMPONENT_SWIZZLE_IDENTITY});
+        vk_image_view(&be, VK_IMAGE_VIEW_TYPE_2D, VK_FORMAT_ASTC_4x4_UNORM_BLOCK, 0, 1, 0, 1, la_sw, VK_IMAGE_ASPECT_COLOR_BIT);
+        check("BC5_UNORM LA view expands IDENTITY to (R, A, ZERO, ONE)",
+              last_view_swizzle.r == VK_COMPONENT_SWIZZLE_R && last_view_swizzle.g == VK_COMPONENT_SWIZZLE_A &&
+              last_view_swizzle.b == VK_COMPONENT_SWIZZLE_ZERO && last_view_swizzle.a == VK_COMPONENT_SWIZZLE_ONE &&
+              last_view_fmt == VK_FORMAT_ASTC_4x4_UNORM_BLOCK);
+        vk_views_forget(&be);
+
+        setup();
+        tex.depth = be.depth = 1; tex.levels = be.levels = 1; tex.format = 0x44;
+        be.base_type = VK_IMAGE_VIEW_TYPE_2D;
+        tex.layout = (TexLayout){.width = 32, .height = 32, .depth = 1, .layers = 1, .levels = 1, .fmt = &bc16};
+        tegra_layout_init(&tex.layout);
+        be.bc_vf = VK_FORMAT_BC3_UNORM_BLOCK; be.bc_astc_mode = VK_BC_ASTC_RGBA;
+        be.format = VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+        bc3_transcodes = bc5_transcodes = 0;
+        draw(0x2F, 0);
+        outside();
+        check("BC3 shadow resolve invokes bc3_to_astc", bc3_transcodes == 1 && uploads == 1);
+        vk_views_forget(&be);
+    }
+#endif
     vk_bc_pool_destroy(&g_bc_pool);
     if (failures) { printf("test_bc_shadow: %d check(s) failed\n", failures); return 1; }
     printf("test_bc_shadow: all passed\n");
