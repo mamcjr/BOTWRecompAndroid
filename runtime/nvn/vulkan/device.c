@@ -20,6 +20,9 @@
 #include "dyn_vi.h"
 #include "timing_trace.h"
 #include "device_compat.h"
+#ifdef __ANDROID__
+#include "mali_rp_opt.h"
+#endif
 #include "../output_scale.h"
 #include "../renderer.h"
 
@@ -936,6 +939,17 @@ static void create_device(void) {
         vids.pNext = f.pNext;
         f.pNext = &vids;
     }
+    bool has_bc = have.features.textureCompressionBC != VK_FALSE;
+    bool has_astc_ldr = have.features.textureCompressionASTC_LDR != VK_FALSE;
+    const char *mrm_why = NULL, *mrs_why = NULL;
+    g_vk.mali_rp_merge_opt = vk_mali_rp_merge_opt_want(
+        has_bc, has_astc_ldr, (uint32_t)driver.driverID, driver.driverInfo, driver_props,
+        getenv("LARECOMP_MALI_RP_MERGE_OPT"), &mrm_why);
+    g_vk.mali_rp_store_opt = vk_mali_rp_store_opt_want(
+        has_bc, has_astc_ldr, g_vk.api, (uint32_t)driver.driverID, driver.driverInfo, driver_props,
+        getenv("LARECOMP_MALI_RP_STORE_OPT"), &mrs_why);
+    LOG("[vk-cap] Mali RP merge opt: %s (%s)\n", g_vk.mali_rp_merge_opt ? "on" : "off", mrm_why);
+    LOG("[vk-cap] Mali RP store opt: %s (%s)\n", g_vk.mali_rp_store_opt ? "on" : "off", mrs_why);
 #endif
     float prio = 1.0f;
     VkDeviceQueueCreateInfo qi = {.sType = VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO, .queueFamilyIndex = g_vk.qfam,
@@ -1703,6 +1717,7 @@ void backend_present(NvnTexture *t) {
     g_last_presented = t;
     TexBackend *b = vk_tex(t, true);
     b->presented = true;
+    vk_mali_rp_flush_clears_for(b->image);
     vk_end_pass();
 #ifdef __ANDROID__
     vk_bc_shadows_resolve(NULL, NULL, NULL, 0);  // (BC textures drawn into: decoded, as before anything outside a pass)

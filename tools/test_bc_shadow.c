@@ -32,6 +32,10 @@ void renderer_flush(void) {}
 uint64_t vk_pending_seq(void) { return 1; }
 uint64_t vk_frame_counter(void) { return 1; }
 void vk_rp_forget_view(VkImageView v) { (void)v; }
+#ifdef __ANDROID__
+void vk_mali_rp_forget_image(VkImage img) { (void)img; }
+void vk_mali_rp_flush_clears_for(VkImage img) { (void)img; }
+#endif
 void bc1_to_astc(const uint8_t *bc1, uint8_t *astc, uint64_t n) { (void)bc1, (void)astc, (void)n; }
 static const FormatInfo bc4 = {.bw = 4, .bh = 4, .bpb = 8}, texel8 = {.bw = 1, .bh = 1, .bpb = 8};
 void vk_dl_note_upload(void *img, uint32_t w, uint32_t h, uint32_t lv) { (void)img, (void)w, (void)h, (void)lv; }
