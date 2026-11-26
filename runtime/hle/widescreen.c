@@ -111,6 +111,8 @@ static VertProj seen_vert[VERT_SLOTS];
 static uint64_t vert_tick;
 static int vert_count;
 static _Atomic bool vert_used;
+#define PERSP_VTABLES 4
+static _Atomic uintptr_t g_persp_vtables[PERSP_VTABLES];
 static uint64_t log_seen[256];
 static int log_nseen, log_vert_n, log_wide_n;
 
@@ -121,6 +123,7 @@ RT_ON_RESET(widescreen_reset) {
     atomic_store_explicit(&g_boot_aspect, -1, memory_order_release);
     atomic_store_explicit(&g_hooked, false, memory_order_release);
     atomic_store_explicit(&g_widened, false, memory_order_release);
+    for (int i = 0; i < PERSP_VTABLES; i++) atomic_store_explicit(&g_persp_vtables[i], 0, memory_order_release);
     atomic_store_explicit(&minimap_frame, 0, memory_order_release);
     atomic_store_explicit(&talk_frame, 0, memory_order_release);
     atomic_store_explicit(&band_frame, 0, memory_order_release);
@@ -142,9 +145,37 @@ static bool trig_scaled_match(const VertProj *e, const float *p) {
            fabsf(p[5] - e->scaled_tan) < 1e-4f;
 }
 
+static void persp_vtable_record(uintptr_t vt) {
+    if (!vt) return;
+    for (int i = 0; i < PERSP_VTABLES; i++) {
+        uintptr_t cur = atomic_load_explicit(&g_persp_vtables[i], memory_order_acquire);
+        if (cur == vt) return;
+        if (cur == 0) {
+            if (atomic_compare_exchange_strong_explicit(&g_persp_vtables[i], &cur, vt,
+                                                        memory_order_acq_rel, memory_order_acquire) ||
+                cur == vt)
+                return;
+        }
+    }
+}
+
+static bool persp_vtable_match(uintptr_t vt_obj) {
+    if (!vt_obj) return false;
+    for (int i = 0; i < PERSP_VTABLES; i++) {
+        uintptr_t cur = atomic_load_explicit(&g_persp_vtables[i], memory_order_acquire);
+        if (cur == vt_obj) return true;
+        if (cur == 0) break;
+    }
+    return false;
+}
+
 void rt_persp_update(uint64_t proj) {
     atomic_store_explicit(&g_hooked, true, memory_order_release);
-    if (!proj || !widescreen_allowed()) return;
+    if (!proj) return;
+    uintptr_t vt = 0;
+    memcpy(&vt, (const void *)(uintptr_t)proj, sizeof vt);
+    persp_vtable_record(vt);
+    if (!widescreen_allowed()) return;
     float shape = load_shape();
     float *p = (float *)(uintptr_t)(proj + 0x98);  // near, far, fovy, sin, cos, tan, aspect (+0xB0)
     if (!shape_vert_plus(shape) && atomic_load_explicit(&vert_used, memory_order_acquire)) {
@@ -300,6 +331,34 @@ uint32_t rt_persp_aspect(uint64_t proj) {
     }
     uint32_t u;
     memcpy(&u, &a, 4);
+    return u;
+}
+
+// Effective vertical FOV (radians) matching the reshaped projection matrix (mFovyTan at +0xAC), while leaving
+// stored mAngle (+0xA0) untouched so camera blends reading getFovy() cannot creep. Called after the virtual
+// getFovy() call in the view-frustum builder (1.8.2: 0x7000e7d0b4, 1.9.0: 0x7000f90da4); non-PerspectiveProjection
+// subclasses keep orig_s0.
+uint32_t rt_persp_fovy(uint64_t proj, uint32_t orig_s0) {
+    float shape = load_shape();
+    if (!widescreen_allowed() || !shape_vert_plus(shape)) return orig_s0;
+    if (!proj) return orig_s0;
+    uintptr_t vt_obj = 0;
+    memcpy(&vt_obj, (const void *)(uintptr_t)proj, sizeof vt_obj);
+    if (!persp_vtable_match(vt_obj)) return orig_s0;
+    float fovy = 0.0f;
+    memcpy(&fovy, &orig_s0, 4);
+    if (!isfinite(fovy) || fovy <= 0.01f || fovy >= 3.0f) return orig_s0;
+    const float *p = (const float *)(uintptr_t)(proj + 0x98);  // near, far, fovy, sin, cos, tan, aspect
+    if (is_16_9(p[6])) {
+        float half = atanf(tanf(fovy * 0.5f) / shape);
+        if (half > 1.49f) half = 1.49f;
+        fovy = 2.0f * half;
+    } else if (is_16_9(p[6] / shape) && isfinite(p[5]) && p[5] > 0.0f && fabsf(p[5] - tanf(fovy * 0.5f)) > 1e-4f) {
+        float eff = 2.0f * atanf(p[5]);
+        if (isfinite(eff) && eff > 0.01f && eff < 3.0f) fovy = eff;
+    }
+    uint32_t u;
+    memcpy(&u, &fovy, 4);
     return u;
 }
 

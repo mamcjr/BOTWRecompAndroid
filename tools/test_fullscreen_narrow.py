@@ -699,7 +699,169 @@ int main(int argc, char **argv) {
     assert(!g_wide_backdrop);
     g_wide_backdrop = false;
 
-    puts("PASS: output_scale, device shape, widescreen Vert+/Hor-/20:9/16:9, PROT_NONE guard, map/band/cover/scissor tests");
+    /* 5. rt_persp_fovy: Vert+ frustum FOV matches mFovyTan without mutating mAngle */
+    {
+        uint32_t orig_bits = 0;
+        memcpy(&orig_bits, &orig_fovy, 4);
+        _Alignas(8) float fp[64] = {0};
+        uintptr_t persp_vt = (uintptr_t)0x7001d05380ull;
+        uintptr_t persp_vt2 = (uintptr_t)0x7001d053c0ull;
+        uintptr_t ortho_vt = (uintptr_t)0x7001d05400ull;
+
+        /* Null pointer, uninitialized g_persp_vtables (before first rt_persp_update), and invalid orig_s0 guard */
+        eqf(from_bits(rt_persp_fovy(0, orig_bits)), orig_fovy);
+        boot(0.9f, ASPECT_UNLOCKED);
+        for (int vi = 0; vi < PERSP_VTABLES; vi++)
+            assert(atomic_load_explicit(&g_persp_vtables[vi], memory_order_acquire) == 0);
+        assert(!persp_vtable_match(persp_vt));
+        memcpy(fp, &persp_vt, sizeof persp_vt);
+        fp[ni] = 1.0f; fp[fi] = 25000.0f; fp[fvi] = orig_fovy; fp[ai] = base;
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), orig_fovy);
+
+        /* 16:10 (0.9) and 4:3 (0.75) Vert+ before and after rt_persp_update */
+        for (int sh_i = 0; sh_i < 2; sh_i++) {
+            float sh = sh_i == 0 ? 0.9f : 0.75f;
+            float want_fovy = 2.0f * atanf(tanf(orig_fovy * 0.5f) / sh);
+            boot(sh, ASPECT_UNLOCKED);
+            memset(fp, 0, sizeof fp);
+            memcpy(fp, &persp_vt, sizeof persp_vt);
+            fp[ni] = 1.0f; fp[fi] = 25000.0f; fp[fvi] = orig_fovy;
+            fp[si] = sinf(orig_fovy * 0.5f); fp[ci] = cosf(orig_fovy * 0.5f); fp[ti] = tanf(orig_fovy * 0.5f);
+            fp[ai] = base;
+            rt_persp_update((uint64_t)(uintptr_t)fp);
+            assert(persp_vtable_match(persp_vt));
+            eqf(fp[fvi], orig_fovy);
+            eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), want_fovy);
+            /* Simulate next frame where game reset mAspect to 16:9 before rebuilding matrix */
+            fp[ai] = base;
+            eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), want_fovy);
+        }
+
+        /* Multiple PerspectiveProjection subclasses recorded simultaneously without clobbering */
+        {
+            _Alignas(8) float fp2[64] = {0};
+            float want_fovy = 2.0f * atanf(tanf(orig_fovy * 0.5f) / 0.9f);
+            boot(0.9f, ASPECT_UNLOCKED);
+            memset(fp, 0, sizeof fp);
+            memcpy(fp, &persp_vt, sizeof persp_vt);
+            fp[ni] = 1.0f; fp[fi] = 25000.0f; fp[fvi] = orig_fovy;
+            fp[si] = sinf(orig_fovy * 0.5f); fp[ci] = cosf(orig_fovy * 0.5f); fp[ti] = tanf(orig_fovy * 0.5f);
+            fp[ai] = base;
+            rt_persp_update((uint64_t)(uintptr_t)fp);
+            memcpy(fp2, &persp_vt2, sizeof persp_vt2);
+            fp2[ni] = 1.0f; fp2[fi] = 25000.0f; fp2[fvi] = orig_fovy;
+            fp2[si] = sinf(orig_fovy * 0.5f); fp2[ci] = cosf(orig_fovy * 0.5f); fp2[ti] = tanf(orig_fovy * 0.5f);
+            fp2[ai] = base;
+            rt_persp_update((uint64_t)(uintptr_t)fp2);
+            assert(persp_vtable_match(persp_vt) && persp_vtable_match(persp_vt2));
+            fp[ai] = base; fp2[ai] = base;
+            eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), want_fovy);
+            eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp2, orig_bits)), want_fovy);
+            memcpy(fp2, &ortho_vt, sizeof ortho_vt);
+            eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp2, orig_bits)), orig_fovy);
+        }
+
+        /* Out-of-range and non-finite orig_s0 inputs pass through unmodified */
+        boot(0.9f, ASPECT_UNLOCKED);
+        rt_persp_update((uint64_t)(uintptr_t)fp);
+        assert(persp_vtable_match(persp_vt));
+        for (int bi = 0; bi < 4; bi++) {
+            float bad = bi == 0 ? 0.005f : bi == 1 ? 3.05f : bi == 2 ? NAN : INFINITY;
+            uint32_t bad_bits = 0, got_bits = 0;
+            memcpy(&bad_bits, &bad, 4);
+            got_bits = rt_persp_fovy((uint64_t)(uintptr_t)fp, bad_bits);
+            assert(got_bits == bad_bits);
+        }
+
+        /* Native 4:3 PerspectiveProjection on 4:3 display (unscaled mFovyTan == tan(orig_fovy*0.5)) stays unscaled */
+        boot(0.75f, ASPECT_UNLOCKED);
+        memset(fp, 0, sizeof fp);
+        memcpy(fp, &persp_vt, sizeof persp_vt);
+        fp[ni] = 1.0f; fp[fi] = 25000.0f; fp[fvi] = orig_fovy;
+        fp[si] = sinf(orig_fovy * 0.5f); fp[ci] = cosf(orig_fovy * 0.5f); fp[ti] = tanf(orig_fovy * 0.5f);
+        fp[ai] = base * 0.75f;
+        rt_persp_update((uint64_t)(uintptr_t)fp);
+        assert(persp_vtable_match(persp_vt));
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), orig_fovy);
+
+        /* 1:1 shadow/reflection camera on 1:1 display (shape = 0.5625) with unscaled mFovyTan stays unscaled */
+        boot(0.5625f, ASPECT_UNLOCKED);
+        memcpy(fp, &persp_vt, sizeof persp_vt);
+        fp[ai] = 1.0f;
+        fp[ti] = tanf(orig_fovy * 0.5f);
+        rt_persp_update((uint64_t)(uintptr_t)fp);
+        assert(persp_vtable_match(persp_vt));
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), orig_fovy);
+
+        /* Wide-angle clamp near 1.49f matches mFovyTan in both is_16_9(p[6]) and scaled branches */
+        boot(0.75f, ASPECT_UNLOCKED);
+        float clamp_fovy = 2.95f;
+        uint32_t clamp_bits = 0;
+        memcpy(&clamp_bits, &clamp_fovy, 4);
+        memset(fp, 0, sizeof fp);
+        memcpy(fp, &persp_vt, sizeof persp_vt);
+        fp[ni] = 1.0f; fp[fi] = 1000.0f; fp[fvi] = clamp_fovy; fp[ai] = base;
+        rt_persp_update((uint64_t)(uintptr_t)fp);
+        assert(persp_vtable_match(persp_vt));
+        eqf(fp[fvi], clamp_fovy);
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, clamp_bits)), 2.98f);
+        fp[ai] = base;
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, clamp_bits)), 2.98f);
+        /* Non-finite p[5] in scaled slot safely falls back to orig_s0 */
+        fp[ai] = base * 0.75f; fp[ti] = NAN;
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), orig_fovy);
+
+        /* Non-PerspectiveProjection subclass vtable guard returns orig_s0 unchanged */
+        memcpy(fp, &ortho_vt, sizeof ortho_vt);
+        fp[fvi] = orig_fovy; fp[ai] = base; fp[ti] = tanf(orig_fovy * 0.5f) / 0.75f;
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), orig_fovy);
+
+        /* Non-16:9 (1:1 shadow/reflection) on 16:10 returns orig_s0 unchanged */
+        boot(0.9f, ASPECT_UNLOCKED);
+        memcpy(fp, &persp_vt, sizeof persp_vt);
+        fp[fvi] = orig_fovy; fp[ai] = 1.0f; fp[ti] = tanf(orig_fovy * 0.5f);
+        rt_persp_update((uint64_t)(uintptr_t)fp);
+        assert(persp_vtable_match(persp_vt));
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), orig_fovy);
+
+        /* Hor- opt-out returns orig_s0 unchanged even with live persp_vt and 16:9 aspect */
+        setenv("LARECOMP_NARROW_HOR_MINUS", "1", 1);
+        fp[ai] = base;
+        assert(persp_vtable_match(persp_vt));
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), orig_fovy);
+        unsetenv("LARECOMP_NARROW_HOR_MINUS");
+
+        /* aspect=original returns orig_s0 unchanged even with live persp_vt and 16:9 aspect */
+        boot(0.75f, ASPECT_ORIGINAL);
+        memcpy(fp, &persp_vt, sizeof persp_vt);
+        fp[ai] = base;
+        rt_persp_update((uint64_t)(uintptr_t)fp);
+        assert(persp_vtable_match(persp_vt));
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), orig_fovy);
+
+        /* 16:9 native and 20:9 ultrawide return orig_s0 unchanged even with live persp_vt and 16:9 aspect */
+        boot(1.0f, ASPECT_UNLOCKED);
+        memcpy(fp, &persp_vt, sizeof persp_vt);
+        fp[ai] = base;
+        rt_persp_update((uint64_t)(uintptr_t)fp);
+        assert(persp_vtable_match(persp_vt));
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), orig_fovy);
+
+        boot(1.25f, ASPECT_UNLOCKED);
+        memcpy(fp, &persp_vt, sizeof persp_vt);
+        fp[ai] = base;
+        rt_persp_update((uint64_t)(uintptr_t)fp);
+        assert(persp_vtable_match(persp_vt));
+        eqf(from_bits(rt_persp_fovy((uint64_t)(uintptr_t)fp, orig_bits)), orig_fovy);
+
+        /* widescreen_reset() clears all PERSP_VTABLES slots */
+        widescreen_reset();
+        for (int vi = 0; vi < PERSP_VTABLES; vi++)
+            assert(atomic_load_explicit(&g_persp_vtables[vi], memory_order_acquire) == 0);
+        boot(0.9f, ASPECT_UNLOCKED);
+    }
+
+    puts("PASS: output_scale, device shape, widescreen Vert+/Hor-/20:9/16:9, PROT_NONE guard, map/band/cover/scissor/fovy tests");
     return 0;
 }
 '''
@@ -707,7 +869,7 @@ int main(int argc, char **argv) {
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--wsl', action='store_true')
-    parser.add_argument('--negative-control', choices=['camera', 'ui', 'anchor', 'map', 'center_map', 'crop', 'band', 'crop_title', 'oob_guard', 'tall_ui', 'backdrop'])
+    parser.add_argument('--negative-control', choices=['camera', 'ui', 'anchor', 'map', 'center_map', 'crop', 'band', 'crop_title', 'oob_guard', 'tall_ui', 'backdrop', 'fovy'])
     args = parser.parse_args()
 
     out_scale_src = (ROOT / 'runtime/nvn/output_scale.c').read_text(encoding='utf-8')
@@ -804,6 +966,10 @@ def main():
         old = 'g_wide_backdrop = sx > sy * 1.01f || sx < sy * 0.99f;'
         assert old in source
         source = source.replace(old, 'g_wide_backdrop = sx > sy * 1.01f;', 1)
+    elif args.negative_control == 'fovy':
+        old = 'if (!widescreen_allowed() || !shape_vert_plus(shape)) return orig_s0;'
+        assert old in source
+        source = source.replace(old, 'return orig_s0;', 1)
 
     with tempfile.TemporaryDirectory(prefix='fullscreen-narrow-') as directory:
         binary = Path(directory) / 'test'

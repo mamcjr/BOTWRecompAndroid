@@ -220,6 +220,7 @@ int rt_frame_wait(void);                    // hle/framepace.c
 void rt_vfr_update(uint64_t vfr);
 void rt_persp_update(uint64_t proj);        // hle/widescreen.c
 uint32_t rt_persp_aspect(uint64_t proj);
+uint32_t rt_persp_fovy(uint64_t proj, uint32_t orig_s0);
 static int fix_clustered_100(Cpu *c) {  // act::ClusteredRenderer's teardown with a null display-list heap
     if (c->x[0]) return 0;
     c->x[21] = c->x[20] + 0xc60;
@@ -236,6 +237,7 @@ static int fix_frame_wait(Cpu *c) { (void)c; return rt_frame_wait() ? 2 : 0; }
 static int fix_vfr(Cpu *c) { rt_vfr_update(c->x[19]); return 0; }
 static int fix_persp_matrix(Cpu *c) { rt_persp_update(c->x[0]); return 0; }
 static int fix_persp_aspect(Cpu *c) { c->v[0] = rt_persp_aspect(c->x[0]); return 3; }
+static int fix_persp_fovy(Cpu *c) { c->v[10] = rt_persp_fovy(c->x[0], (uint32_t)c->v[0]); return 3; }
 // An actor's tag check (`if (!a) return 0; return hasTag(a->[0x570]->[0x88], hash)`) reached with the actor's +0x570
 // still null - a rune's target (Magnesis, Stasis) being made or let go: the game read address 0x88 and Native mode
 // crashed (#235, #241, #248). The same answer as for no actor. Not only null: opening the Slate's camera it was -1
@@ -534,11 +536,13 @@ static const Fix fixes[] = {  // (canonical addresses, 0x7000000000 + the offset
     {182, 0x70014092f4, 0, 0xb9407a68, fix_vfr, "VFR ratio"},
     {182, 0x7000da13f4, 0, 0xbd409800, fix_persp_matrix, "projection matrix"},
     {182, 0x7000da13d8, 0, 0xbd40b000, fix_persp_aspect, "projection aspect"},
+    {182, 0x7000e7d0b4, 0, 0x1e20400a, fix_persp_fovy, "frustum fovy"},
     {182, 0x70010f7eb8, 0, 0xf9404500, fix_tag_null, "tag check, no target yet"},
     {190, 0x7000e9487c, 0, 0xa9bd7bfd, fix_frame_wait, "frame wait"},
     {190, 0x700151d494, 0, 0xb9407a68, fix_vfr, "VFR ratio"},
     {190, 0x7000eb4a44, 0, 0xbd409800, fix_persp_matrix, "projection matrix"},
     {190, 0x7000eb4a28, 0, 0xbd40b000, fix_persp_aspect, "projection aspect"},
+    {190, 0x7000f90da4, 0, 0x1e20400a, fix_persp_fovy, "frustum fovy"},
     {190, 0x700120bc48, 0, 0xf9404500, fix_tag_null, "tag check, no target yet"},
 };
 int native_patch_c(Cpu *c, uint32_t i) { return fixes[i].fn(c); }
