@@ -219,7 +219,16 @@ static void pad_open(SDL_JoystickID id) {
 }
 static void pad_close(SDL_JoystickID id) {
     for (int p = 0; p < npads; p++)
-        if (SDL_GetGamepadID(pads[p]) == id) { SDL_CloseGamepad(pads[p]); pads[p] = pads[--npads]; break; }
+        if (SDL_GetGamepadID(pads[p]) == id) {
+            SDL_Gamepad *closing = pads[p];
+            if (SDL_GamepadHasSensor(closing, SDL_SENSOR_GYRO)) SDL_SetGamepadSensorEnabled(closing, SDL_SENSOR_GYRO, false);
+            if (SDL_GamepadHasSensor(closing, SDL_SENSOR_ACCEL)) SDL_SetGamepadSensorEnabled(closing, SDL_SENSOR_ACCEL, false);
+            SDL_CloseGamepad(closing);
+            extern void motion_pad_closed(SDL_JoystickID id);  // (runtime/hle/motion.c)
+            motion_pad_closed(id);
+            pads[p] = pads[--npads];
+            break;
+        }
     pad = npads ? pads[0] : NULL;
     note_family();
 }

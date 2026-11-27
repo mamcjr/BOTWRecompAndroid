@@ -24,6 +24,8 @@ enum { LANG_AUTO = 0, N_LANGUAGES = 15 };
 extern const char *const g_language_codes[N_LANGUAGES];  // what the game is told: "ja", "en-US", "es", ...
 extern const char *const g_language_names[N_LANGUAGES];  // for the menu ("Auto", "Japanese", ..., "Spanish")
 
+enum { PAD_GYRO_AXES_REV = 2 };
+
 typedef struct {
     int aspect;          // ASPECT_*: unlocked = fill the window (wider/taller views), original = 16:9 with bars
     bool center_world_map;  // use the original map proportions on narrow landscape screens in Unlocked mode
@@ -43,6 +45,7 @@ typedef struct {
     bool motion;          // the phone's (or a controller's) gyroscope as the controller's motion sensor (hle/motion.c)
     int motion_source;    // whose: 0 automatic (a controller's once its gyroscope is alive), 1 the phone's, 2 a controller's
     int pad_gyro_axes;    // a controller's gyroscope axis order: 0 as reported, 1 y,x,z, 2 z,y,x, 3 x,z,y (hle/motion.c, #511)
+    int pad_gyro_axes_rev; // 2: post-Nintendo-Android normalization (untagged non-zero swaps from 0.4.12 migrate to 0)
     bool lsfg; int lsfg_mult, lsfg_flow;  // frame generation (vulkan/lsfg): on, frames per game frame 2..4, motion resolution % (0: the game's)
     bool motion_flat;     // the phone's sensors as the Switch's screen in handheld mode, not a flat controller (hle/motion.c)
 #ifdef __ANDROID__
@@ -119,6 +122,8 @@ int fps_mode_now(void);
 void framepace_thermal_sample(int thermal, float headroom);  // (once a second, from the activity: platform/android.c)
 void settings_load(void);
 void settings_save(void);
+bool settings_migrate_pad_gyro_axes(int *out_prev);
+void settings_set_pad_gyro_axes(int val);
 // The menu's RESTORE DEFAULTS: the Video and Audio options back to the defaults (the language, the controls, the touch
 // layout, mods and the one-time questions stay)
 void settings_reset_defaults(void);
