@@ -177,7 +177,10 @@ typedef struct { VkCommandBuffer handle; MockOp ops[512]; int nops; } MockCb;
 
 static MockImg m_imgs[128]; static MockBuf m_bufs[128]; static MockView m_views[256]; static MockCb m_cbs[64];
 static int n_imgs, n_bufs, n_views, n_cbs, stat_b2i, stat_in_up, stat_in_main, stat_bar, stat_up_bar, stat_sc_bar, stat_dispatch, stat_cbuf, cbuf_bars[8], mock_hazards;
-static MockCb *act_cb; static MockImg *act_att0; static VkAttachmentLoadOp last_lop[8];
+static int stat_views_created, stat_views_destroyed;
+static MockCb *act_cb; static MockImg *act_att0;
+static VkAttachmentLoadOp last_lop[8], last_lop_d, last_lop_s;
+static VkAttachmentStoreOp last_sop[8], last_sop_d, last_sop_s;
 static MockImg *find_img(VkImage im) { for (int i = 0; i < n_imgs; i++) if (m_imgs[i].handle == im) return &m_imgs[i]; return NULL; }
 static MockBuf *find_buf(VkBuffer b) { for (int i = 0; i < n_bufs; i++) if (m_bufs[i].handle == b) return &m_bufs[i]; return NULL; }
 static MockCb *find_cb(VkCommandBuffer c) { for (int i = 0; i < n_cbs; i++) if (m_cbs[i].handle == c) return &m_cbs[i]; return NULL; }
@@ -207,10 +210,23 @@ void vmaGetMemoryTypeProperties(VmaAllocator a, uint32_t i, VkMemoryPropertyFlag
 bool vk_begin_rendering(VkCommandBuffer cb, const VkRenderingInfo *ri, const VkFormat *c, VkFormat ds, VkSampleCountFlagBits sm) {
     (void)c, (void)ds, (void)sm; MockCb *mc = find_cb(cb);
     MockOp op = {.op = MOP_PASS, .rw = ri->renderArea.extent.width, .rh = ri->renderArea.extent.height, .ncol = ri->colorAttachmentCount};
+    for (uint32_t i = 0; i < 8; i++) last_sop[i] = VK_ATTACHMENT_STORE_OP_DONT_CARE;
+    last_lop_d = last_lop_s = VK_ATTACHMENT_LOAD_OP_DONT_CARE;
+    last_sop_d = last_sop_s = VK_ATTACHMENT_STORE_OP_DONT_CARE;
     for (uint32_t i = 0; i < ri->colorAttachmentCount && i < 8; i++) {
         MockImg *im = NULL;
-        for (int k = 0; k < n_views; k++) if (m_views[k].handle == ri->pColorAttachments[i].imageView) im = m_views[k].img;
-        op.att[i] = im; op.lop[i] = last_lop[i] = ri->pColorAttachments[i].loadOp;
+        for (int k = 0; k < n_views && k < 256; k++) if (m_views[k].handle == ri->pColorAttachments[i].imageView) im = m_views[k].img;
+        op.att[i] = im;
+        op.lop[i] = last_lop[i] = ri->pColorAttachments[i].loadOp;
+        last_sop[i] = ri->pColorAttachments[i].storeOp;
+    }
+    if (ri->pDepthAttachment) {
+        last_lop_d = ri->pDepthAttachment->loadOp;
+        last_sop_d = ri->pDepthAttachment->storeOp;
+    }
+    if (ri->pStencilAttachment) {
+        last_lop_s = ri->pStencilAttachment->loadOp;
+        last_sop_s = ri->pStencilAttachment->storeOp;
     }
     mc->ops[mc->nops++] = op; act_cb = mc; act_att0 = op.att[0] ? op.att[0] : op.att[1];
     return true;
@@ -241,13 +257,27 @@ static VKAPI_ATTR VkResult VKAPI_CALL m_wfences(VkDevice d, uint32_t n, const Vk
 static VKAPI_ATTR VkResult VKAPI_CALL m_wsems(VkDevice d, const VkSemaphoreWaitInfo *w, uint64_t t) { (void)d, (void)w, (void)t; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL m_gsem(VkDevice d, VkSemaphore s, uint64_t *v) { (void)d, (void)s; *v = submit_seq; return VK_SUCCESS; }
 static VKAPI_ATTR void VKAPI_CALL m_fprops(VkPhysicalDevice pd, VkFormat f, VkFormatProperties *p) {
-    (void)pd, (void)f; memset(p, 0, sizeof *p);
-    p->optimalTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    (void)pd; memset(p, 0, sizeof *p);
+    p->optimalTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
+    if (f == VK_FORMAT_D24_UNORM_S8_UINT || f == VK_FORMAT_D32_SFLOAT_S8_UINT || f == VK_FORMAT_D32_SFLOAT || f == VK_FORMAT_D16_UNORM || f == VK_FORMAT_S8_UINT)
+        p->optimalTilingFeatures |= VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT;
+    else
+        p->optimalTilingFeatures |= VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
 }
 static VKAPI_ATTR VkResult VKAPI_CALL mc_view(VkDevice d, const VkImageViewCreateInfo *ci, const VkAllocationCallbacks *a, VkImageView *v) {
-    (void)d, (void)a; MockView *mv = &m_views[n_views++]; mv->img = find_img(ci->image); mv->handle = (VkImageView)(uintptr_t)(0x50000 + n_views); *v = mv->handle; return VK_SUCCESS;
+    (void)d, (void)a;
+    uint32_t id = (uint32_t)(n_views++);
+    MockView *mv = &m_views[id & 255u];
+    mv->img = find_img(ci->image);
+    mv->handle = (VkImageView)(uintptr_t)(0x50000 + id + 1u);
+    *v = mv->handle;
+    stat_views_created++;
+    return VK_SUCCESS;
 }
-static VKAPI_ATTR void VKAPI_CALL md_view(VkDevice d, VkImageView v, const VkAllocationCallbacks *a) { (void)d, (void)v, (void)a; }
+static VKAPI_ATTR void VKAPI_CALL md_view(VkDevice d, VkImageView v, const VkAllocationCallbacks *a) {
+    (void)d, (void)v, (void)a;
+    stat_views_destroyed++;
+}
 static VKAPI_ATTR void VKAPI_CALL m_clr_col(VkCommandBuffer cb, VkImage im, VkImageLayout l, const VkClearColorValue *cv, uint32_t n, const VkImageSubresourceRange *r) {
     (void)cv, (void)n, (void)r; if (act_cb || l != VK_IMAGE_LAYOUT_GENERAL) mock_hazards++;
     MockCb *c = find_cb(cb); c->ops[c->nops++] = (MockOp){.op = MOP_CLR, .img = find_img(im)};
@@ -1110,6 +1140,345 @@ int main(void) {
                ok_nosnap_gcopy, ok_nosnap_placed, ok_ab_placed, ok_ab_gcopy, ok_non_mali_off,
                ok_placed_shortcircuit, ok_retire_drop, ok_seqlock_mt, ok_cbwin_off, ok_reset, ok_non_cbwin_zero_churn);
     check("cbwin integration: base reuse, in/out updates, b2b/seqlock, retire, mt stress, #453, short-circuit, non-Mali off, zero non-cbwin churn, and reset", ok_cb_all);
+    }
+
+    {
+    // 10. Integration (#586): Mali RP opt look-ahead, STORE_OP_NONE restart, folded clear pass_written,
+    //     packed D24_S8 temp-view materialization, vk_views_forget retention, and renderer_fence_seq().
+    bool sv_mrg = g_vk.mali_rp_merge_opt, sv_sto = g_vk.mali_rp_store_opt, sv_dyn = g_vk.dyn_render;
+    uint32_t sv_vid = g_vk.props.vendorID;
+    int sv_ip = g_settings.inplace_reads;
+    g_vk.props.vendorID = 0x13B5;
+    g_vk.mali_rp_merge_opt = true;
+    g_vk.mali_rp_store_opt = true;
+    g_vk.dyn_render = true;
+    g_settings.inplace_reads = 1;
+    g_inplace_copy = -1;
+    unsetenv("LARECOMP_VK_PASS_RESTART");
+    unsetenv("LARECOMP_FEEDBACK_INPLACE");
+    unsetenv("LARECOMP_FEEDBACK_COPY");
+    vk_exec_reset();
+    vk_mali_rp_flush_all_clears();
+    mali_dclear_reset(&g_mali_dclears);
+    mali_dclear_publish_count();
+    renderer_flush();
+
+    NvnTexture rc0 = make_tex(0x25, 64, 64, 8, 0x1111);
+    NvnTexture rc1 = make_tex(0x25, 64, 64, 8, 0x2222);
+    NvnTexture rc2 = make_tex(0x25, 64, 64, 8, 0x4444);
+    NvnTexture rc_copy_dst = make_tex(0x25, 64, 64, 8, 0x3333);
+    NvnTexture rd = make_tex(0x35, 64, 64, 8, 0);
+    // Keep non-depth test targets ineligible for write-back despite LARECOMP_WRITEBACK_MAX=262144.
+    rc0.addr = 0; rc1.addr = 0; rc2.addr = 0; rc_copy_dst.addr = 0;
+    vk_tex(&rc0, true); vk_tex(&rc1, true); vk_tex(&rc2, true); vk_tex(&rc_copy_dst, true); vk_tex(&rd, true);
+    renderer_flush();
+
+    uint8_t *fs_code_c0 = alloc_guest(0x400), *fs_code_c01 = alloc_guest(0x400), *fs_code_c2 = alloc_guest(0x400);
+    uint64_t fs_a0 = (uint64_t)(uintptr_t)fs_code_c0, fs_a01 = (uint64_t)(uintptr_t)fs_code_c01, fs_a2 = (uint64_t)(uintptr_t)fs_code_c2;
+    mali_fs_meta_put(fs_a0, 0x1u);
+    mali_fs_meta_put(fs_a01, 0xFFu);
+    mali_fs_meta_put(fs_a2, 0xF00u);
+    NvnProgram np_c0 = {.stage_mask = 3, .stages = {[0] = {.code_addr = fs_a0}, [1] = {.code_addr = fs_a0}}};
+    NvnProgram np_c01 = {.stage_mask = 3, .stages = {[0] = {.code_addr = fs_a0}, [1] = {.code_addr = fs_a01}}};
+    NvnProgram np_c2 = {.stage_mask = 3, .stages = {[0] = {.code_addr = fs_a0}, [1] = {.code_addr = fs_a2}}};
+
+    // 10a1: look-ahead must skip no-op copy (tex==0) and observe subsequent draw writing slot 1 -> STORE_OP_STORE.
+    enum { COPY_CMD_SZ = (sizeof(CmdRec) + 2u * sizeof(TexRefRec) + 7u) & ~7u };
+    _Alignas(CmdRec) uint8_t seq_noop[5u * sizeof(CmdRec) + COPY_CMD_SZ];
+    memset(seq_noop, 0, sizeof seq_noop);
+    size_t soff = 0;
+    CmdRec r_tmp = {.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&np_c0}};
+    memcpy(seq_noop + soff, &r_tmp, sizeof r_tmp); soff += r_tmp.size;
+    r_tmp = (CmdRec){.op = CMD_DRAW_ARRAYS, .size = sizeof(CmdRec)};
+    memcpy(seq_noop + soff, &r_tmp, sizeof r_tmp); soff += r_tmp.size;
+    r_tmp = (CmdRec){.op = CMD_COPY_TEXTURE_TO_TEXTURE, .size = COPY_CMD_SZ};
+    memcpy(seq_noop + soff, &r_tmp, sizeof r_tmp); soff += r_tmp.size;
+    r_tmp = (CmdRec){.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&np_c01}};
+    memcpy(seq_noop + soff, &r_tmp, sizeof r_tmp); soff += r_tmp.size;
+    r_tmp = (CmdRec){.op = CMD_DRAW_ARRAYS, .size = sizeof(CmdRec)};
+    memcpy(seq_noop + soff, &r_tmp, sizeof r_tmp); soff += r_tmp.size;
+    _Alignas(CmdRec) CmdRec la_end = {.op = CMD_END, .size = sizeof(CmdRec)};
+    memcpy(seq_noop + soff, &la_end, sizeof la_end); soff += la_end.size;
+    assert(soff == sizeof seq_noop);
+    reset_pass(&rc0, &rc1, 0xFF, (const CmdRec *)seq_noop);
+    begin_pass();
+    bool ok_noop_copy_store = in_pass && last_sop[1] == VK_ATTACHMENT_STORE_OP_STORE && !(g_mali_pass_store_none_mask & (1u << 1));
+    vk_end_pass();
+    renderer_flush();
+
+    // 10a2: hitting look-ahead step cap (2048) falls back cleanly to conservative STORE_OP_STORE for slot 1.
+    size_t cap_cnt = 2052u;
+    CmdRec *cap_seq = calloc(cap_cnt, sizeof(CmdRec));
+    assert(cap_seq);
+    cap_seq[0] = (CmdRec){.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&np_c0}};
+    for (size_t di = 1; di <= 2050u; di++)
+        cap_seq[di] = (CmdRec){.op = CMD_DRAW_ARRAYS, .size = sizeof(CmdRec)};
+    cap_seq[cap_cnt - 1] = la_end;
+    reset_pass(&rc0, &rc1, 0xFF, cap_seq);
+    begin_pass();
+    bool ok_cap_store = in_pass && last_sop[1] == VK_ATTACHMENT_STORE_OP_STORE && !(g_mali_pass_store_none_mask & (1u << 1));
+    vk_end_pass();
+    free(cap_seq);
+    renderer_flush();
+
+    // 10a3: pass_dup_null step==0 must record sim_written for active duplicate slot, while step>0 breaks look-ahead.
+    _Alignas(CmdRec) CmdRec seq_dup_s0[3] = {
+        {.op = CMD_DRAW_ARRAYS, .size = sizeof(CmdRec)},
+        {.op = CMD_END, .size = sizeof(CmdRec)},
+    };
+    reset_pass(&rc0, &rc0, 0xFF, seq_dup_s0);
+    st.program = &np_c01;
+    begin_pass();
+    bool ok_dup_step0_store = in_pass && (pass_dup_null == (1u << 1)) &&
+                              last_sop[0] == VK_ATTACHMENT_STORE_OP_STORE && !(g_mali_pass_store_none_mask & 1u);
+    vk_end_pass();
+    renderer_flush();
+
+    _Alignas(CmdRec) CmdRec seq_dup_s1[6] = {
+        {.op = CMD_DRAW_ARRAYS, .size = sizeof(CmdRec)},
+        {.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&np_c01}},
+        {.op = CMD_DRAW_ARRAYS, .size = sizeof(CmdRec)},
+        {.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&np_c2}},
+        {.op = CMD_DRAW_ARRAYS, .size = sizeof(CmdRec)},
+        {.op = CMD_END, .size = sizeof(CmdRec)},
+    };
+    reset_pass(&rc0, &rc0, 0xFFFu, seq_dup_s1);
+    st.rt.ncolor = 3; st.rt.color[2] = &rc2; st.program = &np_c0;
+    begin_pass();
+    bool ok_dup_step1_break = in_pass && (pass_dup_null == (1u << 1)) &&
+                              last_sop[0] == VK_ATTACHMENT_STORE_OP_STORE &&
+                              last_sop[2] == VK_ATTACHMENT_STORE_OP_NONE && (g_mali_pass_store_none_mask & (1u << 2)) != 0;
+    vk_end_pass();
+    renderer_flush();
+
+    // Depth-vs-stencil STORE_OP_NONE asymmetry + selective clear() restart (depth clear does NOT restart stencil-NONE pass).
+    _Alignas(CmdRec) CmdRec seq_none[3] = {
+        {.op = CMD_BIND_PROGRAM, .size = sizeof(CmdRec), .x = {(uint64_t)(uintptr_t)&np_c0}},
+        {.op = CMD_DRAW_ARRAYS, .size = sizeof(CmdRec)},
+        {.op = CMD_END, .size = sizeof(CmdRec)},
+    };
+    reset_pass(&rc0, &rc1, 0xFF, seq_none);
+    st.rt.depth = &rd;
+    st.ds[0] = 1; st.ds[1] = 1;  // depth write on, stencil off
+    begin_pass();
+    bool got_none_c1_s9 = in_pass && last_sop[1] == VK_ATTACHMENT_STORE_OP_NONE &&
+                          last_sop_d == VK_ATTACHMENT_STORE_OP_STORE && last_sop_s == VK_ATTACHMENT_STORE_OP_NONE &&
+                          (g_mali_pass_store_none_mask & (1u << 1)) != 0 &&
+                          !(g_mali_pass_store_none_mask & (1u << 8)) && (g_mali_pass_store_none_mask & (1u << 9)) != 0;
+    // Depth clear does not overlap slot1/stencil STORE_OP_NONE -> stays in the same pass.
+    uint32_t passes_pre_dclr = stat_passes;
+    clear(-1, 0, NULL, 0, true, 1.0f, false, 0, 0);
+    bool ok_depth_clr_no_restart = in_pass && stat_passes == passes_pre_dclr && (g_mali_pass_store_none_mask & (1u << 9)) != 0;
+    // Unexpected follow-up clear on color slot 1 restarts pass with STORE_OP_STORE cleanly (g_cur_rec = NULL -> full STORE fallback).
+    g_cur_rec = NULL;
+    float clr_zero[4] = {0, 0, 0, 0};
+    clear(1, 0, clr_zero, 0xFu, false, 0.0f, false, 0, 0);
+    bool ok_clear_restart_c1 = in_pass && stat_passes == passes_pre_dclr + 1u &&
+                               last_sop[1] == VK_ATTACHMENT_STORE_OP_STORE && last_sop_d == VK_ATTACHMENT_STORE_OP_STORE &&
+                               g_mali_pass_store_none_mask == 0;
+    vk_end_pass();
+
+    // Re-open pass with STORE_OP_NONE on stencil (bit 9) and verify stencil clear + selective mali_draw_store_write_mask.
+    reset_pass(&rc0, &rc1, 0xFF, seq_none);
+    st.rt.depth = &rd;
+    st.ds[0] = 1; st.ds[1] = 1;
+    begin_pass();
+    uint32_t dsw_depth_only = mali_draw_store_write_mask(1u << 8);
+    bool ok_depth_no_overlap = (dsw_depth_only == (1u << 8)) && !(dsw_depth_only & g_mali_pass_store_none_mask);
+    st.ds[3] = 1; st.ds[5] = 3; st.stencil_mask[0] = 0xFF;  // stencil REPLACE active, depthWrite=1
+    uint32_t dsw_sten = mali_draw_store_write_mask(draw_writes(&(Prog){.fs_out_mask = 1u}));
+    bool ok_stencil_mask_sep = (dsw_sten & (1u << 9)) != 0 && (dsw_sten & g_mali_pass_store_none_mask) == (1u << 9);
+    // Simulate draw_() pre-begin_pass restart path on STORE_OP_NONE overlap, plus explicit stencil clear restart.
+    g_cur_rec = NULL;
+    uint32_t passes_pre_sten = stat_passes;
+    if (in_pass && !st.rt_dirty && (mali_draw_store_write_mask(1u << 8) & g_mali_pass_store_none_mask))
+        st.rt_dirty = true;
+    begin_pass();
+    bool ok_draw_restart_s9 = in_pass && stat_passes == passes_pre_sten + 1u &&
+                              last_sop_s == VK_ATTACHMENT_STORE_OP_STORE && g_mali_pass_store_none_mask == 0;
+    vk_end_pass();
+    reset_pass(&rc0, &rc1, 0xFF, seq_none);
+    st.rt.depth = &rd; st.ds[0] = 1; st.ds[1] = 1;
+    begin_pass();
+    g_cur_rec = NULL;
+    uint32_t passes_pre_sclr = stat_passes;
+    clear(-1, 0, NULL, 0, false, 0.0f, true, 0x5Au, 0xFFu);
+    bool ok_clear_restart_s9 = in_pass && stat_passes == passes_pre_sclr + 1u &&
+                               last_sop_s == VK_ATTACHMENT_STORE_OP_STORE && g_mali_pass_store_none_mask == 0;
+    vk_end_pass();
+    renderer_flush();
+
+    // 10b: Cross-RT deferred clear via exec_list() (clear rc0 -> draw rc1 -> bind rc0 -> folded LOAD_OP_CLEAR +
+    //      pass_written -> resolve_feedback restart -> LOAD_OP_LOAD + pass_written==0) + depth folded pass_written.
+    memset(&st, 0, sizeof st);
+    typedef struct {
+        uint64_t tex[8]; NvnTextureView views[8]; uint8_t has_view[8]; uint64_t depth; NvnTextureView dview; uint8_t has_dview;
+    } RtSetPayload;
+    enum {
+        RT_CMD_SZ = (sizeof(CmdRec) + sizeof(RtSetPayload) + 7u) & ~7u,
+        SC_CMD_SZ = (sizeof(CmdRec) + 16u + 7u) & ~7u
+    };
+    _Alignas(CmdRec) uint8_t seq_xrt[RT_CMD_SZ + SC_CMD_SZ + sizeof(CmdRec)];
+    memset(seq_xrt, 0, sizeof seq_xrt);
+    soff = 0;
+    _Alignas(CmdRec) CmdRec xr_rt0 = {.op = CMD_SET_RENDER_TARGETS, .size = RT_CMD_SZ, .x = {1, 0, 0, 0, 0}};
+    RtSetPayload rt_pay = {.tex = {(uint64_t)(uintptr_t)&rc0}};
+    memcpy(seq_xrt + soff, &xr_rt0, sizeof xr_rt0);
+    memcpy(seq_xrt + soff + sizeof(CmdRec), &rt_pay, sizeof rt_pay);
+    soff += RT_CMD_SZ;
+    _Alignas(CmdRec) CmdRec xr_sc = {.op = CMD_SET_SCISSORS, .size = SC_CMD_SZ, .x = {0, 1}};
+    int32_t sc_full[4] = {0, 0, 64, 64};
+    memcpy(seq_xrt + soff, &xr_sc, sizeof xr_sc);
+    memcpy(seq_xrt + soff + sizeof(CmdRec), sc_full, 16);
+    soff += SC_CMD_SZ;
+    _Alignas(CmdRec) CmdRec xr_end = {.op = CMD_END, .size = sizeof(CmdRec)};
+    memcpy(seq_xrt + soff, &xr_end, sizeof xr_end);
+    soff += xr_end.size;
+    assert(soff == sizeof seq_xrt);
+    exec_list((uint64_t)(uintptr_t)seq_xrt, 0);
+    st.channel_mask = 0xFu;
+    bool ok_def1 = mali_try_defer_rt_clear(0, clr_zero, 0xFu, false, 0.0f, false, 0, 0);
+    st.rt.color[0] = &rc1; st.rt_dirty = true;
+    begin_pass();  // opens & draws rc1 without flushing rc0's deferred clear!
+    sim_draw_rows(0, 1, 0x2223);
+    vk_end_pass();
+    bool ok_xrt_kept = ok_def1 && g_mali_dclears.count == 1;
+    // Switch back to rc0 (prior snapshot invalidated), fold clear -> pass_written & 1 -> resolve_feedback restarts -> LOAD_OP_LOAD.
+    st.rt.color[0] = &rc0; st.rt_dirty = true;
+    snapshots_invalidate(NULL);
+    uint32_t pass_before_fold = stat_passes;
+    begin_pass();
+    bool ok_folded_pw = ok_xrt_kept && g_mali_dclears.count == 0 && stat_passes == pass_before_fold + 1u &&
+                        last_lop[0] == VK_ATTACHMENT_LOAD_OP_CLEAR && (pass_written & 1u) != 0;
+    NvnTexEntry f_ents[2] = {[1] = {.tex = &rc0}};
+    NvnDescPool f_dpool = {.count = 2, .entries = f_ents};
+    ShaderInfo f_vs = {.stage = STAGE_VERTEX}, f_fs = {.stage = STAGE_FRAGMENT, .ntex = 1, .tex = {[0] = {.handle_offset = 0x20, .type = TEXTYPE_2D}}};
+    Prog pr_ro = {.vi = &f_vs, .fi = &f_fs, .fs_out_mask = 0};
+    st.tpool = &f_dpool; st.tex[1][0] = 0x100001ull;
+    uint64_t ip_breaks0 = stat_inplace_breaks;
+    resolve_feedback(&pr_ro, 0);
+    bool ok_rf_dirty = ok_folded_pw && st.rt_dirty && stat_inplace_breaks == ip_breaks0 + 1u;
+    begin_pass();
+    bool ok_folded_fb = ok_rf_dirty && stat_passes == pass_before_fold + 2u &&
+                        last_lop[0] == VK_ATTACHMENT_LOAD_OP_LOAD && (pass_written & 1u) == 0;
+    vk_end_pass();
+    snapshots_invalidate(NULL);
+    renderer_flush();
+
+    // Depth folded clear sets pass_written bit 8 via exec_list CMD_CLEAR_DEPTH_STENCIL.
+    _Alignas(CmdRec) uint8_t seq_dsclr[sizeof(CmdRec) * 2];
+    memset(seq_dsclr, 0, sizeof seq_dsclr);
+    CmdRec dsc = {.op = CMD_CLEAR_DEPTH_STENCIL, .size = sizeof(CmdRec), .x = {1, 0, 0}, .f = {1.0f}};
+    memcpy(seq_dsclr, &dsc, sizeof dsc);
+    memcpy(seq_dsclr + sizeof(CmdRec), &la_end, sizeof la_end);
+    memset(&st, 0, sizeof st);
+    st.rt.ncolor = 1; st.rt.color[0] = &rc0; st.rt.depth = &rd; st.channel_mask = 0xFu;
+    st.scissor[0][2] = 64; st.scissor[0][3] = 64; st.rt_dirty = true;
+    exec_list((uint64_t)(uintptr_t)seq_dsclr, 0);
+    begin_pass();
+    bool ok_ds_fold_pw = last_lop_d == VK_ATTACHMENT_LOAD_OP_CLEAR && (pass_written & (1u << 8)) != 0 &&
+                         g_mali_dclears.count == 0;
+    vk_end_pass();
+    renderer_flush();
+
+    // 10c: vk_views_forget drops cached views cleanly while preserving deferred clears; mali_dclear_materialize() creates/defers temp view;
+    //      also verify packed D24_S8 partial depth-only clear, CMD_CLEAR_TEXTURE deferral, rpcompat (dyn_render=false), & renderer_fence_seq().
+    vk_views_forget((TexBackend *)rc0.backend);
+    (void)vk_cmd();
+    renderer_flush();
+    vk_collect_dead();
+    vk_view(&rc0, NULL, false, true, TEXTYPE_2D);
+    reset_pass(&rc0, NULL, 0xF, NULL);
+    int vc0 = stat_views_created, vd0 = stat_views_destroyed;
+    bool ok_def2 = mali_try_defer_rt_clear(0, clr_zero, 0xFu, false, 0.0f, false, 0, 0);
+    vk_views_forget((TexBackend *)rc0.backend);
+    (void)sub();
+    bool ok_live_clear_kept = ok_def2 && g_mali_dclears.count == 1 && atomic_load(&g_mali_dclears_pending) == 1;
+    // Empty command buffer + pending deferred clear advances renderer_fence_seq() to submit_seq + 1.
+    bool ok_fence_pending = !subs[cur_sub].main_begun && !subs[cur_sub].upload_begun && renderer_fence_seq() == submit_seq + 1u;
+    vk_mali_rp_flush_clears_for(((TexBackend *)rc0.backend)->image);
+    renderer_flush();
+    vk_collect_dead();
+    (void)sub();
+    bool ok_temp_view = ok_live_clear_kept && g_mali_dclears.count == 0 && atomic_load(&g_mali_dclears_pending) == 0 &&
+                        stat_views_created == vc0 + 1 && last_lop[0] == VK_ATTACHMENT_LOAD_OP_CLEAR &&
+                        stat_views_destroyed == vd0 + 2 && renderer_fence_seq() == submit_seq;
+
+    // Packed D24_S8 depth-only deferred clear -> materialize preserves stencil via LOAD_OP_LOAD + STORE_OP_NONE.
+    memset(&st, 0, sizeof st);
+    st.rt.ncolor = 0; st.rt.depth = &rd;
+    st.scissor[0][2] = 64; st.scissor[0][3] = 64; st.rt_dirty = true;
+    int vc_ds = stat_views_created, vd_ds = stat_views_destroyed;
+    bool ok_ds_def = mali_try_defer_rt_clear(-1, NULL, 0, true, 0.5f, false, 0, 0);
+    vk_mali_rp_flush_clears_for(((TexBackend *)rd.backend)->image);
+    renderer_flush();
+    vk_collect_dead();
+    bool ok_ds_partial = ok_ds_def && last_lop_d == VK_ATTACHMENT_LOAD_OP_CLEAR && last_sop_d == VK_ATTACHMENT_STORE_OP_STORE &&
+                         last_lop_s == VK_ATTACHMENT_LOAD_OP_LOAD && last_sop_s == VK_ATTACHMENT_STORE_OP_NONE &&
+                         stat_views_created == vc_ds + 1 && stat_views_destroyed == vd_ds + 1;
+
+    // CMD_CLEAR_TEXTURE deferral + dyn_render=false temp-view cleanup.
+    int32_t ct_rg[6] = {0, 0, 0, 64, 64, 1};
+    bool ct_whole = false;
+    g_vk.dyn_render = false;
+    int vc_ct = stat_views_created, vd_ct = stat_views_destroyed;
+    bool ok_ct_def = mali_try_defer_clear_texture(&rc0, NULL, false, ct_rg, clr_zero, 0xFu, &ct_whole) && ct_whole;
+    vk_mali_rp_flush_clears_for(((TexBackend *)rc0.backend)->image);
+    renderer_flush();
+    vk_collect_dead();
+    g_vk.dyn_render = true;
+    bool ok_ct_dyn_off = ok_ct_def && stat_views_created == vc_ct + 1 && stat_views_destroyed == vd_ct + 1 &&
+                         last_lop[0] == VK_ATTACHMENT_LOAD_OP_CLEAR;
+
+    // 10d: deferred clear flush-before-read (copy_texture) + 2-RT deferred clear folding.
+    memset(&st, 0, sizeof st);
+    st.rt.ncolor = 2; st.rt.color[0] = &rc0; st.rt.color[1] = &rc1; st.channel_mask = 0xFFu;
+    st.scissor[0][2] = 64; st.scissor[0][3] = 64; st.rt_dirty = true;
+    bool ok_def3 = mali_try_defer_rt_clear(0, clr_zero, 0xFu, false, 0.0f, false, 0, 0);
+    TexRefRec cp_s = {.tex = (uint64_t)(uintptr_t)&rc0}, cp_d = {.tex = (uint64_t)(uintptr_t)&rc_copy_dst};
+    uint32_t pass_before_copy = stat_passes;
+    copy_texture(&cp_s, &cp_d, 0);
+    bool ok_flush_before_copy = ok_def3 && g_mali_dclears.count == 0 && stat_passes == pass_before_copy + 1u;
+
+    memset(&st, 0, sizeof st);
+    st.rt.ncolor = 2; st.rt.color[0] = &rc0; st.rt.color[1] = &rc1; st.channel_mask = 0xFFu;
+    st.scissor[0][2] = 64; st.scissor[0][3] = 64; st.rt_dirty = true;
+    bool ok_mrt0 = mali_try_defer_rt_clear(0, clr_zero, 0xFu, false, 0.0f, false, 0, 0);
+    bool ok_mrt1 = mali_try_defer_rt_clear(1, clr_zero, 0xFu, false, 0.0f, false, 0, 0);
+    uint32_t pass_before_mrt = stat_passes;
+    begin_pass();
+    bool ok_mrt_fold = ok_mrt0 && ok_mrt1 && g_mali_dclears.count == 0 && stat_passes == pass_before_mrt + 1u &&
+                       last_lop[0] == VK_ATTACHMENT_LOAD_OP_CLEAR && last_lop[1] == VK_ATTACHMENT_LOAD_OP_CLEAR &&
+                       (pass_written & 3u) == 3u;
+    vk_end_pass();
+    renderer_flush();
+
+    backend_texture_destroyed(&rd);
+    backend_texture_destroyed(&rc_copy_dst);
+    backend_texture_destroyed(&rc2);
+    backend_texture_destroyed(&rc1);
+    backend_texture_destroyed(&rc0);
+    g_vk.mali_rp_merge_opt = sv_mrg;
+    g_vk.mali_rp_store_opt = sv_sto;
+    g_vk.dyn_render = sv_dyn;
+    g_vk.props.vendorID = sv_vid;
+    g_settings.inplace_reads = sv_ip;
+    g_cur_rec = NULL;
+    vk_exec_reset();
+
+    bool ok_mali_rp_all = ok_noop_copy_store && ok_cap_store && ok_dup_step0_store && ok_dup_step1_break &&
+                          got_none_c1_s9 && ok_depth_clr_no_restart && ok_clear_restart_c1 &&
+                          ok_depth_no_overlap && ok_stencil_mask_sep && ok_draw_restart_s9 && ok_clear_restart_s9 &&
+                          ok_folded_fb && ok_ds_fold_pw && ok_temp_view && ok_fence_pending &&
+                          ok_ds_partial && ok_ct_dyn_off && ok_flush_before_copy && ok_mrt_fold;
+    if (!ok_mali_rp_all)
+        printf("  mali_rp fail: noop=%d cap=%d dup0=%d dup1=%d none=%d dclrn=%d clrc1=%d dno=%d sten=%d drws=%d clrs9=%d fb=%d dspw=%d tmpv=%d fnc=%d dsp=%d ctdyn=%d fbcpy=%d mrt=%d\n",
+               ok_noop_copy_store, ok_cap_store, ok_dup_step0_store, ok_dup_step1_break,
+               got_none_c1_s9, ok_depth_clr_no_restart, ok_clear_restart_c1,
+               ok_depth_no_overlap, ok_stencil_mask_sep, ok_draw_restart_s9, ok_clear_restart_s9,
+               ok_folded_fb, ok_ds_fold_pw, ok_temp_view, ok_fence_pending,
+               ok_ds_partial, ok_ct_dyn_off, ok_flush_before_copy, ok_mrt_fold);
+    check("mali_rp integration: look-ahead dup/copy/cap guards, STORE_OP_NONE restarts, folded pass_written feedback, temp-view materialize, and fence seq", ok_mali_rp_all);
     }
 
     check("Vulkan mock synchronization validator recorded 0 hazards", !mock_hazards);

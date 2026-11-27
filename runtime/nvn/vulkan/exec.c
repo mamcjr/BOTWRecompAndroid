@@ -27,6 +27,9 @@
 #include "shaders.h"
 #include "shader_meta_cache.h"
 #include "vk.h"
+#ifdef __ANDROID__
+#include "mali_rp_opt.h"
+#endif
 #define CBWIN_SPAN_TYPE
 typedef VkSpan CbwinSpan;
 #include "cbwin_snap.h"
@@ -141,6 +144,7 @@ static pthread_mutex_t seq_lock = PTHREAD_MUTEX_INITIALIZER;
 static bool in_pass;
 static uint32_t pass_written;  // (the attachments this pass's draws wrote so far: draw_writes)
 static uint32_t pass_dup_null;  // (color slots left unbound: their image is bound in another slot - begin_pass)
+typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRefRec;
 static const void *g_cur_rec;   // (exec_list: the record being run)
 static struct { const void *rec; uint32_t aspects; } lclear[16];  // (clears the pass's load operations did: begin_pass)
 static int nlclear;
@@ -1054,9 +1058,15 @@ static bool dchain;              // the last GPU work recorded was a dispatch; s
 static VkCommandBuffer dchain_cb;
 static bool dchain_after;        // that dispatch's barrier after it is still owed
 
+#ifdef __ANDROID__
+static void vk_mali_rp_flush_all_clears(void);
+#endif
 void vk_submit_extra(VkSemaphore wait, VkSemaphore signal, VkCommandBuffer extra) {
     (void)extra;
     vk_end_pass();
+#ifdef __ANDROID__
+    vk_mali_rp_flush_all_clears();
+#endif
     Sub *s = sub();
     if (!s->main_begun && !s->upload_begun && !wait && !signal) return;
     VkCommandBufferSubmitInfo cbs[2];
@@ -1165,9 +1175,18 @@ void renderer_sync(void) {
     vk_wait_seq(s);
 }
 
+#ifdef __ANDROID__
+static _Atomic int g_mali_dclears_pending;
+#endif
+
 uint64_t renderer_fence_seq(void) {
     pthread_mutex_lock(&seq_lock);
-    uint64_t q = submit_seq + (subs[cur_sub].main_begun || subs[cur_sub].upload_begun ? 1 : 0);
+#ifdef __ANDROID__
+    bool dclears = atomic_load_explicit(&g_mali_dclears_pending, memory_order_acquire) > 0;
+#else
+    bool dclears = false;
+#endif
+    uint64_t q = submit_seq + (subs[cur_sub].main_begun || subs[cur_sub].upload_begun || dclears ? 1 : 0);
 #ifdef __ANDROID__
     static int fence_present = -1;
     if (fence_present < 0) fence_present = getenv("LARECOMP_FENCE_PRESENT") != NULL;
@@ -2337,6 +2356,7 @@ TexBackend *g_dump_sampled;  // (LARECOMP_DUMP_SAMPLED: the texture to dump afte
 NvnTexture *g_pass_t0;  // (the open pass's first color target and its layer: LARECOMP_DUMP_AFTER_LAYER)
 int g_pass_layer;
 static void dump_layers_raw(TexBackend *b) {  // every layer, level 0, as stored (R8 / R16 / RGBA8 / RGBA16F...)
+    if (!(b->aspect & VK_IMAGE_ASPECT_COLOR_BIT) || b->samples > 1) return;
     uint32_t bpp = b->format == VK_FORMAT_R16_UNORM || b->format == VK_FORMAT_R16_SFLOAT ? 2 : b->format == VK_FORMAT_R8_UNORM ? 1
                  : b->format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : 4;
     uint32_t nl = b->layers ? b->layers : 1;
@@ -2344,6 +2364,9 @@ static void dump_layers_raw(TexBackend *b) {  // every layer, level 0, as stored
     if (lvl >= b->levels) lvl = 0;
     uint32_t w = b->width >> lvl ? b->width >> lvl : 1, h = b->height >> lvl ? b->height >> lvl : 1;
     uint64_t one = (uint64_t)w * h * bpp;
+#ifdef __ANDROID__
+    vk_mali_rp_flush_clears_for(b->image);
+#endif
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
     VkSpan out = vk_readback(one * nl);
@@ -2379,6 +2402,9 @@ void vk_dump_watch_frame(void) {
     NvnTexture *t = vk_texture_at(wa);
     TexBackend *b = t ? t->backend : NULL;
     if (!b || !b->image) { LOG("[vk] dump_watch: no texture at %llx\n", (unsigned long long)wa); return; }
+#ifdef __ANDROID__
+    vk_mali_rp_flush_clears_for(b->image);
+#endif
     uint32_t bpp = b->format == VK_FORMAT_R16_UNORM || b->format == VK_FORMAT_R16_SFLOAT ? 2 : b->format == VK_FORMAT_R8_UNORM ? 1
                  : b->format == VK_FORMAT_R16G16B16A16_SFLOAT ? 8 : 4;
     uint32_t nl = b->layers ? b->layers : 1;
@@ -2406,6 +2432,22 @@ void vk_dump_watch_frame(void) {
     LOG("[vk] dump_watch frame %llu: %ux%u, %u layers, %u levels, vkformat %d (%u bytes a texel)\n",
         (unsigned long long)renderer_present_count(), b->width, b->height, nl, b->levels, (int)b->format, bpp);
 }
+#ifdef __ANDROID__
+static MaliDeferredClearTable g_mali_dclears;
+static inline void mali_dclear_publish_count(void) {
+    atomic_store_explicit(&g_mali_dclears_pending, g_mali_dclears.count, memory_order_release);
+}
+static MaliActivePassImgs g_mali_active_pass;
+static uint32_t g_mali_pass_draws;
+static uint32_t g_mali_pass_store_none_mask;
+static uint64_t g_mali_last_fs_code;
+static int g_exec_depth;
+static bool g_mali_ct_lclear;
+
+typedef struct { uint64_t code; uint32_t out_mask; uint8_t valid; } MaliFsMetaEnt;
+#define MALI_FS_META_CAP 4096u
+static MaliFsMetaEnt g_mali_fs_meta[MALI_FS_META_CAP];
+#endif
 static void vk_end_pass_at(int line);
 static void save_texture_raw(TexBackend *b, const char *path);
 static TexBackend *pass_dump_b;  // (debug frame) the color target the open pass draws into
@@ -2417,6 +2459,14 @@ static void vk_end_pass_at(int line) {
     if (prof && line < 4096) prof_end_line[line]++;
     vk_end_rendering(vk_cmd());
     in_pass = false;
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_merge_opt || g_vk.mali_rp_store_opt) {
+        g_mali_pass_draws = 0;
+        g_mali_pass_store_none_mask = 0;
+        g_mali_last_fs_code = 0;
+        mali_active_pass_reset(&g_mali_active_pass);
+    }
+#endif
     {   extern TexBackend *g_dump_sampled;
         if (g_dump_sampled) { TexBackend *db = g_dump_sampled; g_dump_sampled = NULL; dump_layers_raw(db); }
     }
@@ -2496,6 +2546,594 @@ static bool no_chunks_now(void) {
     extern bool framepace_in_menu(void);
     return !keep && framepace_in_menu();
 }
+#ifdef __ANDROID__
+
+static void mali_fs_meta_put(uint64_t code, uint32_t out_mask) {
+    if (!code) return;
+    uint32_t h = (uint32_t)((code * 0x9E3779B97F4A7C15ull) >> 52);
+    for (uint32_t p = 0; p < 8; p++) {
+        uint32_t s = (h + p) & (MALI_FS_META_CAP - 1u);
+        if (!g_mali_fs_meta[s].valid || g_mali_fs_meta[s].code == code) {
+            g_mali_fs_meta[s] = (MaliFsMetaEnt){code, out_mask, 1};
+            return;
+        }
+    }
+    g_mali_fs_meta[h & (MALI_FS_META_CAP - 1u)] = (MaliFsMetaEnt){code, out_mask, 1};
+}
+
+static bool mali_fs_meta_get(uint64_t code, uint32_t *out_mask) {
+    if (!code) return false;
+    uint32_t h = (uint32_t)((code * 0x9E3779B97F4A7C15ull) >> 52);
+    for (uint32_t p = 0; p < 8; p++) {
+        uint32_t s = (h + p) & (MALI_FS_META_CAP - 1u);
+        const MaliFsMetaEnt *e = &g_mali_fs_meta[s];
+        if (!e->valid) return false;
+        if (e->code == code) {
+            *out_mask = e->out_mask;
+            return true;
+        }
+    }
+    return false;
+}
+
+static void mali_fs_meta_reset(void) {
+    memset(g_mali_fs_meta, 0, sizeof g_mali_fs_meta);
+}
+
+static void mali_dclear_materialize(const MaliDeferredClear *e) {
+    if (!e || !e->image) return;
+    VkImageAspectFlags aspect = e->has_color ? VK_IMAGE_ASPECT_COLOR_BIT : e->image_aspect;
+    VkFormat vfmt = e->has_color ? e->view_format : e->image_format;
+    VkImageView v = vk_create_temp_view(e->image, vfmt, e->mip_level, e->array_layer, aspect);
+    if (!v) return;
+    if (in_pass) {
+        vk_end_pass();
+        st.rt_dirty = true;
+    }
+    VkCommandBuffer cb = vk_cmd();
+    VkRenderingAttachmentInfo ca = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    VkRenderingAttachmentInfo da = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    VkRenderingAttachmentInfo sa = {.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO};
+    bool has_d = false, has_s = false;
+    VkFormat colors[1] = {VK_FORMAT_UNDEFINED};
+    VkFormat ds_fmt = VK_FORMAT_UNDEFINED;
+    if (e->has_color) {
+        colors[0] = vfmt;
+        ca = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                         .imageView = v,
+                                         .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                         .loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR,
+                                         .storeOp = VK_ATTACHMENT_STORE_OP_STORE,
+                                         .clearValue.color = e->color};
+    } else {
+        ds_fmt = vfmt;
+        if (e->image_aspect & VK_IMAGE_ASPECT_DEPTH_BIT) {
+            has_d = true;
+            da = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                             .imageView = v,
+                                             .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                             .loadOp = e->has_depth ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+                                             .storeOp = e->has_depth ? VK_ATTACHMENT_STORE_OP_STORE
+                                                                     : (g_vk.mali_rp_store_opt ? VK_ATTACHMENT_STORE_OP_NONE
+                                                                                               : VK_ATTACHMENT_STORE_OP_STORE),
+                                             .clearValue.depthStencil.depth = e->depth_val};
+        }
+        if (e->image_aspect & VK_IMAGE_ASPECT_STENCIL_BIT) {
+            has_s = true;
+            sa = (VkRenderingAttachmentInfo){.sType = VK_STRUCTURE_TYPE_RENDERING_ATTACHMENT_INFO,
+                                             .imageView = v,
+                                             .imageLayout = VK_IMAGE_LAYOUT_GENERAL,
+                                             .loadOp = e->has_stencil ? VK_ATTACHMENT_LOAD_OP_CLEAR : VK_ATTACHMENT_LOAD_OP_LOAD,
+                                             .storeOp = e->has_stencil ? VK_ATTACHMENT_STORE_OP_STORE
+                                                                       : (g_vk.mali_rp_store_opt ? VK_ATTACHMENT_STORE_OP_NONE
+                                                                                                 : VK_ATTACHMENT_STORE_OP_STORE),
+                                             .clearValue.depthStencil.stencil = e->stencil_val};
+        }
+    }
+    VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO,
+                          .renderArea = {{0, 0}, {e->extent_w, e->extent_h}},
+                          .layerCount = 1,
+                          .colorAttachmentCount = e->has_color ? 1u : 0u,
+                          .pColorAttachments = e->has_color ? &ca : NULL,
+                          .pDepthAttachment = has_d ? &da : NULL,
+                          .pStencilAttachment = has_s ? &sa : NULL};
+    if (vk_begin_rendering(cb, &ri, e->has_color ? colors : NULL, ds_fmt, e->samples)) {
+        vk_end_rendering(cb);
+        stat_passes++;
+    }
+    vk_defer_view(v);
+}
+
+void vk_mali_rp_forget_image(VkImage img) {
+    mali_dclear_forget_image(&g_mali_dclears, img);
+    mali_dclear_publish_count();
+}
+
+void vk_mali_rp_flush_clears_for(VkImage img) {
+    if (g_mali_dclears.count <= 0 || !img) return;
+    MaliDeferredClear e;
+    bool did = false;
+    while (mali_dclear_pop_for_image(&g_mali_dclears, img, &e)) {
+        if (!did) {
+            if (in_pass) {
+                vk_end_pass();
+                st.rt_dirty = true;
+            }
+            vk_full_barrier(vk_cmd());
+            did = true;
+        }
+        mali_dclear_materialize(&e);
+    }
+    if (did) {
+        mali_dclear_publish_count();
+        vk_full_barrier(vk_cmd());
+    }
+}
+
+static void vk_mali_rp_flush_all_clears(void) {
+    if (g_mali_dclears.count <= 0) return;
+    MaliDeferredClear e;
+    bool did = false;
+    while (mali_dclear_pop_any(&g_mali_dclears, &e)) {
+        if (!did) {
+            if (in_pass) {
+                vk_end_pass();
+                st.rt_dirty = true;
+            }
+            vk_full_barrier(vk_cmd());
+            did = true;
+        }
+        mali_dclear_materialize(&e);
+    }
+    if (did) {
+        mali_dclear_publish_count();
+        vk_full_barrier(vk_cmd());
+    }
+}
+
+static void mali_prepare_rt_scales(void) {
+    NvnTexture *all[9];
+    int n = 0;
+    for (int i = 0; i < st.rt.ncolor && i < 8; i++)
+        if (st.rt.color[i]) all[n++] = st.rt.color[i];
+    if (st.rt.depth) all[n++] = st.rt.depth;
+    for (int i = 0; i < n; i++) {
+        if (!renderer_texture_scalable(all[i])) continue;
+        for (int k = 0; k < n; k++)
+            if (all[k]->width == all[i]->width && all[k]->height == all[i]->height)
+                vk_make_scalable_like(all[k], all[i]);
+        break;
+    }
+}
+
+static bool mali_rt_check_dims(uint32_t *w_out, uint32_t *minw_out, uint32_t *minh_out, float *sx_out, float *sy_out) {
+    uint32_t w = 0, minw = UINT32_MAX, minh = UINT32_MAX;
+    float rsx = 1.0f, rsy = 1.0f;
+    for (int i = 0; i < st.rt.ncolor && i < 8; i++) {
+        NvnTexture *t = st.rt.color[i];
+        if (!t) continue;
+        // Read existing backend extents only; calling vk_tex(..., true) here would mark unowned
+        // write-back attachments gpu_owned before begin_pass() uploads their initial guest contents.
+        TexBackend *b = t->backend;
+        if (!b || !b->image) return false;
+        uint32_t lv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
+        uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
+        if (!w) { renderer_texture_scale(t, &rsx, &rsy); w = ew; }
+        if (ew < minw) minw = ew;
+        if (eh < minh) minh = eh;
+    }
+    if (st.rt.depth && renderer_format_is_depth(st.rt.depth->format)) {
+        TexBackend *b = st.rt.depth->backend;
+        if (!b || !b->image) return false;
+        uint32_t lv = st.rt.has_dview && (st.rt.dview.setmask & 1) ? st.rt.dview.base_level : 0;
+        uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
+        if (!w) { renderer_texture_scale(st.rt.depth, &rsx, &rsy); w = ew; }
+        if (ew < minw) minw = ew;
+        if (eh < minh) minh = eh;
+    }
+    if (!w || minw == UINT32_MAX) return false;
+    *w_out = w;
+    *minw_out = minw;
+    *minh_out = minh;
+    *sx_out = rsx;
+    *sy_out = rsy;
+    return true;
+}
+
+static bool mali_rt_scissor_covers(uint32_t minw, uint32_t minh, float rsx, float rsy, uint32_t ew, uint32_t eh) {
+    if (minw != ew || minh != eh) return false;
+    // Temporarily evaluate scissor_rect() against the candidate render target extent and scale
+    // before begin_pass() initializes pass_w/pass_h/vp_s*.
+    uint32_t spw = pass_w, sph = pass_h;
+    float spsx = pass_sx, spsy = pass_sy, s0 = vp_sx, s1 = vp_sy, s2 = vp_ox, s3 = vp_oy;
+    pass_w = minw; pass_h = minh;
+    pass_sx = rsx; pass_sy = rsy;
+    vp_sx = rsx; vp_sy = rsy; vp_ox = 0; vp_oy = 0;
+    VkRect2D rc = scissor_rect();
+    pass_w = spw; pass_h = sph;
+    pass_sx = spsx; pass_sy = spsy;
+    vp_sx = s0; vp_sy = s1; vp_ox = s2; vp_oy = s3;
+    return rc.offset.x == 0 && rc.offset.y == 0 && rc.extent.width == ew && rc.extent.height == eh;
+}
+
+static bool mali_try_defer_rt_clear(int index, const float *color_raw, uint32_t mask,
+                                    bool want_d, float dval, bool want_s, uint32_t sval, uint32_t smask) {
+    if (!g_vk.mali_rp_merge_opt || (in_pass && !st.rt_dirty)) return false;
+
+    NvnTexture *t = NULL;
+    const NvnTextureView *tv = NULL;
+    bool has_v = false;
+    if (index >= 0) {
+        if (index >= st.rt.ncolor || index >= 8 || !st.rt.color[index] || (mask & 0xF) != 0xF) return false;
+        t = st.rt.color[index];
+        tv = &st.rt.cview[index];
+        has_v = st.rt.has_cview[index] != 0;
+    } else {
+        t = st.rt.depth;
+        if (!t || !renderer_format_is_depth(t->format)) return false;
+        tv = &st.rt.dview;
+        has_v = st.rt.has_dview != 0;
+    }
+
+    uint32_t lv = has_v && (tv->setmask & 1) ? tv->base_level : 0;
+    uint32_t ly = has_v && (tv->setmask & 2) ? tv->min_layer : 0;
+    uint32_t nly = (has_v && (tv->setmask & 2) && tv->num_layers) ? tv->num_layers : 1;
+    if (nly != 1) return false;
+
+    TexBackend *b = t->backend;
+    if (!b || !b->image || !b->gpu_owned || b->skip || b->samples > 1 || b->depth > 1 ||
+        (b->base_type != VK_IMAGE_VIEW_TYPE_2D && b->base_type != VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
+        lv >= b->levels || ly >= b->layers ||
+        b->bc_vf != VK_FORMAT_UNDEFINED || b->astc_bw != 0 || wb_eligible(t, b, lv))
+        return false;
+
+    if (index >= 0 && has_v && (tv->setmask & 4) && vk_format(t->format) != b->format &&
+        rt_kind(tv->format) != rt_kind(t->format))
+        return false;
+
+    bool set_d = false, set_s = false;
+    if (index < 0) {
+        set_d = want_d && (b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT);
+        if (want_d && !set_d) return false;
+        set_s = want_s && renderer_format_has_stencil(t->format) && (b->aspect & VK_IMAGE_ASPECT_STENCIL_BIT);
+        if (want_s && (!set_s || (smask & 0xFF) != 0xFF)) return false;
+        if (!set_d && !set_s) return false;
+    }
+
+    mali_prepare_rt_scales();
+    uint32_t w = 0, minw = 0, minh = 0;
+    float rsx = 1.0f, rsy = 1.0f;
+    if (!mali_rt_check_dims(&w, &minw, &minh, &rsx, &rsy)) return false;
+    b = t->backend;
+    if (!b || !b->image || lv >= b->levels || ly >= b->layers) return false;
+
+    uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
+    if (!mali_rt_scissor_covers(minw, minh, rsx, rsy, ew, eh)) return false;
+
+    if (lv) vk_tex_upload_for_mips(t);
+    (void)renderer_texture_first_write(t);
+    (void)renderer_texture_level_fresh(t);
+    (void)renderer_texture_frame_fresh(t);
+
+    VkFormat vf = b->format;
+    if (index >= 0 && has_v && (tv->setmask & 4) && vk_format(t->format) == b->format) {
+        vf = vk_format(tv->format);
+        if (b->fixed_fmt && vf != b->format && vf != b->view_alt) vf = b->format;
+    }
+
+    VkClearColorValue cc = {0};
+    if (index >= 0 && color_raw) memcpy(&cc, color_raw, 16);
+    int rc = mali_dclear_upsert(&g_mali_dclears, b->image, vf, b->format, b->aspect, lv, ly, ew, eh,
+                                (VkSampleCountFlagBits)(b->samples ? b->samples : 1),
+                                index >= 0, &cc, set_d, dval, set_s, sval);
+    if (rc == MALI_DCLEAR_CONFLICT) {
+        vk_mali_rp_flush_clears_for(b->image);
+        rc = mali_dclear_upsert(&g_mali_dclears, b->image, vf, b->format, b->aspect, lv, ly, ew, eh,
+                                (VkSampleCountFlagBits)(b->samples ? b->samples : 1),
+                                index >= 0, &cc, set_d, dval, set_s, sval);
+    } else if (rc == MALI_DCLEAR_FULL) {
+        vk_mali_rp_flush_all_clears();
+        rc = mali_dclear_upsert(&g_mali_dclears, b->image, vf, b->format, b->aspect, lv, ly, ew, eh,
+                                (VkSampleCountFlagBits)(b->samples ? b->samples : 1),
+                                index >= 0, &cc, set_d, dval, set_s, sval);
+    }
+    mali_dclear_publish_count();
+    return rc == MALI_DCLEAR_OK;
+}
+
+static bool mali_try_defer_clear_texture(NvnTexture *t, const NvnTextureView *tv, bool has_v,
+                                         const int32_t rg[6], const float color[4], uint32_t mask,
+                                         bool *out_full_whole) {
+    if (!g_vk.mali_rp_merge_opt) return false;
+    uint32_t lv = has_v && (tv->setmask & 1) ? tv->base_level : 0;
+    uint32_t ly = has_v && (tv->setmask & 2) ? tv->min_layer : 0;
+    uint32_t nly = (has_v && (tv->setmask & 2) && tv->num_layers) ? tv->num_layers : 1;
+    uint32_t gw = level_extent(t->width ? t->width : 1, lv);
+    uint32_t gh = level_extent(t->height ? t->height : 1, lv);
+    bool full_xy = (rg[3] <= 0 || rg[4] <= 0) ||
+                   (rg[0] <= 0 && rg[1] <= 0 && (int64_t)rg[0] + rg[3] >= (int64_t)gw &&
+                    (int64_t)rg[1] + rg[4] >= (int64_t)gh);
+    bool full_z = rg[2] == 0 && (rg[5] <= 1);
+    bool whole = full_xy && full_z && (mask & 0xF) == 0xF && nly == 1;
+    if (out_full_whole) *out_full_whole = whole;
+    if (!whole || renderer_format_is_depth(t->format)) return false;
+
+    TexBackend *b = t->backend;
+    if (!b || !b->image || !b->gpu_owned || b->skip || b->samples > 1 || b->depth > 1 ||
+        (b->base_type != VK_IMAGE_VIEW_TYPE_2D && b->base_type != VK_IMAGE_VIEW_TYPE_2D_ARRAY) ||
+        lv >= b->levels || ly >= b->layers ||
+        b->bc_vf != VK_FORMAT_UNDEFINED || b->astc_bw != 0 || wb_eligible(t, b, lv))
+        return false;
+    if (has_v && (tv->setmask & 4) && vk_format(t->format) != b->format &&
+        rt_kind(tv->format) != rt_kind(t->format))
+        return false;
+    if (lv) vk_tex_upload_for_mips(t);
+    (void)renderer_texture_first_write(t);
+    (void)renderer_texture_level_fresh(t);
+    (void)renderer_texture_frame_fresh(t);
+
+    if (in_pass && !st.rt_dirty && mali_active_pass_conflicts(&g_mali_active_pass, b->image)) {
+        vk_end_pass();
+        st.rt_dirty = true;
+    }
+
+    VkFormat vf = b->format;
+    if (has_v && (tv->setmask & 4) && vk_format(t->format) == b->format) {
+        vf = vk_format(tv->format);
+        if (b->fixed_fmt && vf != b->format && vf != b->view_alt) vf = b->format;
+    }
+    uint32_t ew = level_extent(b->width, lv), eh = level_extent(b->height, lv);
+    VkClearColorValue cc = {0};
+    memcpy(&cc, color, 16);
+    int rc = mali_dclear_upsert(&g_mali_dclears, b->image, vf, b->format, b->aspect, lv, ly, ew, eh,
+                                (VkSampleCountFlagBits)(b->samples ? b->samples : 1),
+                                true, &cc, false, 0.0f, false, 0);
+    if (rc == MALI_DCLEAR_CONFLICT) {
+        vk_mali_rp_flush_clears_for(b->image);
+        rc = mali_dclear_upsert(&g_mali_dclears, b->image, vf, b->format, b->aspect, lv, ly, ew, eh,
+                                (VkSampleCountFlagBits)(b->samples ? b->samples : 1),
+                                true, &cc, false, 0.0f, false, 0);
+    } else if (rc == MALI_DCLEAR_FULL) {
+        vk_mali_rp_flush_all_clears();
+        rc = mali_dclear_upsert(&g_mali_dclears, b->image, vf, b->format, b->aspect, lv, ly, ew, eh,
+                                (VkSampleCountFlagBits)(b->samples ? b->samples : 1),
+                                true, &cc, false, 0.0f, false, 0);
+    }
+    mali_dclear_publish_count();
+    return rc == MALI_DCLEAR_OK;
+}
+
+static void mali_lookahead_pass_ops(VkRenderingAttachmentInfo ca[8], VkRenderingAttachmentInfo *da,
+                                    VkRenderingAttachmentInfo *sa, bool has_d, bool has_s) {
+    g_mali_pass_store_none_mask = 0;
+    if (!g_vk.mali_rp_store_opt || !g_cur_rec) return;
+
+    static int nodt = -1;
+    if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
+    static int always_restart = -1;
+    if (always_restart < 0) always_restart = getenv("LARECOMP_VK_PASS_RESTART") != NULL;
+    static int fence_flush = -1;
+    if (fence_flush < 0) fence_flush = getenv("LARECOMP_FENCE_FLUSH") ? 1 : 0;
+
+    uint32_t cand_mask = 0;
+    for (uint32_t i = 0; i < pass_ncolor && i < 8; i++)
+        if (ca[i].imageView && ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) cand_mask |= 1u << i;
+    if (has_d && da->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) cand_mask |= 1u << 8;
+    if (has_s && sa->loadOp == VK_ATTACHMENT_LOAD_OP_LOAD) cand_mask |= 1u << 9;
+    if (!cand_mask) return;
+
+    uint32_t sim_written = 0;
+    uint32_t sim_chmask = st.channel_mask;
+    uint8_t sim_ds[8];
+    memcpy(sim_ds, st.ds, sizeof sim_ds);
+    uint32_t sim_smask[2] = {st.stencil_mask[0], st.stencil_mask[1]};
+    NvnProgram *sim_prog = st.program;
+    uint32_t sim_draws = 0;
+    bool hit_end = false;
+
+    const CmdRec *q = (const CmdRec *)g_cur_rec;
+    for (int step = 0; step < 2048 && q; step++) {
+        switch (q->op) {
+        case CMD_END:
+            if (g_exec_depth == 0) {
+                hit_end = true;
+                goto scan_a_done;
+            }
+            goto scan_a_done;
+        case CMD_JUMP:
+            q = (const CmdRec *)(uintptr_t)q->x[0];
+            continue;
+        case CMD_CALL:
+            goto scan_a_done;
+        case CMD_SET_RENDER_TARGETS: {
+            if (always_restart) { hit_end = true; goto scan_a_done; }
+            const struct { uint64_t tex[8]; NvnTextureView views[8]; uint8_t has_view[8]; uint64_t depth;
+                           NvnTextureView dview; uint8_t has_dview; } *rt = (const void *)q->extra;
+            RtState cand;
+            memset(&cand, 0, sizeof cand);
+            cand.ncolor = (int)q->x[0] > 8 ? 8 : (int)q->x[0];
+            for (int i = 0; i < cand.ncolor; i++) {
+                cand.color[i] = (NvnTexture *)(uintptr_t)rt->tex[i];
+                cand.cview[i] = rt->views[i];
+                cand.has_cview[i] = rt->has_view[i];
+            }
+            cand.depth = (NvnTexture *)(uintptr_t)rt->depth;
+            cand.dview = rt->dview;
+            cand.has_dview = rt->has_dview;
+            if (memcmp(&st.rt, &cand, sizeof cand) != 0) {
+                hit_end = true;
+                goto scan_a_done;
+            }
+            break;
+        }
+        case CMD_COPY_TEXTURE_TO_TEXTURE:
+        case CMD_DOWNSAMPLE: {
+            const TexRefRec *t = (const TexRefRec *)q->extra;
+            if (t[0].tex && t[1].tex) {
+                hit_end = true;
+                goto scan_a_done;
+            }
+            break;
+        }
+        case CMD_COPY_BUFFER_TO_TEXTURE: {
+            const TexRefRec *dst = (const TexRefRec *)q->extra;
+            if (dst->tex && q->x[0]) {
+                hit_end = true;
+                goto scan_a_done;
+            }
+            break;
+        }
+        case CMD_COPY_TEXTURE_TO_BUFFER: {
+            const TexRefRec *src = (const TexRefRec *)q->extra;
+            if (src->tex && q->x[3] >= HEAP_BASE) {
+                hit_end = true;
+                goto scan_a_done;
+            }
+            break;
+        }
+        case CMD_COPY_BUFFER_TO_BUFFER:
+            hit_end = true;
+            goto scan_a_done;
+        case CMD_DISPATCH:
+            if ((uint32_t)q->x[0] && (uint32_t)q->x[1] && (uint32_t)q->x[2] && sim_prog) {
+                hit_end = true;
+                goto scan_a_done;
+            }
+            break;
+        case CMD_CLEAR_TEXTURE: {
+            const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } *ct =
+                (const void *)q->extra;
+            NvnTexture *t = (NvnTexture *)(uintptr_t)ct->tex;
+            if (step == 0) {
+                if (ca[0].imageView) sim_written |= 1u;
+                hit_end = true;
+                goto scan_a_done;
+            }
+            bool conflicts = false;
+            if (t && t == st.rt.depth) conflicts = true;
+            for (int i = 0; i < st.rt.ncolor && !conflicts; i++)
+                if (t && st.rt.color[i] == t) conflicts = true;
+            if (!g_vk.mali_rp_merge_opt || conflicts) {
+                hit_end = true;
+                goto scan_a_done;
+            }
+            break;
+        }
+        case CMD_BIND_PROGRAM:
+            sim_prog = (NvnProgram *)(uintptr_t)q->x[0];
+            break;
+        case CMD_BIND_CHANNEL_MASK:
+            memcpy(&sim_chmask, q->extra, 4);
+            break;
+        case CMD_BIND_DEPTH_STENCIL:
+            memcpy(sim_ds, q->extra, 8);
+            break;
+        case CMD_SET_STENCIL: {
+            int face = (int)q->x[0];
+            if (q->x[6] == 1) {
+                for (int f = 0; f < 2; f++)
+                    if (face & (1 << f)) sim_smask[f] = (uint32_t)q->x[1];
+            }
+            break;
+        }
+        case CMD_FENCE_SYNC:
+            if (fence_flush) { hit_end = true; goto scan_a_done; }
+            break;
+        case CMD_CLEAR_COLOR: {
+            bool folded = false;
+            for (int k = 0; k < nlclear; k++)
+                if (lclear[k].rec == q && (lclear[k].aspects & 1)) { folded = true; break; }
+            int idx = (int)q->x[0];
+            if (!folded && idx >= 0 && idx < (int)pass_ncolor && idx < 8 && ca[idx].imageView && (q->x[2] & 0xF)) {
+                sim_written |= 1u << (uint32_t)idx;
+                if ((sim_written & cand_mask) == cand_mask) { hit_end = true; goto scan_a_done; }
+            }
+            break;
+        }
+        case CMD_CLEAR_DEPTH_STENCIL: {
+            uint32_t folded_asp = 0;
+            for (int k = 0; k < nlclear; k++)
+                if (lclear[k].rec == q) folded_asp |= lclear[k].aspects;
+            if (has_d && q->x[0] != 0 && !(folded_asp & 1)) sim_written |= 1u << 8;
+            if (has_s && st.rt.depth && renderer_format_has_stencil(st.rt.depth->format) && (q->x[2] & 0xFF) != 0 &&
+                !(folded_asp & 2))
+                sim_written |= 1u << 9;
+            if ((sim_written & cand_mask) == cand_mask) { hit_end = true; goto scan_a_done; }
+            break;
+        }
+        case CMD_DRAW_ARRAYS:
+        case CMD_DRAW_ELEMENTS: {
+            if (!sim_prog || !(sim_prog->stage_mask & 1) || !(sim_prog->stage_mask & 2)) break;
+            uint32_t dw_bits = 0;
+            uint32_t fs_out = ~0u;
+            if ((cand_mask & 0xFFu) || pass_dup_null) {
+                (void)mali_fs_meta_get(sim_prog->stages[1].code_addr, &fs_out);
+                if (cand_mask & 0xFFu) {
+                    for (uint32_t i = 0; i < pass_ncolor && i < 8; i++) {
+                        if ((cand_mask & (1u << i)) && ((fs_out >> (i * 4)) & 0xF) &&
+                            ((sim_chmask >> (i * 4)) & 0xF))
+                            dw_bits |= 1u << i;
+                    }
+                }
+            }
+            if ((cand_mask & (1u << 8)) && vk_mali_depth_state_writes(sim_ds[0] && !nodt, sim_ds[1] != 0))
+                dw_bits |= 1u << 8;
+            if (cand_mask & (1u << 9)) {
+                uint32_t ops = (uint32_t)sim_ds[5] | ((uint32_t)sim_ds[6] << 8) | ((uint32_t)sim_ds[7] << 16);
+                if (vk_mali_stencil_state_writes(sim_ds[3] != 0, ops, sim_smask[0], sim_smask[1]))
+                    dw_bits |= 1u << 9;
+            }
+            if (step > 0 && pass_dup_null) {
+                uint32_t dup_hit = 0;
+                for (uint32_t i = 0; i < pass_ncolor && i < 8; i++)
+                    if ((pass_dup_null & (1u << i)) && st.rt.color[i] &&
+                        ((fs_out >> (i * 4)) & 0xF) && ((sim_chmask >> (i * 4)) & 0xF))
+                        dup_hit |= 1u << i;
+                if (dup_hit) {
+                    hit_end = true;
+                    goto scan_a_done;
+                }
+            }
+            sim_written |= dw_bits;
+            sim_draws++;
+            if ((sim_written & cand_mask) == cand_mask) {
+                hit_end = true;
+                goto scan_a_done;
+            }
+            if (sim_draws >= MALI_RP_MAX_DRAWS_PER_PASS) goto scan_a_done;
+            break;
+        }
+        case CMD_DRAW_ARRAYS_INDIRECT:
+        case CMD_DRAW_ELEMENTS_INDIRECT:
+        case CMD_DRAW_TEXTURE:
+        case CMD_DISPATCH_INDIRECT:
+        default:
+            if (q->op == CMD_DRAW_ARRAYS_INDIRECT || q->op == CMD_DRAW_ELEMENTS_INDIRECT ||
+                q->op == CMD_DRAW_TEXTURE || q->op == CMD_DISPATCH_INDIRECT || q->op == CMD_RESOLVE_DEPTH)
+                goto scan_a_done;
+            break;
+        }
+        q = q->size ? (const CmdRec *)((const uint8_t *)q + q->size) : NULL;
+    }
+
+scan_a_done:
+    if (!hit_end) sim_written = cand_mask;
+
+    for (uint32_t i = 0; i < pass_ncolor && i < 8; i++) {
+        if (!(cand_mask & (1u << i))) continue;
+        ca[i].storeOp = vk_mali_choose_store_op(ca[i].loadOp, ((sim_written >> i) & 1) != 0);
+        if (ca[i].storeOp == VK_ATTACHMENT_STORE_OP_NONE) g_mali_pass_store_none_mask |= 1u << i;
+    }
+    if (cand_mask & (1u << 8)) {
+        da->storeOp = vk_mali_choose_store_op(da->loadOp, (sim_written & (1u << 8)) != 0);
+        if (da->storeOp == VK_ATTACHMENT_STORE_OP_NONE) g_mali_pass_store_none_mask |= 1u << 8;
+    }
+    if (cand_mask & (1u << 9)) {
+        sa->storeOp = vk_mali_choose_store_op(sa->loadOp, (sim_written & (1u << 9)) != 0);
+        if (sa->storeOp == VK_ATTACHMENT_STORE_OP_NONE) g_mali_pass_store_none_mask |= 1u << 9;
+    }
+}
+#endif
 static void begin_pass(void) {
     if (in_pass && !st.rt_dirty) return;
     pipeline_dirty = true;
@@ -2672,6 +3310,52 @@ static void begin_pass(void) {
     }
     if (!w) { pass_sx = pass_sy = 1; minw = minh = 16; }
     pass_w = minw; pass_h = minh;
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_merge_opt && g_mali_dclears.count > 0) {
+        VkImage mat_imgs[9];
+        int nmat = 0;
+        for (uint32_t i = 0; i < pass_ncolor && i < 8; i++) {
+            if (!ca[i].imageView || !st.rt.color[i] || !st.rt.color[i]->backend) continue;
+            VkImage img = ((TexBackend *)st.rt.color[i]->backend)->image;
+            uint32_t clv = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 1) ? st.rt.cview[i].base_level : 0;
+            uint32_t cly = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 2) ? st.rt.cview[i].min_layer : 0;
+            VkClearColorValue cc = {0};
+            bool need_mat = false;
+            if (mali_dclear_consume_color(&g_mali_dclears, img, clv, cly, pass_color[i], minw, minh,
+                                          &cc, &need_mat)) {
+                ca[i].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                ca[i].clearValue.color = cc;
+            } else if (need_mat && nmat < 9) {
+                mat_imgs[nmat++] = img;
+            }
+        }
+        if ((has_d || has_s) && st.rt.depth && st.rt.depth->backend) {
+            VkImage img = ((TexBackend *)st.rt.depth->backend)->image;
+            uint32_t dlv = st.rt.has_dview && (st.rt.dview.setmask & 1) ? st.rt.dview.base_level : 0;
+            uint32_t dly = st.rt.has_dview && (st.rt.dview.setmask & 2) ? st.rt.dview.min_layer : 0;
+            VkFormat dsf = has_d ? pass_depth : pass_stencil;
+            bool got_d = false, got_s = false, need_mat = false;
+            float dval = 0.0f;
+            uint32_t sval = 0;
+            mali_dclear_consume_ds(&g_mali_dclears, img, dlv, dly, dsf, minw, minh, has_d, has_s,
+                                   &got_d, &dval, &got_s, &sval, &need_mat);
+            if (got_d) {
+                da.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                da.clearValue.depthStencil.depth = dval;
+            }
+            if (got_s) {
+                sa.loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+                sa.clearValue.depthStencil.stencil = sval;
+            }
+            if (need_mat && nmat < 9) mat_imgs[nmat++] = img;
+        }
+        if (nmat > 0) {
+            for (int k = 0; k < nmat; k++) vk_mali_rp_flush_clears_for(mat_imgs[k]);
+            cb = vk_cmd();
+        }
+        mali_dclear_publish_count();
+    }
+#endif
     // A pass that begins with clears of whole attachments (BOTW's G-buffer, its light buffers): their load operations
     // clear instead. Loaded and then cleared by vkCmdClearAttachments, a tiler read each attachment from memory into
     // every bin first, for nothing. Only the clears right at the start, one after another (the same scissor), each over
@@ -2713,6 +3397,18 @@ static void begin_pass(void) {
                 q = (const CmdRec *)((const uint8_t *)q + q->size);
             }
         }
+#ifdef __ANDROID__
+        if (g_mali_ct_lclear && g_vk.mali_rp_merge_opt && q && q->op == CMD_CLEAR_TEXTURE &&
+            !nlclear && !naliases && pass_ncolor == 1 && ca[0].imageView && w && minw != UINT32_MAX) {
+            const struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; float color[4]; } *ct =
+                (const void *)q->extra;
+            ca[0].loadOp = VK_ATTACHMENT_LOAD_OP_CLEAR;
+            memcpy(ca[0].clearValue.color.float32, ct->color, 16);
+            lclear[0].rec = q;
+            lclear[0].aspects = 1;
+            nlclear = 1;
+        }
+#endif
     }
     if (unowned_wb) {
         for (uint32_t i = 0; i < pass_ncolor && i < 8; i++) {
@@ -2725,6 +3421,12 @@ static void begin_pass(void) {
             }
         }
     }
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_store_opt) {
+        if (g_cur_rec) mali_lookahead_pass_ops(ca, &da, &sa, has_d, has_s);
+        else g_mali_pass_store_none_mask = 0;
+    }
+#endif
     VkRenderingInfo ri = {.sType = VK_STRUCTURE_TYPE_RENDERING_INFO, .renderArea = {{0, 0}, {minw, minh}}, .layerCount = 1,
                           .colorAttachmentCount = pass_ncolor, .pColorAttachments = ca,
                           .pDepthAttachment = has_d ? &da : NULL, .pStencilAttachment = has_s ? &sa : NULL};
@@ -2767,6 +3469,25 @@ static void begin_pass(void) {
     ss_forget();  // (whatever ran between the passes may have set its own state)
     in_pass = true;
     pass_written = 0;
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_merge_opt) {
+        for (uint32_t i = 0; i < pass_ncolor && i < 8; i++)
+            if (ca[i].imageView && ca[i].loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) pass_written |= 1u << i;
+        if ((has_d && da.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR) || (has_s && sa.loadOp == VK_ATTACHMENT_LOAD_OP_CLEAR))
+            pass_written |= 1u << 8;
+    }
+    if (g_vk.mali_rp_merge_opt) {
+        g_mali_pass_draws = 0;
+        VkImage aimgs[MALI_ACTIVE_PASS_ATT_MAX];
+        int n_a = 0;
+        for (uint32_t i = 0; i < pass_ncolor && i < 8 && n_a < MALI_ACTIVE_PASS_ATT_MAX; i++)
+            if (ca[i].imageView && st.rt.color[i] && st.rt.color[i]->backend)
+                aimgs[n_a++] = ((TexBackend *)st.rt.color[i]->backend)->image;
+        if ((has_d || has_s) && st.rt.depth && st.rt.depth->backend && n_a < MALI_ACTIVE_PASS_ATT_MAX)
+            aimgs[n_a++] = ((TexBackend *)st.rt.depth->backend)->image;
+        mali_active_pass_begin(&g_mali_active_pass, aimgs, n_a);
+    }
+#endif
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     stat_passes++;
 }
@@ -2994,8 +3715,46 @@ static VkPipeline clear_pipeline(int index, int kind, uint32_t mask, bool depth,
     return p;
 }
 
+#ifdef __ANDROID__
+static void mali_check_store_none_write(uint32_t write_mask, const char *where) {
+    if (!g_vk.mali_rp_store_opt || !in_pass) return;
+    uint32_t bad = write_mask & g_mali_pass_store_none_mask;
+    if (bad) {
+        static int nlog;
+        if (nlog++ < 20)
+            LOG("[mali-rp] INVARIANT VIOLATION (%s): wrote mask %#x against STORE_OP_NONE mask %#x\n",
+                where, write_mask, g_mali_pass_store_none_mask);
+    }
+}
+
+static uint32_t mali_draw_store_write_mask(uint32_t draw_w) {
+    static int nodt = -1;
+    if (nodt < 0) nodt = getenv("LARECOMP_NO_DEPTH_TEST") != NULL;
+    uint32_t actual_w = draw_w & 0xFFu;
+    if (pass_depth != VK_FORMAT_UNDEFINED && vk_mali_depth_state_writes(st.ds[0] && !nodt, st.ds[1] != 0))
+        actual_w |= 1u << 8;
+    if (pass_stencil != VK_FORMAT_UNDEFINED) {
+        uint32_t ops = (uint32_t)st.ds[5] | ((uint32_t)st.ds[6] << 8) | ((uint32_t)st.ds[7] << 16);
+        if (vk_mali_stencil_state_writes(st.ds[3] != 0, ops, st.stencil_mask[0], st.stencil_mask[1]))
+            actual_w |= 1u << 9;
+    }
+    return actual_w;
+}
+#endif
+
 static void clear(int index, int kind, const void *color, uint32_t mask, bool depth, float dval, bool stencil, uint32_t sval,
                   uint32_t smask) {
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_store_opt && in_pass && !st.rt_dirty && g_mali_pass_store_none_mask) {
+        uint32_t cw = 0;
+        if (index >= 0 && index < 8 && (mask & 0xF)) cw |= 1u << (uint32_t)index;
+        if (index < 0) {
+            if (depth && pass_depth != VK_FORMAT_UNDEFINED) cw |= 1u << 8;
+            if (stencil && pass_stencil != VK_FORMAT_UNDEFINED && (smask & 0xFF)) cw |= 1u << 9;
+        }
+        if (cw & g_mali_pass_store_none_mask) st.rt_dirty = true;
+    }
+#endif
     begin_pass();
     if (!in_pass) return;
     for (int i = 0; i < nlclear; i++) {  // (done by the pass's load operations: begin_pass - each once)
@@ -3009,6 +3768,17 @@ static void clear(int index, int kind, const void *color, uint32_t mask, bool de
             if (!depth && !stencil) return;
         }
     }
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_store_opt) {
+        uint32_t cw = 0;
+        if (index >= 0 && index < 8 && (mask & 0xF)) cw |= 1u << (uint32_t)index;
+        if (index < 0) {
+            if (depth && pass_depth) cw |= 1u << 8;
+            if (stencil && pass_stencil && (smask & 0xFF)) cw |= 1u << 9;
+        }
+        mali_check_store_none_write(cw, "clear");
+    }
+#endif
     VkCommandBuffer cb = vk_cmd();
     vp_sx = pass_sx; vp_sy = pass_sy; vp_ox = 0; vp_oy = 0;
     VkRect2D rect = scissor_rect();
@@ -4456,6 +5226,9 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
 static void debug_save_depth(TexBackend *b, const char *path) {
     if (!b || !b->image || !(b->aspect & VK_IMAGE_ASPECT_DEPTH_BIT) ||
         (b->format != VK_FORMAT_D32_SFLOAT_S8_UINT && b->format != VK_FORMAT_D32_SFLOAT)) return;
+#ifdef __ANDROID__
+    vk_mali_rp_flush_clears_for(b->image);
+#endif
     uint64_t n = (uint64_t)b->width * b->height;
     VkSpan out = vk_readback(n * 4);
     VkCommandBuffer cb = vk_cmd();
@@ -4550,6 +5323,10 @@ static void alias_copy(CopyAlias *a, VkImageAspectFlags aspects, const char *why
     TexBackend *s = a->src->backend, *d = a->dst->backend;
     aspects &= d->aspect;
     if (!aspects) return;
+#ifdef __ANDROID__
+    vk_mali_rp_flush_clears_for(s->image);
+    vk_mali_rp_flush_clears_for(d->image);
+#endif
     vk_end_pass();
     st.rt_dirty = true;
     VkCommandBuffer cb = vk_cmd();
@@ -4586,6 +5363,10 @@ static void alias_before_write(NvnTexture *t, VkImageAspectFlags full, const cha
     if (rename >= 0) {
         CopyAlias *a = &aliases[rename];
         TexBackend *s = a->src->backend, *d = a->dst->backend;
+#ifdef __ANDROID__
+        vk_mali_rp_flush_clears_for(s->image);
+        vk_mali_rp_flush_clears_for(d->image);
+#endif
         vk_end_pass();
         st.rt_dirty = true;
         VkImage im = s->image; s->image = d->image; d->image = im;
@@ -5557,6 +6338,19 @@ RT_ON_RESET(ubo_inline_reset) {
     atomic_store_explicit(&cbwin_snap_env, -1, memory_order_relaxed);
     cbwin_base_reset(&g_cbwin_cache);
 }
+#ifdef __ANDROID__
+RT_ON_RESET(mali_rp_opt_reset) {
+    mali_dclear_reset(&g_mali_dclears);
+    mali_dclear_publish_count();
+    mali_active_pass_reset(&g_mali_active_pass);
+    mali_fs_meta_reset();
+    g_mali_pass_draws = 0;
+    g_mali_pass_store_none_mask = 0;
+    g_mali_last_fs_code = 0;
+    g_exec_depth = 0;
+    g_mali_ct_lclear = false;
+}
+#endif
 
 // The rows updates write inside [addr, addr + size): the first one's guest address | (the row count (1..64) - 1) << 48,
 // 0 without any (or more than 64 rows apart)
@@ -7263,6 +8057,17 @@ void vk_exec_reset(void) {
     dchain_after = false;
     dchain_cb = VK_NULL_HANDLE;
     dchain_env = -1;
+#ifdef __ANDROID__
+    mali_dclear_reset(&g_mali_dclears);
+    mali_dclear_publish_count();
+    mali_active_pass_reset(&g_mali_active_pass);
+    mali_fs_meta_reset();
+    g_mali_pass_draws = 0;
+    g_mali_pass_store_none_mask = 0;
+    g_mali_last_fs_code = 0;
+    g_exec_depth = 0;
+    g_mali_ct_lclear = false;
+#endif
     st_defaults();
 }
 
@@ -7332,6 +8137,17 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
                 memo[ms].tex = e->tex; memo[ms].vh = vh; memo[ms].frame = frame; memo[ms].gen = vk_view_gen;
                 memo[ms].type = (uint8_t)st_->type; memo[ms].has_view = e->has_view; memo[ms].tfmt = tfmt; memo[ms].view = view;
             }
+#ifdef __ANDROID__
+            if (stage < 2 && g_vk.mali_rp_merge_opt && in_pass && !g_mali_active_pass.read_overflow) {
+                if (st_->is_image) {
+                    g_mali_active_pass.read_overflow = true;
+                } else {
+                    NvnTexture *rt_ap = naliases ? alias_read(e->tex) : e->tex;
+                    TexBackend *b_ap = rt_ap ? (TexBackend *)rt_ap->backend : NULL;
+                    if (b_ap && b_ap->image) mali_active_pass_note_read(&g_mali_active_pass, b_ap->image);
+                }
+            }
+#endif
             renderer_texture_scale(e->tex, &sc[0], &sc[1]);
             if (e->tex == scene_up.t && stage == 1) { view = scene_up_view(e); sc[0] = scene_up.sx; sc[1] = scene_up.sy; }
             wh[0] = e->tex->width; wh[1] = e->tex->height;
@@ -7357,7 +8173,18 @@ static void texture_info(int stage, ShaderInfo *si, int i, VkDescriptorImageInfo
                     } else if (st_->type == TEXTYPE_2D_ARRAY) view = vk_dummy_view(TEXTYPE_2D_ARRAY);
                 }
         }
+#ifdef __ANDROID__
+        else if (stage < 2 && g_vk.mali_rp_merge_opt && in_pass && !g_mali_active_pass.read_overflow && st_->bindless) {
+            g_mali_active_pass.read_overflow = true;
+        }
+#endif
     }
+#ifdef __ANDROID__
+    else if (stage < 2 && g_vk.mali_rp_merge_opt && in_pass && !g_mali_active_pass.read_overflow &&
+             (st_->is_image || st_->bindless)) {
+        g_mali_active_pass.read_overflow = true;
+    }
+#endif
     if (h && st.spool && tsc < (uint32_t)st.spool->count) {
         NvnSamplerDesc *sd = &((NvnSamplerDesc *)st.spool->entries)[tsc];
         smp = st_->shadow ? vk_sampler(sd) : vk_sampler_plain(sd);
@@ -7721,6 +8548,11 @@ static bool cs_writes_image(const ShaderInfo *si) {
         if (si->tex[i].is_image) return true;
     return false;
 }
+static inline void mali_end_none_pass_on_skip(void) {
+    if (g_vk.mali_rp_store_opt && in_pass && g_mali_pass_store_none_mask) vk_end_pass();
+}
+#else
+static inline void mali_end_none_pass_on_skip(void) {}
 #endif
 
 static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
@@ -7736,14 +8568,14 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     CsProg *cp = compute_program(st.program, NULL);
     if (cp && !atomic_load(&cp->p.state)) stat_skipped_building++;
-    if (!cp || atomic_load(&cp->p.state) != 1) { stat_skipped++; return; }
+    if (!cp || atomic_load(&cp->p.state) != 1) { mali_end_none_pass_on_skip(); stat_skipped++; return; }
     if (vk_any_format_no_linear()) {
         ShaderKey ck = {0};
         stage_fill_soft_linear(5, cp->si, &ck);
         if (ck.soft_linear) {
             CsProg *sl = compute_program(st.program, &ck);
             int sl_state = sl ? atomic_load(&sl->p.state) : 2;
-            if (sl_state == 0) { stat_skipped_building++; stat_skipped++; return; }
+            if (sl_state == 0) { mali_end_none_pass_on_skip(); stat_skipped_building++; stat_skipped++; return; }
             if (sl_state == 1) cp = sl;
         }
     }
@@ -7758,9 +8590,9 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
             else
                 for (; e && *e && nskip < 16; e += *e == ',') skip[nskip++] = strtoull(e, (char **)&e, 16);
         }
-        if (skip_store && cp->si->uses_gmem_store) { stat_skipped++; return; }
+        if (skip_store && cp->si->uses_gmem_store) { mali_end_none_pass_on_skip(); stat_skipped++; return; }
         for (int i = 0; i < nskip; i++)
-            if (st.program->stages[5].code_addr == skip[i]) { stat_skipped++; return; }
+            if (st.program->stages[5].code_addr == skip[i]) { mali_end_none_pass_on_skip(); stat_skipped++; return; }
     }
     if (cp->si->uses_gmem && getenv("LARECOMP_LOG_CS_SBUF")) {  // (debug) the storage buffers bound to gmem dispatches
         static uint64_t seen_cs[16];
@@ -7777,6 +8609,23 @@ static void dispatch_compute(uint32_t gx, uint32_t gy, uint32_t gz) {
     }
     vk_end_pass();
 #ifdef __ANDROID__
+    if (g_mali_dclears.count > 0 && cp->si) {
+        bool any_unresolved = false;
+        for (int i = 0; i < cp->si->ntex && i < 64; i++) {
+            NvnTexture *t = shader_texture_object(5, &cp->si->tex[i]);
+            if (cp->si->tex[i].bindless && !t) {
+                any_unresolved = true;
+                break;
+            }
+            if (t) {
+                NvnTexture *rt = naliases ? alias_read(t) : t;
+                TexBackend *b = rt ? (TexBackend *)rt->backend : NULL;
+                if (b && b->image && mali_dclear_has_image(&g_mali_dclears, b->image))
+                    vk_mali_rp_flush_clears_for(b->image);
+            }
+        }
+        if (any_unresolved) vk_mali_rp_flush_all_clears();
+    }
     vk_bc_shadows_resolve(NULL, NULL, NULL, 0);  // (BC textures drawn into: decoded before anything outside a pass reads them)
 #endif
     VkCommandBuffer cb = vk_cmd();
@@ -8336,9 +9185,39 @@ static void draw_(CmdRec *r, bool indexed) {
     }
     if (ct_on()) ct_draw(pr, "draw");
     alias_draw_check();
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_store_opt && pr->code[1] != g_mali_last_fs_code) {
+        mali_fs_meta_put(pr->code[1], pr->fs_out_mask);
+        g_mali_last_fs_code = pr->code[1];
+    }
+    if (g_mali_dclears.count > 0) {
+        ShaderInfo *infos[2] = {pr->vi, pr->fi};
+        bool flush_all = false;
+        for (int sg = 0; sg < 2 && !flush_all; sg++) {
+            for (int i = 0; infos[sg] && i < infos[sg]->ntex && i < 64; i++) {
+                NvnTexture *t = shader_texture_object(sg, &infos[sg]->tex[i]);
+                if (infos[sg]->tex[i].bindless && !t) {
+                    flush_all = true;
+                    break;
+                }
+                if (t) {
+                    NvnTexture *rt = naliases ? alias_read(t) : t;
+                    TexBackend *b = rt ? (TexBackend *)rt->backend : NULL;
+                    if (b && b->image && mali_dclear_has_image(&g_mali_dclears, b->image))
+                        vk_mali_rp_flush_clears_for(b->image);
+                }
+            }
+        }
+        if (flush_all) vk_mali_rp_flush_all_clears();
+    }
+#endif
     // (the attachments this draw writes: once a draw - the targets and masks don't change before it is recorded; three
     // computations of it were ~8% of the render thread on the POCO F7 Ultra)
     const uint32_t draw_w = draw_writes(pr);
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_store_opt && in_pass && !st.rt_dirty && (mali_draw_store_write_mask(draw_w) & g_mali_pass_store_none_mask))
+        st.rt_dirty = true;
+#endif
     resolve_feedback(pr, draw_w);
     scene_upscale(pr, r);
     snap_reason = "draw-depthwrite";
@@ -8891,6 +9770,18 @@ static void draw_(CmdRec *r, bool indexed) {
     else vkCmdDrawIndexed(cb, icount, inst, 0, base_vertex, base_inst);
     if (g_debug_frame) pick_after_draw();
     pass_written |= draw_w;
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_merge_opt) g_mali_pass_draws++;
+    if (g_vk.mali_rp_store_opt && g_mali_pass_store_none_mask) {
+        uint32_t actual_w = draw_w & 0xFFu;
+        if (pass_depth && dt && dw) actual_w |= 1u << 8;
+        if (pass_stencil && sten) {
+            uint32_t ops = st.ds[5] | st.ds[6] << 8 | st.ds[7] << 16;
+            if (vk_mali_stencil_state_writes(true, ops, st.stencil_mask[0], st.stencil_mask[1])) actual_w |= 1u << 9;
+        }
+        mali_check_store_none_write(actual_w, "draw");
+    }
+#endif
     stat_draws++;
     cum_draws++;
     if (g_gpuprof_frame && gp_n) {
@@ -9082,8 +9973,6 @@ static void debug_draw(Prog *pr, CmdRec *r, bool indexed) {
 }
 
 // ================================================================== texture copies
-typedef struct { uint64_t tex; NvnTextureView view; uint8_t has_view; int32_t region[6]; } TexRefRec;
-
 static void copy_region_dims(NvnTexture *t, const TexRefRec *ref, const FormatInfo **fi, int32_t rg[6], int *level,
                              uint64_t *row, uint64_t *img) {
     *fi = nvn_format_info(t->format);
@@ -9118,6 +10007,9 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
     if (!fi || !fi->bpb) return;
     TexBackend *b = vk_tex(t, false);  // prior CPU contents uploaded first
     renderer_mark_gpu_owned(t);
+#ifdef __ANDROID__
+    vk_mali_rp_flush_clears_for(b->image);
+#endif
     if (b->aspect == (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT)) return;
     if (b->astc_bw) {  // (blocks would need the CPU decode: not seen in the game yet)
         static int nlog;
@@ -9174,6 +10066,9 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     copy_region_dims(t, src, &fi, rg, &level, &row, &img);
     if (!fi || !fi->bpb || fi->bpb == 3 || row % fi->bpb) return;
     TexBackend *b = vk_tex(t, false);
+#ifdef __ANDROID__
+    vk_mali_rp_flush_clears_for(b->image);
+#endif
     bool depth16_pack = t->format == 0x32 && b->format == VK_FORMAT_D32_SFLOAT;
     float tsx, tsy;
     renderer_texture_scale(t, &tsx, &tsy);
@@ -9257,6 +10152,16 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
     dl_note("copy texture %ux%u f%#x -> %ux%u f%#x (%p -> %p)", st_->width, st_->height, st_->format, dt->width, dt->height,
             dt->format, (void *)st_, (void *)dt);
     TexBackend *s = vk_tex(st_, false), *d = vk_tex(dt, true);
+#ifdef __ANDROID__
+    if (g_mali_dclears.count > 0) {
+        vk_mali_rp_flush_clears_for(s->image);
+        vk_mali_rp_flush_clears_for(d->image);
+        if (naliases) {
+            NvnTexture *sa_t = alias_read(st_);
+            if (sa_t && sa_t->backend) vk_mali_rp_flush_clears_for(((TexBackend *)sa_t->backend)->image);
+        }
+    }
+#endif
     renderer_mark_gpu_owned(dt);
     if (renderer_texture_presented(dt) && st_->width == dt->width && st_->height == dt->height) renderer_texture_mark_presented(st_);
     renderer_texture_first_write(dt);
@@ -9740,6 +10645,9 @@ static void save_texture_raw(TexBackend *b, const char *path) {
     default: return;
     }
     if (!(b->aspect & VK_IMAGE_ASPECT_COLOR_BIT) || b->samples > 1) return;
+#ifdef __ANDROID__
+    vk_mali_rp_flush_clears_for(b->image);
+#endif
     vk_end_pass();
     VkCommandBuffer cb = vk_cmd();
     vk_full_barrier(cb);
@@ -9765,6 +10673,9 @@ void renderer_save_texture_tex(TexBackend *b, const char *path) {
     if (strstr(path, "frame_")) memcpy(crop, vk_shot_crop(), sizeof crop);
     uint32_t w = (uint32_t)(b->width * crop[2]), h = (uint32_t)(b->height * crop[3]);
     if (!w || !h) return;
+#ifdef __ANDROID__
+    vk_mali_rp_flush_clears_for(b->image);
+#endif
     vk_end_pass();
     VkImage img;
     VmaAllocation mem;
@@ -9842,12 +10753,20 @@ int vk_ab(const char *what) {
 static void split_long_pass(void) {
 #ifdef __ANDROID__
     static long split = -1;
+    static int split_explicit = -1;
     if (split < 0) {  // (3 ms by default; not on Qualcomm's driver, as LARECOMP_VK_CHUNK_US)
         extern bool vk_driver_is_qualcomm(void);
         const char *e = getenv("LARECOMP_VK_SPLIT_US");
+        split_explicit = (e && *e) ? 1 : 0;
         split = e ? atol(e) : vk_driver_is_qualcomm() ? 0 : 3000;
     }
     extern bool vk_async_on(void);
+    if (g_vk.mali_rp_merge_opt && !split_explicit) {
+        if (in_pass && vk_mali_should_split_pass(true, false, g_mali_pass_draws, false) &&
+            AB("split") != 1 && vk_async_on() && !no_chunks_now())
+            renderer_submit();
+        return;
+    }
     static unsigned n;  // (the clock every 32 draws: a clock read per draw showed up in the profile)
     if (split > 0 && in_pass && !(++n & 31) && AB("split") != 1 && vk_async_on() && last_submit_ns &&
         SDL_GetTicksNS() - last_submit_ns > (uint64_t)split * 1000 && !no_chunks_now())
@@ -9856,6 +10775,9 @@ static void split_long_pass(void) {
 }
 
 static void exec_list(uint64_t handle, int depth) {
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_store_opt) g_exec_depth = depth;
+#endif
     uint64_t p = handle;
     for (int guard = 0; guard < 10000000; guard++) {
         CmdRec *r = (CmdRec *)(uintptr_t)p;
@@ -9869,11 +10791,18 @@ static void exec_list(uint64_t handle, int depth) {
             dchain_after = false;
         }
         switch (r->op) {
-        case CMD_END: return;
+        case CMD_END:
+#ifdef __ANDROID__
+            if (g_vk.mali_rp_store_opt) g_exec_depth = depth > 0 ? depth - 1 : 0;
+#endif
+            return;
         case CMD_JUMP: p = r->x[0]; continue;
         case CMD_CALL: {
             const uint64_t *h = x;
             for (uint64_t i = 0; i < r->x[0] && depth < 8; i++) exec_list(h[i], depth + 1);
+#ifdef __ANDROID__
+            if (g_vk.mali_rp_store_opt) g_exec_depth = depth;
+#endif
             break;
         }
         case CMD_BIND_PROGRAM: st.program = (NvnProgram *)(uintptr_t)r->x[0]; break;
@@ -9989,7 +10918,13 @@ static void exec_list(uint64_t handle, int depth) {
                 LOG("[ct] clear-color %p mask %#x sc %d %d %d %d\n", (void *)st.rt.color[index], (uint32_t)r->x[2], st.scissor[0][0], st.scissor[0][1],
                     st.scissor[0][2], st.scissor[0][3]);
             if (index < st.rt.ncolor && st.rt.color[index]) alias_before_write(st.rt.color[index], 0, "clear");
-            if (index < st.rt.ncolor && st.rt.color[index]) clear(index, (int)r->x[5], x, (uint32_t)r->x[2], false, 0, false, 0, 0);
+            if (index < st.rt.ncolor && st.rt.color[index]) {
+#ifdef __ANDROID__
+                if (mali_try_defer_rt_clear(index, x, (uint32_t)r->x[2], false, 0.0f, false, 0, 0)) break;
+                if (st.rt.color[index]->backend) vk_mali_rp_flush_clears_for(((TexBackend *)st.rt.color[index]->backend)->image);
+#endif
+                clear(index, (int)r->x[5], x, (uint32_t)r->x[2], false, 0, false, 0, 0);
+            }
             break;
         }
         case CMD_CLEAR_TEXTURE: {
@@ -9999,6 +10934,13 @@ static void exec_list(uint64_t handle, int depth) {
             if (!t) break;
             snap_reason = "clear-texture"; snapshots_invalidate(NULL);
             alias_before_write(t, 0, "clear");
+#ifdef __ANDROID__
+            bool ct_whole = false;
+            uint32_t ct_mask = (uint32_t)r->x[4] ? (uint32_t)r->x[4] : 0xF;
+            if (mali_try_defer_clear_texture(t, &ct->view, ct->has_view != 0, ct->region, ct->color, ct_mask, &ct_whole))
+                break;
+            if (t->backend) vk_mali_rp_flush_clears_for(((TexBackend *)t->backend)->image);
+#endif
             RtState saved = st.rt;
             int32_t sc[4];
             memcpy(sc, st.scissor[0], sizeof sc);
@@ -10011,7 +10953,13 @@ static void exec_list(uint64_t handle, int depth) {
             const int32_t *rg = ct->region;
             if (rg[3] > 0 && rg[4] > 0) { st.scissor[0][0] = rg[0]; st.scissor[0][1] = rg[1]; st.scissor[0][2] = rg[3]; st.scissor[0][3] = rg[4]; }
             else { st.scissor[0][0] = st.scissor[0][1] = 0; st.scissor[0][2] = st.scissor[0][3] = 16384; }
+#ifdef __ANDROID__
+            if (g_vk.mali_rp_merge_opt) g_mali_ct_lclear = ct_whole;
+#endif
             clear(0, (int)r->x[6], ct->color, (uint32_t)r->x[4] ? (uint32_t)r->x[4] : 0xF, false, 0, false, 0, 0);
+#ifdef __ANDROID__
+            if (g_vk.mali_rp_merge_opt) g_mali_ct_lclear = false;
+#endif
             vk_end_pass();
             st.rt = saved;
             memcpy(st.scissor[0], sc, sizeof sc);
@@ -10043,6 +10991,12 @@ static void exec_list(uint64_t handle, int depth) {
             }
             if (st.rt.depth) {
                 bool has_stencil = renderer_format_has_stencil(st.rt.depth->format);
+#ifdef __ANDROID__
+                if (mali_try_defer_rt_clear(-1, NULL, 0, r->x[0] != 0, r->f[0], has_stencil && r->x[2] != 0,
+                                            (uint32_t)r->x[1], (uint32_t)r->x[2]))
+                    break;
+                if (st.rt.depth->backend) vk_mali_rp_flush_clears_for(((TexBackend *)st.rt.depth->backend)->image);
+#endif
                 clear(-1, 0, NULL, 0, r->x[0] != 0, r->f[0], has_stencil && r->x[2] != 0, (uint32_t)r->x[1], (uint32_t)r->x[2]);
             }
             break;
@@ -10174,6 +11128,9 @@ static void exec_list(uint64_t handle, int depth) {
         }
         p += r->size;
     }
+#ifdef __ANDROID__
+    if (g_vk.mali_rp_store_opt) g_exec_depth = depth > 0 ? depth - 1 : 0;
+#endif
 }
 
 #ifdef __ANDROID__

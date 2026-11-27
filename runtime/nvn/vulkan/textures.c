@@ -782,6 +782,7 @@ static void undiscard(TexBackend *b) {
 
 static void destroy_image(TexBackend *b) {
 #ifdef __ANDROID__
+    if (b->image) vk_mali_rp_forget_image(b->image);
     bc_shadow_destroy(b);
 #endif
     views_forget(b);
@@ -1036,6 +1037,9 @@ static void upload_pending(TexBackend *b) {
     bool scaled = b->scalable && (w != b->width || h != b->height);
     if (!scaled && w > b->width) w = b->width;
     if (!scaled && h > b->height) h = b->height;
+#ifdef __ANDROID__
+    if (b->image && (scaled || (w == b->width && h == b->height))) vk_mali_rp_forget_image(b->image);
+#endif
     VkSpan s = vk_transient_copy(px, (uint64_t)stride * h, 16);
     free(px);
     VkBufferImageCopy rg = {.bufferOffset = s.off, .bufferRowLength = stride / 4,
@@ -1275,6 +1279,9 @@ static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) 
         // End any previous open pass, record the replacement in program order on s->main, wait for all prior reads/
         // writes on b->image (WAR/WAW) before TRANSFER_WRITE, and publish to subsequent attachment/shader/transfer
         // consumers (RAW/WAW) below.
+#ifdef __ANDROID__
+        if (b->image) vk_mali_rp_flush_clears_for(b->image);
+#endif
         vk_end_pass();
         cb = vk_cmd();
         tex_emit_image_barrier(cb, b, VK_PIPELINE_STAGE_2_ALL_COMMANDS_BIT, VK_ACCESS_2_MEMORY_WRITE_BIT,
@@ -1558,6 +1565,19 @@ VkImageView vk_image_view(TexBackend *b, VkImageViewType type, VkFormat fmt, uin
     return v;
 }
 
+VkImageView vk_create_temp_view(VkImage img, VkFormat fmt, uint32_t lv, uint32_t ly, VkImageAspectFlags aspect) {
+    if (!img) return VK_NULL_HANDLE;
+    VkImageViewCreateInfo vi = {.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO,
+                                .image = img,
+                                .viewType = VK_IMAGE_VIEW_TYPE_2D,
+                                .format = fmt,
+                                .subresourceRange = {aspect, lv, 1, ly, 1}};
+    VkImageView v = VK_NULL_HANDLE;
+    if (vkCreateImageView(g_vk.dev, &vi, NULL, &v) != VK_SUCCESS) return VK_NULL_HANDLE;
+    dv_set(v, false);
+    return v;
+}
+
 static VkImageViewType view_type_for(int textype) {
     switch (textype) {
     case TEXTYPE_1D: return VK_IMAGE_VIEW_TYPE_1D;
@@ -1755,6 +1775,7 @@ static void bc_shadow_destroy(TexBackend *b) {
     for (int i = 0; i < nbc_dirty; i++)
         if (bc_dirty[i] == b) bc_dirty[i--] = bc_dirty[--nbc_dirty];
     if (!s) return;
+    if (s->img.image) vk_mali_rp_forget_image(s->img.image);
     views_forget(&s->img);
     defer((Dead){.img = s->img.image, .mem = s->img.mem});
     free(s->drawn);
@@ -1839,6 +1860,7 @@ static BcShadow *bc_shadow_create(NvnTexture *t, TexBackend *b, VkFormat vf, uin
     s->bsize = bsize;
     bc_shadow_fill(t, b, s, from);
     if (from) {  // (replaced: not dirty - vk_bc_shadows_resolve decoded it)
+        if (from->img.image) vk_mali_rp_forget_image(from->img.image);
         views_forget(&from->img);
         defer((Dead){.img = from->img.image, .mem = from->img.mem});
         free(from->drawn);
