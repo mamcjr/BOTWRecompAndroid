@@ -387,11 +387,21 @@ static float extract_progress(void) {
     return f < 0 ? 0 : f > 0.99f ? 0.99f : f;
 }
 
-// Builds the game code from the copied files in dir (a few minutes); false = failed (the job line says so)
-static bool build_game_code(const std::string &dir) {
-    if (native_wanted()) return true;  // (the game's own code runs as it is)
+// The compiler count, both builds and the upgrade alike: every core when the RAM leaves 2 GB aside for the game's
+// own footprint, else as many as that - the memory formula, not a core count (a 4 GB phone gets 2; 6 was the kills
+// of #25/#47/#51)
+static int build_jobs(void) {
     int cores = SDL_GetNumLogicalCPUCores(), ram_gb = SDL_GetSystemRAM() / 1024;
-    GameBuildOpts o = {build_progress, cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1};
+    return cores < ram_gb - 2 ? cores : ram_gb - 2 > 1 ? ram_gb - 2 : 1;
+}
+
+// Builds the game code from the copied files in dir (a few minutes); false = failed (the job line says so).
+// fast (Android): everything at -O0 - minutes to first play instead of the best part of an hour on a mid-range
+// phone. The library it leaves is marked (gamelib.c gamelib_fast_present) and the start screen upgrades it in the
+// background (the upgrade block, below setup_dest).
+static bool build_game_code(const std::string &dir, bool fast = false) {
+    if (native_wanted()) return true;  // (the game's own code runs as it is)
+    GameBuildOpts o = {build_progress, build_jobs(), fast, false, NULL};
     char why[256] = "";
     g_build_frac = 0;
 #ifdef __ANDROID__
@@ -427,7 +437,111 @@ static std::string setup_dest(void) {
     return d;
 }
 
+#ifdef __ANDROID__
+// ------------------------------------------------ the fast library's -O1 upgrade (background)
+// The first setup on a phone builds the game code at -O0 (minutes, playable at once). The start screen then rebuilds
+// it with everything a full build does - the app's own shipped hot list (gamebuild.c load_hot_for: the same lists
+// the shipped hot/cold build is made with), the cold marking, the memory floors and the jobs formula - no fnprof
+// anywhere: the shipped list is what the rebuild is hot-listed with. The old library is kept until the new one is
+// whole (GameBuildOpts keep_current: a failed or stopped upgrade changes nothing, the final rename swaps it in), and
+// it all runs beside the menu: PLAY stays on, and pressing it - or Later, beside the status line - stops the build
+// for now (the game gets the phone to itself); the work folder stays, so the next title screen goes on from where
+// it stopped. No progress bar the player waits on; the "-fast" marker on disk is the state, so an app closed at any
+// point picks the scheme up again exactly where it was. LARECOMP_NO_UPGRADE=1 keeps the fast library as it is.
+static std::atomic<bool> g_upgrade_stop;    // (set by upgrade_postpone: gamebuild_run's loop reads it between units)
+static std::atomic<float> g_upgrade_frac;   // (-1: not running, else 0..1 - the status line's percent)
+static std::atomic<int> g_upgrade_note;     // (1: postponed, 2: failed - shown a few seconds where the percent was)
+static std::atomic<uint64_t> g_note_at_ms;  // (SDL_GetTicks when it was set; the note dies on its own)
+static bool g_upgrade_started, g_upgrade_postponed;
+static pthread_t g_upgrade_th;
+static bool g_upgrade_th_live;
+static pthread_mutex_t g_upg_lock = PTHREAD_MUTEX_INITIALIZER;
+
+static bool upgrade_stopped(void) { return g_upgrade_stop; }  // (GameBuildOpts.stopped, from the build's own loop)
+
+static void upgrade_progress(double f, const char *step) {  // (the job line for the Set up page, a percent at a time)
+    g_upgrade_frac = f < 0 ? 0 : f > 0.99f ? 0.99f : (float)f;
+    static int pct = -1;
+    int p = (int)(f * 100);
+    if (p != pct) {
+        pct = p;
+        char line[160];
+        snprintf(line, sizeof line, tr("Upgrading the game code (%d%%)"), p);
+        set_job(line);
+    }
+    (void)step;
+}
+
+static void *upgrade_thread(void *) {
+    std::string dir = setup_dest();
+    fprintf(stderr, "[launcher] upgrading the game code in the background (the shipped hot list)\n");
+    GameBuildOpts o = {upgrade_progress, build_jobs(), false, true, upgrade_stopped};  // (keep_current: the library
+    char why[256] = "";                                                                //  that loaded stays until the
+    bool ok = gamebuild_run(dir.c_str(), &o, why, sizeof why);                        //  new one is whole)
+    int was = (int)(g_upgrade_frac.load() * 100);
+    android_call("buildServiceStop");
+    g_upgrade_frac = -1;
+    if (g_upgrade_stop) {  // (PLAY / Later / a setup: stopped where it was, resumable - not a failure)
+        g_upgrade_note = 1, g_note_at_ms = SDL_GetTicks();
+        fprintf(stderr, "[launcher] upgrade postponed at %d%%\n", was);
+    } else if (ok) {
+        fprintf(stderr, "[launcher] upgrade done\n");
+        set_job("Game files ready.");
+    } else {
+        g_upgrade_note = 2, g_note_at_ms = SDL_GetTicks();
+        fprintf(stderr, "[launcher] upgrade failed: %s\n", why);
+        set_job(tr("The game code upgrade didn't finish; the game still runs."), true);
+    }
+    return NULL;
+}
+
+// The start screen starts it once nothing else is going on: a fast library in place (its marker on disk - boot()
+// loads the library only after the start screen) and the player at the menu, the phone in their hand. Once per
+// title screen (a fresh one resets the flags below); a postponement keeps it stopped until the next one.
+static void upgrade_offer(bool at_menu, bool busy) {
+    static double next;
+    double now = ImGui::GetTime();
+    if (now < next) return;  // (the marker check is a disk read: once a second is plenty)
+    next = now + 1.0;
+    if (!at_menu || busy) return;
+    pthread_mutex_lock(&g_upg_lock);
+    if (!g_upgrade_started && !g_upgrade_postponed && !getenv("LARECOMP_NO_UPGRADE") && !native_wanted() &&
+        gamelib_fast_present(setup_dest().c_str())) {
+        g_upgrade_started = true;
+        g_upgrade_stop = false;
+        g_upgrade_frac = 0;
+        android_call("buildServiceStart");  // (BuildService: the screen can go off while it runs)
+        if (pthread_create(&g_upgrade_th, NULL, upgrade_thread, NULL) == 0) g_upgrade_th_live = true;
+        else {  // (couldn't start: as if it had never been offered - the fast library stays, playable)
+            g_upgrade_started = false, g_upgrade_frac = -1;
+            android_call("buildServiceStop");
+        }
+    }
+    pthread_mutex_unlock(&g_upg_lock);
+}
+
+// Stopping it: PLAY (the game gets the phone to itself), the Later button, a game-files delete, or a setup starting
+// (its own build needs the builders). The build stops where it is - the work folder stays, the next one goes on
+// from it, a running link included (it is ended at once, not waited out: the objects stay, and the join below is
+// over in a moment, so the UI thread never stands still for it) - and the thread is waited for: nothing of it runs
+// into the game. Any thread; idempotent.
+static void upgrade_postpone(void) {
+    pthread_mutex_lock(&g_upg_lock);
+    if (g_upgrade_started) {
+        g_upgrade_stop = true;
+        if (g_upgrade_th_live) pthread_join(g_upgrade_th, NULL);
+        g_upgrade_th_live = false;
+        g_upgrade_postponed = true;  // (not again until the next title screen, where it offers itself again)
+        g_upgrade_note = 1, g_note_at_ms = SDL_GetTicks();
+    }
+    pthread_mutex_unlock(&g_upg_lock);
+}
+#endif
+
 static void *extract_thread(void *) {
+#ifdef __ANDROID__
+    upgrade_postpone();  // (its own build needs the builders: the background upgrade stops - resumable - first)
+#endif
     std::string src, dest = setup_dest();
     pthread_mutex_lock(&g_lock);
     src = g_src;
@@ -441,13 +555,15 @@ static void *extract_thread(void *) {
     if (g_android_imported.exchange(false)) {  // (the activity copied exefs/ and built romfs.bin: below) the code -
         // unless the picked folder brought it built already for this app (its id: runtime/gamelib.c)
         if (gamelib_present(dest.c_str())) fprintf(stderr, "[launcher] game code from the picked folder\n");
-        else if (!build_game_code(dest)) goto done;
-        goto check;
+        else if (!build_game_code(dest, true)) goto done;  // (fast: -O0, playable at once; the start screen upgrades
+        goto check;                                         //  it in the background, from the shipped hot list)
     }
 #endif
     if (src.empty() && check_copied_files(dest).empty()) {  // copied already (an update needs new game code)
         g_copy_skipped = true;
-        if (!build_game_code(dest)) goto done;
+        // fast when there is no library to play on (a first setup the app closed midway, or an update over the old
+        // one: minutes to play again, then upgraded as any fast build); full when one is there, as before
+        if (!build_game_code(dest, !gamelib_present(dest.c_str()))) goto done;
         goto check;
     }
     set_job("Looking for the game files...");
@@ -491,7 +607,10 @@ static void *extract_thread(void *) {
             set_job_detail(why);
             goto done;
         }
-        if (!build_game_code(dest)) goto done;
+        // First setup on this phone: the fast build (-O0, minutes). A re-setup over the same game files with this
+        // app's library already there (the files re-copied, the library's id unchanged): the full one, as before.
+        bool fast = !gamelib_present(dest.c_str());
+        if (!build_game_code(dest, fast)) goto done;
     }
 check:
     {
@@ -2167,6 +2286,15 @@ extern "C" void launcher_run(const char *root) {
 
     std::string status = check_game_files(g_root);
 #ifdef __ANDROID__
+    {   // a fresh start screen (also after the in-game menu's "Title screen" reboot, same process): the upgrade
+        // offers itself again - a fast library in place and the player at the menu is all it takes (nothing of a
+        // previous one runs here: PLAY postponed and joined it before the window was handed over)
+        pthread_mutex_lock(&g_upg_lock);
+        g_upgrade_started = g_upgrade_postponed = false;
+        pthread_mutex_unlock(&g_upg_lock);
+    }
+#endif
+#ifdef __ANDROID__
     if (status.empty()) android_prune_loose();
 #endif
     load_background(dev);
@@ -2218,6 +2346,9 @@ extern "C" void launcher_run(const char *root) {
         menu_apply_window_requests(win);  // (the Video tab's Fullscreen)
         if (g_files_deleted) {  // (Settings > Prelaunch deleted them)
             g_files_deleted = false;
+#ifdef __ANDROID__
+            upgrade_postpone();  // (the game files it builds from went: stop it, cleanly)
+#endif
             status = check_game_files(g_root);
             if (!status.empty()) { g_bg = 0; bind_capture_cancel(); settings_save(); page = SETUP; }
         }
@@ -2244,6 +2375,9 @@ extern "C" void launcher_run(const char *root) {
         pthread_mutex_lock(&g_lock);
         bool busy = g_busy;
         pthread_mutex_unlock(&g_lock);
+#ifdef __ANDROID__
+        upgrade_offer(page == MAIN, busy);  // (a fast library in place and the player at the menu: rebuild it, quietly)
+#endif
         static bool was_busy;
         if (was_busy && !busy) {
             pthread_mutex_lock(&g_lock);
@@ -2741,6 +2875,44 @@ extern "C" void launcher_run(const char *root) {
             ImGui::PushFont(g_font_small);
             ImGui::SetCursorPos(ImVec2(x0, ds.y - 118 * s));
             if (status.empty()) {
+#ifdef __ANDROID__
+                float up = g_upgrade_frac;    // (the background upgrade: -1 when it isn't running)
+                int note = g_upgrade_note;    // (1: postponed, 2: failed - a few seconds where the percent was)
+                uint64_t note_at = g_note_at_ms;
+#else
+                float up = -1;
+                int note = 0;
+                uint64_t note_at = 0;
+#endif
+                if (up >= 0) {
+                    // the upgrade runs beside the menu: the percent, and Later beside it (postpone it - PLAY stays
+                    // on; pressing it postpones too, the game gets the phone to itself)
+                    char line[160];
+                    snprintf(line, sizeof line, tr("Upgrading the game code (%d%%)"), (int)(up * 100));
+                    ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "\xe2\x96\xb8  %s", line);
+                    ImGui::SameLine();
+                    const char *later = tr("Later");
+                    ImVec2 ls = ImGui::CalcTextSize(later);
+                    ImGui::SetCursorPosX(ImGui::GetCursorPosX() + ImGui::GetFontSize() * 0.8f);
+                    bool click = ImGui::InvisibleButton("##later", ls, ImGuiButtonFlags_EnableNav);
+                    bool hover = ImGui::IsItemHovered() || ImGui::IsItemFocused();
+                    ImU32 col = hover ? IM_COL32(255, 238, 150, 255) : IM_COL32(150, 168, 230, 255);
+                    ImVec2 lp = ImGui::GetItemRectMin();
+                    ImGui::GetWindowDrawList()->AddText(ImGui::GetFont(), ImGui::GetFontSize(), lp, col, later);
+                    if (hover) {
+                        ImGui::GetWindowDrawList()->AddLine(ImVec2(lp.x, lp.y + ls.y), ImVec2(lp.x + ls.x, lp.y + ls.y), col, 1.5f * s);
+                        ImGui::SetMouseCursor(ImGuiMouseCursor_Hand);
+                    }
+                    if (click) {
+#ifdef __ANDROID__
+                        upgrade_postpone();
+#endif
+                    }
+                } else if (note && SDL_GetTicks() - note_at < 8000) {
+                    ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "\xe2\x96\xb8  %s", tr(note == 1
+                        ? "The upgrade is postponed: it resumes at the next title screen."
+                        : "The game code upgrade didn't finish; the game still runs."));
+                } else {
                 {  // a drawn check mark (the Switch font has no ✓)
                     ImVec2 p = ImGui::GetCursorScreenPos();
                     float u = ImGui::GetTextLineHeight();
@@ -2750,6 +2922,7 @@ extern "C" void launcher_run(const char *root) {
                     ImGui::SetCursorPosX(x0 + u * 1.3f);
                 }
                 ImGui::TextColored(ImVec4(0.45f, 0.95f, 0.55f, 1), "%s", tr("Game files ready."));
+                }
                 ImGui::SetCursorPosX(x0);
                 ImGui::TextColored(ImVec4(0.66f, 0.76f, 0.98f, 1), "Nintendo Switch  \xc2\xb7  v%s", version_name(rt_game_version()));
             } else {
@@ -2867,6 +3040,9 @@ extern "C" void launcher_run(const char *root) {
         }
     }
     // play: hand the window to the game
+#ifdef __ANDROID__
+    upgrade_postpone();  // (the game gets the phone to itself: the upgrade stops - resumable - and the thread is
+#endif                     //  waited for, so nothing of it runs into the game)
     settings_save();
 #ifdef __APPLE__
     ImGui_ImplMetal_Shutdown();
