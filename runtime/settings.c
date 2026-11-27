@@ -30,6 +30,7 @@ const char *settings_file(void) {
 
 Settings g_settings = {
     .aspect = ASPECT_UNLOCKED,
+    .center_world_map = false,
     .fullscreen = false,
     .volume = 1.0f,
     .reverb = true,
@@ -216,6 +217,7 @@ void settings_reset_defaults(void) {
     if (!g_have_defaults) return;
     const Settings *d = &g_defaults;
     g_settings.aspect = d->aspect;
+    g_settings.center_world_map = d->center_world_map;
     g_settings.fullscreen = d->fullscreen;
     g_settings.res_mode = d->res_mode;
     g_settings.upscaler = d->upscaler;
@@ -275,6 +277,7 @@ void settings_load(void) {
         if (sscanf(line, " %63[^= ] = %127[^\r\n]", key, val) < 1) continue; val[strcspn(val, "\r\n")] = 0;
 #endif
         if (!strcmp(key, "aspect")) g_settings.aspect = !strcmp(val, "original") ? ASPECT_ORIGINAL : ASPECT_UNLOCKED;
+        else if (!strcmp(key, "center_world_map")) g_settings.center_world_map = atoi(val) != 0;
         else if (!strcmp(key, "fullscreen")) g_settings.fullscreen = atoi(val) != 0;
         else if (!strcmp(key, "volume")) g_settings.volume = (float)atof(val);
         else if (!strcmp(key, "reverb")) g_settings.reverb = atoi(val) != 0;
@@ -400,6 +403,7 @@ void settings_save(void) {
     if (!f) { LOG("[settings] cannot write %s\n", SETTINGS_FILE); return; }
     fprintf(f, "# BOTWRecompAndroid settings (edited from the in-game menu: F1, Esc, or Minus+Plus on a controller)\n");
     fprintf(f, "aspect = %s\n", g_settings.aspect == ASPECT_ORIGINAL ? "original" : "unlocked");
+    fprintf(f, "center_world_map = %d\n", g_settings.center_world_map);
     fprintf(f, "fullscreen = %d\n", g_settings.fullscreen);
     fprintf(f, "volume = %.2f\n", g_settings.volume);
     fprintf(f, "reverb = %d\n", g_settings.reverb);

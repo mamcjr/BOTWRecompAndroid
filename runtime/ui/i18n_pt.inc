@@ -1,5 +1,9 @@
 // The menus' text in Brazilian Portuguese (ui/i18n.mm): {English as in the code, Portuguese}. LASRecompAndroid's
 // translations for the strings both apps share, BOTW's own for the rest.
+{"Center world map at 16:9",
+ "Centralizar o mapa em 16:9"},
+{"On narrow landscape screens, show the map with its original proportions and bars above and below.",
+ "Em telas estreitas no modo paisagem, mostra o mapa nas proporções originais com barras em cima e embaixo."},
 {"\n\nChosen: ",
  "\n\nEscolhida: "},
 {"\n\nProgress since your last save is lost.",

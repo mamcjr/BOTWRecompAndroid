@@ -1,4 +1,8 @@
 // The menus' text in Dutch (ui/i18n.mm): {English as in the code, Dutch}.
+{"Center world map at 16:9",
+ "Wereldkaart centreren op 16:9"},
+{"On narrow landscape screens, show the map with its original proportions and bars above and below.",
+ "Toont de kaart op smalle schermen in liggende stand met de oorspronkelijke verhoudingen en balken boven en onder."},
 {"\n\nChosen: ",
  "\n\nGekozen: "},
 {"\n\nProgress since your last save is lost.",

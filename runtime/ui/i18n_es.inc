@@ -1,4 +1,8 @@
 // The menus' text in Spanish (ui/i18n.mm): {English as in the code, Spanish}.
+{"Center world map at 16:9",
+ "Centrar el mapa en 16:9"},
+{"On narrow landscape screens, show the map with its original proportions and bars above and below.",
+ "En pantallas estrechas en horizontal, muestra el mapa con sus proporciones originales y bandas arriba y abajo."},
 {"\n\nChosen: ",
  "\n\nElegida: "},
 {"\n\nProgress since your last save is lost.",

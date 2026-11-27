@@ -114,7 +114,7 @@ static _Atomic bool vert_used;
 static uint64_t log_seen[256];
 static int log_nseen, log_vert_n, log_wide_n;
 
-static _Atomic uint64_t minimap_frame, talk_frame, band_frame, scope_frame, menu_last;
+static _Atomic uint64_t minimap_frame, talk_frame, band_frame, scope_frame, map_frame, menu_last;
 
 RT_ON_RESET(widescreen_reset) {
     atomic_store_explicit(&g_wide, 1.0f, memory_order_relaxed);
@@ -125,6 +125,7 @@ RT_ON_RESET(widescreen_reset) {
     atomic_store_explicit(&talk_frame, 0, memory_order_release);
     atomic_store_explicit(&band_frame, 0, memory_order_release);
     atomic_store_explicit(&scope_frame, 0, memory_order_release);
+    atomic_store_explicit(&map_frame, 0, memory_order_release);
     atomic_store_explicit(&menu_last, 0, memory_order_release);
     pthread_mutex_lock(&vert_mu);
     memset(seen_vert, 0, sizeof seen_vert);
@@ -486,12 +487,26 @@ void widescreen_scope_seen(void) {
         atomic_store_explicit(&scope_frame, renderer_present_count(), memory_order_release);
 }
 
+// The map terrain pane was drawn recently while a game menu is up. Share that signal between
+// the terrain, markers, scissors and final presentation so they agree on the map's proportions.
+void widescreen_map_seen(void) {
+    extern uint64_t renderer_present_count(void);
+    atomic_store_explicit(&map_frame, renderer_present_count(), memory_order_release);
+}
+
+bool widescreen_map_open(float wide) {
+    extern uint64_t renderer_present_count(void);
+    uint64_t seen = atomic_load_explicit(&map_frame, memory_order_acquire);
+    return shape_reshaped(wide) && frame_recent(renderer_present_count(), seen, 2) && widescreen_in_menu();
+}
+
 bool widescreen_cropped(void) {
     extern uint64_t renderer_present_count(void);
     if (!widescreen_allowed()) return false;
     uint64_t sf = atomic_load_explicit(&scope_frame, memory_order_acquire);
     bool scope = frame_recent(renderer_present_count(), sf, 3);
-    return scope || framepace_on_title();
+    float wide = load_wide();
+    return scope || framepace_on_title() || (g_settings.center_world_map && wide < 0.999f && widescreen_map_open(wide));
 }
 
 void widescreen_present_crop(uint64_t frame, double shape, float crop[4], double *vx, double *vy, double *vw, double *vh) {

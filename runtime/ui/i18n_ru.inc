@@ -1,4 +1,8 @@
 // The menus' text in Russian (ui/i18n.mm): {English as in the code, Russian}.
+{"Center world map at 16:9",
+ "Карта мира по центру в формате 16:9"},
+{"On narrow landscape screens, show the map with its original proportions and bars above and below.",
+ "На узких экранах в альбомной ориентации карта сохраняет исходные пропорции, с полосами сверху и снизу."},
 {"\n\nChosen: ",
  "\n\nВыбрано: "},
 {"\n\nProgress since your last save is lost.",

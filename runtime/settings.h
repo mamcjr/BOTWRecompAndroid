@@ -26,6 +26,7 @@ extern const char *const g_language_names[N_LANGUAGES];  // for the menu ("Auto"
 
 typedef struct {
     int aspect;          // ASPECT_*: unlocked = fill the window (wider/taller views), original = 16:9 with bars
+    bool center_world_map;  // use the original map proportions on narrow landscape screens in Unlocked mode
     bool fullscreen;
     int res_mode;        // RES_MATCH, 1..4 (N x the Switch's 1080p), RES_DYNAMIC, RES_Q75/50/25 (share of the display)
     int upscaler;        // UPSCALE_*: how a lower internal resolution reaches the window (MetalFX: macOS, FSR 1: Windows)

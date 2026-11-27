@@ -1,4 +1,8 @@
 // The menus' text in Traditional Chinese (ui/i18n.mm): {English as in the code, Traditional Chinese}.
+{"Center world map at 16:9",
+ "以 16:9 置中顯示世界地圖"},
+{"On narrow landscape screens, show the map with its original proportions and bars above and below.",
+ "在較窄的橫向螢幕上，地圖以原始比例顯示，上下保留黑邊。"},
 {"\n\nChosen: ",
  "\n\n已選擇："},
 {"\n\nProgress since your last save is lost.",

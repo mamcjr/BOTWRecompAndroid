@@ -1,4 +1,8 @@
 // The menus' text in Italian (ui/i18n.mm): {English as in the code, Italian}.
+{"Center world map at 16:9",
+ "Centra la mappa in 16:9"},
+{"On narrow landscape screens, show the map with its original proportions and bars above and below.",
+ "Sugli schermi stretti in orizzontale, mostra la mappa con le proporzioni originali e con bande sopra e sotto."},
 {"\n\nChosen: ",
  "\n\nScelta: "},
 {"\n\nProgress since your last save is lost.",
