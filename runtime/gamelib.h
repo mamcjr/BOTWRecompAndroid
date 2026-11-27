@@ -24,7 +24,15 @@
 #ifndef GAMELIB_ID
 #define GAMELIB_ID "dev"
 #endif
-#define GAMELIB_ABI 1
+#define GAMELIB_ABI 2
+
+#define GAMELIB_EXTRA_MAX 9  // (code mods' modules, subsdk1-9: runtime/codemods.h)
+typedef struct {
+    const char *name;  // "subsdk6"
+    const uint64_t *addrs;
+    const GuestFn *fns;
+    const uint64_t *count;
+} GameLibModule;
 
 typedef struct {
     uint32_t abi;    // GAMELIB_ABI
@@ -32,6 +40,8 @@ typedef struct {
     const uint64_t *main_addrs, *sdk_addrs;  // sorted guest addresses
     const GuestFn *main_fns, *sdk_fns;       // the functions at them
     const uint64_t *main_count, *sdk_count;
+    uint32_t nextra;                         // code mods' modules built in (tools/gamelib_entry.c)
+    GameLibModule extra[GAMELIB_EXTRA_MAX];
 } GameLibTables;
 
 // The library's one exported function (tools/gamelib_entry.c).
@@ -49,6 +59,8 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size);
 const GameLibTables *gamelib_tables(void);
 // True when a library usable with this build is in one of those places (without loading it).
 bool gamelib_present(const char *game_dir);
+// The id (<library>.id) a library for game_dir must have: GAMELIB_ID plus the code mods' fingerprint, if any
+void gamelib_expected_id(const char *game_dir, char *out, size_t cap);
 
 #ifdef __cplusplus
 }

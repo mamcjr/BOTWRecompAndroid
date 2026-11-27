@@ -10,7 +10,7 @@ get_filename_component(R ${R} ABSOLUTE)
 include(${R}/android/gamelib_id.cmake)
 message(STATUS "GAMELIB_ID ${GAMELIB_ID}")
 
-file(GLOB GEN_SRC ${LAS_GEN}/main/*.c ${LAS_GEN}/sdk/*.c)
+file(GLOB GEN_SRC ${LAS_GEN}/main/*.c ${LAS_GEN}/sdk/*.c ${LAS_GEN}/subsdk*/*.c)  # (subsdk*: code mods, runtime/codemods.h)
 list(LENGTH GEN_SRC n)
 if(n EQUAL 0)
     message(FATAL_ERROR "no generated code in ${LAS_GEN}")

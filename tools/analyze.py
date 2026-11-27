@@ -28,7 +28,7 @@ def read_encoded(img, off, enc, pc_base):
 def eh_frame_functions(n):
     """Function start addresses from .eh_frame_hdr's binary search table."""
     img, hdr = n.image, n.eh_start
-    if not hdr or hdr >= len(img):
+    if not hdr or hdr >= len(img) or n.eh_end <= hdr:  # (an empty .eh_frame_hdr: exlaunch modules)
         return []
     ver, ptr_enc, cnt_enc, tbl_enc = img[hdr:hdr + 4]
     off = hdr + 4
@@ -61,7 +61,7 @@ def eh_frame_extents(n):
     """[start, end) of every function with an FDE: the address range each one covers. [] if .eh_frame
     isn't readable."""
     img, hdr = n.image, n.eh_start
-    if not hdr or hdr >= len(img):
+    if not hdr or hdr >= len(img) or n.eh_end <= hdr:  # (an empty .eh_frame_hdr: exlaunch modules)
         return []
     try:
         ver, ptr_enc, cnt_enc, tbl_enc = img[hdr:hdr + 4]

@@ -14,8 +14,10 @@ typedef struct {
     bool on;
 } ModInfo;
 
-// The mods in mods/ (sorted by name), up to max
+// The mods in mods/ (sorted by name), up to max - a folder with romfs/ or exefs/ (code mods: runtime/codemods.h)
 int mods_list(ModInfo *out, int max);
+// A mod's folder (mods/<name>, or where its .link points)
+bool mods_base(const char *name, char *out, size_t cap);
 // Turns one on or off (botwrecompandroid.ini: settings_save after)
 void mods_set(const char *name, bool on);
 // The game opens its RomFS: the files of the mods that are on, looked up by mods_romfs_override from then on

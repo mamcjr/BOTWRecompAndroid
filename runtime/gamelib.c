@@ -10,6 +10,7 @@
 #include <dlfcn.h>
 #endif
 
+#include "codemods.h"
 #include "paths.h"
 #include "platform.h"
 #include "rt.h"
@@ -17,8 +18,21 @@
 static const GameLibTables *g_tables;
 static char g_error[256];
 
+// The id a library for game_dir must have: GAMELIB_ID, and the code mods that are on (runtime/codemods.h) - another set
+// of them needs other game code
+void gamelib_expected_id(const char *game_dir, char *out, size_t cap) {
+    char main_path[1100], suffix[40] = "";
+    if (game_dir) {
+        CodeMods cm;
+        snprintf(main_path, sizeof main_path, "%s/exefs/main", game_dir);
+        codemods_find(main_path, &cm);
+        codemods_id_suffix(&cm, suffix, sizeof suffix);
+    }
+    snprintf(out, cap, "%s%s", GAMELIB_ID, suffix);
+}
+
 // The library's id file (<library>.id, written next to it by the build): its GAMELIB_ID, read without loading it.
-static bool id_matches(const char *lib) {
+static bool id_matches(const char *lib, const char *game_dir) {
     char path[1100], id[128] = {0};
     snprintf(path, sizeof path, "%s.id", lib);
     FILE *f = fopen(path, "rb");
@@ -26,7 +40,9 @@ static bool id_matches(const char *lib) {
     size_t n = fread(id, 1, sizeof id - 1, f);
     fclose(f);
     while (n && (id[n - 1] == '\n' || id[n - 1] == '\r')) id[--n] = 0;
-    return !strcmp(id, GAMELIB_ID);
+    char want[128];
+    gamelib_expected_id(game_dir, want, sizeof want);
+    return !strcmp(id, want);
 }
 
 static bool exists(const char *p) {
@@ -114,7 +130,7 @@ bool gamelib_present(const char *game_dir) {
     char c[3][1100];
     int n = candidates(game_dir, c);
     for (int i = 0; i < n; i++)
-        if (exists(c[i]) && id_matches(c[i])) return true;
+        if (exists(c[i]) && id_matches(c[i], game_dir)) return true;
     return false;
 }
 
@@ -133,7 +149,9 @@ void gamelib_absent_reason(const char *game_dir, char *out, size_t cap) {
         size_t k = fread(id, 1, sizeof id - 1, f);
         fclose(f);
         while (k && (id[k - 1] == '\n' || id[k - 1] == '\r')) id[--k] = 0;
-        snprintf(out, cap, "%s was built by another app version (its id %s, this app's %s)", c[i], id, GAMELIB_ID);
+        char want[128];
+        gamelib_expected_id(game_dir, want, sizeof want);
+        snprintf(out, cap, "%s was built by another app version or for other code mods (its id %s, wanted %s)", c[i], id, want);
         return;
     }
 }
@@ -188,7 +206,7 @@ bool gamelib_load(const char *game_dir, char *why, size_t why_size) {
         for (int i = 0; i < n && !g_tables; i++) {
             if (!exists(c[i])) continue;
             bool given = i == 0 && env && *env;  // LARECOMP_GAME_LIB: loaded as given, the library's own id decides
-            if (!given && !id_matches(c[i])) {
+            if (!given && !id_matches(c[i], game_dir)) {
                 snprintf(g_error, sizeof g_error, "%s was built for another version", c[i]);
                 continue;
             }

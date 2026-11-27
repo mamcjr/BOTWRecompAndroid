@@ -18,8 +18,30 @@ def header(path):
             'build_id': raw[0x40:0x60].hex()}
 
 
+def read_ips(path):
+    """An IPS / IPS32 patch (Atmosphere's exefs patches, as emulators take them): [(offset, bytes)], the offsets
+    into the NSO as loaded with its 0x100-byte header in front (so image offset = offset - 0x100)."""
+    d = open(path, 'rb').read()
+    wide = d[:5] == b'IPS32'
+    assert wide or d[:5] == b'PATCH', path
+    p, out, osz = 5, [], 4 if wide else 3
+    while True:
+        if d[p:p + osz] == (b'EEOF' if wide else b'EOF'):
+            return out
+        off = int.from_bytes(d[p:p + osz], 'big')
+        n = int.from_bytes(d[p + osz:p + osz + 2], 'big')
+        p += osz + 2
+        if n == 0:  # (run-length: a size and one byte)
+            rl = int.from_bytes(d[p:p + 2], 'big')
+            out.append((off, bytes([d[p + 2]]) * rl))
+            p += 3
+        else:
+            out.append((off, d[p:p + n]))
+            p += n
+
+
 class Nso:
-    def __init__(self, path):
+    def __init__(self, path, ips=()):
         raw = open(path, 'rb').read()
         assert raw[:4] == b'NSO0', path
         flags = struct.unpack_from('<I', raw, 0xC)[0]
@@ -42,6 +64,22 @@ class Nso:
         for off, d in segs:
             img[off:off + len(d)] = d
         self.image = img
+        # Code mods (runtime/codemods.c): IPS patches applied to the image. A patch may put code after .text, in the
+        # padding before .rodata (exlaunch loaders do): .text then reaches its end - the Switch maps those pages as code.
+        # ips_written: every word they changed, so tools/patches.py leaves those sites alone
+        self.ips_written = set()
+        text_end = self.text[0] + self.text[1]
+        for path in ips:
+            for off, data in read_ips(path):
+                at = off - 0x100
+                if at < 0 or at + len(data) > len(img):
+                    continue
+                img[at:at + len(data)] = data
+                self.ips_written.update(range(at & ~3, at + len(data), 4))
+                if text_end <= at < self.rodata[0]:
+                    text_end = max(text_end, (at + len(data) + 3) & ~3)
+        if text_end > self.text[0] + self.text[1]:
+            self.text = (self.text[0], text_end - self.text[0])
         self._parse_mod0()
 
     def u32(self, off): return struct.unpack_from('<I', self.image, off)[0]

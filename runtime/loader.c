@@ -2,6 +2,7 @@
 #include <stdlib.h>
 #include <string.h>
 
+#include "codemods.h"
 #include "rt.h"
 
 Module g_modules[4];
@@ -256,6 +257,25 @@ void loader_load(const char *exefs) {
         m->name = mods[i].name;
         snprintf(path, sizeof path, "%s/%s", exefs, m->name);
         load_nso(m, path, mods[i].base);
+    }
+    // Code mods (runtime/codemods.h): their patches into main as the generator applied them (tools/nso.py), and their
+    // modules right after main, where the Switch's loader puts the next module and an exlaunch patch looks for it
+    static CodeMods cm;
+    snprintf(path, sizeof path, "%s/main", exefs);
+    codemods_find(path, &cm);
+    g_codemods_active = cm.hash != 0;
+    Module *mm = &g_modules[0];
+    for (int i = 0; i < cm.nips; i++) {
+        uint64_t far = codemods_apply_ips(cm.ips[i], (uint8_t *)(uintptr_t)mm->base, mm->size);
+        uint64_t text_end = mm->text_off + mm->text_size;
+        if (far > text_end && far <= mm->ro_off) mm->text_size = ((far + 3) & ~3ull) - mm->text_off;  // (code after .text)
+    }
+    uint64_t at = MAIN_BASE + codemods_main_end(path);
+    for (int i = 0; i < cm.nmod && g_nmodules < (int)(sizeof g_modules / sizeof *g_modules); i++) {
+        Module *m = &g_modules[g_nmodules++];
+        m->name = cm.mod_name[i];
+        load_nso(m, cm.mod_path[i], at);
+        at += codemods_module_size(cm.mod_path[i]);
     }
     for (int i = 0; i < g_nmodules; i++) relocate(&g_modules[i]);
 }

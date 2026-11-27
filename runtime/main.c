@@ -37,7 +37,12 @@ static void module_init(Cpu *c, Module *m) {
 }
 
 static void rtld_init_sdk(Cpu *c) { module_init(c, &g_modules[1]); }
-static void rtld_init_main(Cpu *c) { module_init(c, &g_modules[0]); }
+static void rtld_init_main(Cpu *c) {
+    // (code mods' modules first, as the Switch's rtld runs the modules after main before it: runtime/codemods.h)
+    for (int i = 2; i < g_nmodules; i++)
+        if (g_modules[i].init || g_modules[i].init_array_sz) module_init(c, &g_modules[i]);
+    module_init(c, &g_modules[0]);
+}
 
 // Newer SDKs (BOTW 1.8.2's) also take x4, called if nnMain returns, before nninitFinalizeSdkModule and nnosQuickExit:
 // the finalizers of what x3 set up - DT_FINI, else the fini_array backwards (SavageWindRecomp, MIT)

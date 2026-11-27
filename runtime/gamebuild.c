@@ -8,6 +8,7 @@
 #include <string.h>
 #include <sys/stat.h>
 
+#include "codemods.h"
 #include "gamelib.h"
 #include "paths.h"
 #include "platform.h"
@@ -498,6 +499,10 @@ static void build_stamp(const char *game_dir, char *out, size_t n) {
         k += snprintf(out + k, n - (size_t)k, " %s %02x%02x%02x%02x%02x%02x%02x%02x", mods[m], id[0], id[1], id[2], id[3],
                       id[4], id[5], id[6], id[7]);
     }
+    char want[128];  // (and the code mods: runtime/codemods.h)
+    gamelib_expected_id(game_dir, want, sizeof want);
+    const char *suffix = strchr(want, '+');
+    if (suffix && k > 0 && (size_t)k < n) snprintf(out + k, n - (size_t)k, " mods %s", suffix + 1);
 }
 
 static bool same_text(const char *path, const char *text) {
@@ -624,18 +629,35 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     LOG("[gamebuild] generator %s%s%s, compiler %s%s, %d jobs\n", t.gen, t.gen_script[0] ? " " : "", t.gen_script,
         t.cc, t.zig ? " cc" : "", o->jobs);
 
-    // 1. the generator, both modules at once; their finished files are compiled while it goes on
-    Gen gens[2] = {{.name = "main"}, {.name = "sdk"}};
-    static const char *const base[2] = {"0x7000000000", "0x7004000000"};
+    // 1. the generator, all modules at once; their finished files are compiled while it goes on. Code mods
+    // (runtime/codemods.h): their patches into main, their modules generated after it, right after main's end
+    static CodeMods cm;
+    char main_nso[1100];
+    snprintf(main_nso, sizeof main_nso, "%s" SEP "exefs" SEP "main", game_dir);
+    codemods_find(main_nso, &cm);
+    enum { NGEN_MAX = 2 + CODEMODS_MOD_MAX };
+    Gen gens[NGEN_MAX] = {{.name = "main"}, {.name = "sdk"}};
+    char base[NGEN_MAX][24] = {"0x7000000000", "0x7004000000"};
+    int ngen = 2;
+    {
+        uint64_t at = 0x7000000000ull + codemods_main_end(main_nso);
+        for (int i = 0; i < cm.nmod; i++) {
+            gens[ngen].name = cm.mod_name[i];
+            snprintf(base[ngen++], sizeof base[0], "%#llx", (unsigned long long)at);
+            at += codemods_module_size(cm.mod_path[i]);
+        }
+        if (cm.hash) LOG("[gamebuild] code mods: %d patches for main, %d modules\n", cm.nips, cm.nmod);
+    }
     bool ok = true;
-    for (int i = 0; i < 2 && ok; i++) {
+    for (int i = 0; i < ngen && ok; i++) {
         Gen *g = &gens[i];
         g->exit = -1;
         snprintf(g->log, sizeof g->log, "%s" SEP "gen_%s.log", work, g->name);
         snprintf(g->out, sizeof g->out, "%s" SEP "%s", work, g->name);
         remove(g->log);  // (a stopped run's log: its file count isn't this run's - read before the new one replaced it)
         char nso[1100];
-        snprintf(nso, sizeof nso, "%s" SEP "exefs" SEP "%s", game_dir, g->name);
+        if (i >= 2) snprintf(nso, sizeof nso, "%s", cm.mod_path[i - 2]);
+        else snprintf(nso, sizeof nso, "%s" SEP "exefs" SEP "%s", game_dir, g->name);
         Args a = {0};
         add(&a, t.gen);
         if (t.gen_script[0]) add(&a, t.gen_script);
@@ -644,6 +666,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         add(&a, base[i]);
         add(&a, g->out);
         if (i == 1) { add(&a, "--hle"); add(&a, t.hle); }
+        if (i == 0)
+            for (int k = 0; k < cm.nips; k++) { add(&a, "--ips"); add(&a, cm.ips[k]); }
+        if (i >= 2) add(&a, "--sweep");
 #ifdef __ANDROID__
         add(&a, "--simd"); add(&a, "asm"); add(&a, "--dyn-base");  // (as android/build_gamelib.sh: the window moves)
 #endif
@@ -653,8 +678,8 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
     }
 
     Units units = {0};
-    int queued[2] = {0, 0};  // chunk files of each module put in units so far
-    bool tables[2] = {false, false};
+    int queued[NGEN_MAX] = {0};  // chunk files of each module put in units so far
+    bool tables[NGEN_MAX] = {false};
     int next = 0, jobs = o->jobs < 1 ? 1 : o->jobs > 64 ? 64 : o->jobs;
     struct { PlatProc p; int unit; } run[64];
     int nrun = 0;
@@ -668,7 +693,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         bool gens_done = true;
         double gen_frac = 0;
         unsigned long long written = 0;
-        for (int i = 0; i < 2; i++) {
+        for (int i = 0; i < ngen; i++) {
             Gen *g = &gens[i];
             if (g->exit < 0) {
                 read_gen_log(g);
@@ -699,7 +724,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
                 add_unit(&units, src, work, stem);
                 tables[i] = true;
             }
-            gen_frac += g->exit == 0 ? 0.5 : g->n ? 0.5 * (double)g->ci / (double)g->n : 0;
+            gen_frac += (i < 2 ? 0.5 : 0) * (g->exit == 0 ? 1 : g->n ? (double)g->ci / (double)g->n : 0);  // (mods: tiny)
         }
         if (!ok) break;
         for (int k = 0; k < units.n; k++) written += units.u[k].bytes;
@@ -776,7 +801,7 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         sleep_ms(50);
     }
     for (int k = 0; k < nrun; k++) stop(run[k].p);  // (a failure: the rest is of no use - the failure shows at once)
-    for (int i = 0; i < 2; i++)
+    for (int i = 0; i < ngen; i++)
         if (gens[i].p && gens[i].exit < 0) stop(gens[i].p);
 
     // 2. link
@@ -843,7 +868,9 @@ bool gamebuild_run(const char *game_dir, const GameBuildOpts *o, char *why, size
         char idp[1100];
         snprintf(idp, sizeof idp, "%s.id", lib);
         FILE *f = NULL;
-        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", GAMELIB_ID) < 0) {
+        char want[128];  // (GAMELIB_ID, and the code mods' fingerprint: runtime/gamelib.c)
+        gamelib_expected_id(game_dir, want, sizeof want);
+        if (rename(tmp, lib) != 0 || !(f = fopen(idp, "wb")) || fprintf(f, "%s\n", want) < 0) {
             snprintf(why, why_size, "the game code couldn't be saved");
             ok = false;
         }

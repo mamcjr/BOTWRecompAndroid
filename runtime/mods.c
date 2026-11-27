@@ -29,12 +29,18 @@ static int by_name(const void *a, const void *b) { return strcmp(((const ModInfo
 
 // A mod's folder: mods/<name>, or the folder mods/<name>.link names (a mod used in place - Mods > Import a mod folder
 // with Game Files > Game files: Use them in place; BOTWRecompAndroidActivity.importMod). false: neither is there.
-static bool mod_base(const char *name, char *out, size_t cap) {
+// (a mod is a folder with romfs/ or exefs/ - code mods, runtime/codemods.c - or both)
+static bool has_dir(const char *base, const char *sub) {
     struct stat sb;
+    char p[1200];
+    snprintf(p, sizeof p, "%s/%s", base, sub);
+    return !stat(p, &sb) && S_ISDIR(sb.st_mode);
+}
+
+bool mods_base(const char *name, char *out, size_t cap) {
     snprintf(out, cap, "mods/%s", name);
     char p[1200];
-    snprintf(p, sizeof p, "%s/romfs", out);
-    if (!stat(p, &sb) && S_ISDIR(sb.st_mode)) return true;
+    if (has_dir(out, "romfs") || has_dir(out, "exefs")) return true;
     snprintf(p, sizeof p, "mods/%s.link", name);
     FILE *f = fopen(p, "rb");
     if (!f) return false;
@@ -42,8 +48,7 @@ static bool mod_base(const char *name, char *out, size_t cap) {
     fclose(f);
     out[n] = 0;
     while (n && (out[n - 1] == '\n' || out[n - 1] == '\r')) out[--n] = 0;
-    snprintf(p, sizeof p, "%s/romfs", out);
-    return n && !stat(p, &sb) && S_ISDIR(sb.st_mode);
+    return n && (has_dir(out, "romfs") || has_dir(out, "exefs"));
 }
 
 int mods_list(ModInfo *out, int max) {
@@ -57,7 +62,7 @@ int mods_list(ModInfo *out, int max) {
         if (e->d_name[0] == '.' || l >= sizeof name) continue;
         snprintf(name, sizeof name, "%s", e->d_name);
         if (l > 5 && !strcmp(name + l - 5, ".link")) name[l - 5] = 0;  // (in place)
-        if (!mod_base(name, base, sizeof base)) continue;
+        if (!mods_base(name, base, sizeof base)) continue;
         bool dup = false;  // (a folder and a .link of one name: once)
         for (int k = 0; k < n && !dup; k++) dup = !strcmp(out[k].name, name);
         if (dup) continue;
@@ -140,7 +145,7 @@ void mods_scan(void) {
         cur = strcasestr(m[i].name, "01007EF00011F001") ? 1 : 0;
         int before = nfiles;
         char base[1024], root[1100];
-        if (!mod_base(m[i].name, base, sizeof base)) continue;
+        if (!mods_base(m[i].name, base, sizeof base)) continue;
         snprintf(root, sizeof root, "%s/romfs", base);
         walk(root, "", i);
         LOG("[mods] %s: %d files%s\n", m[i].name, nfiles - before, cur ? " (the DLC's)" : "");
@@ -174,7 +179,7 @@ bool mods_file(int i, const char **path, const char **host) {
 const char *mods_note(const char *name, char *buf, size_t cap) {
     buf[0] = 0;
     char dirp[1024], pick[1400] = "";
-    if (!mod_base(name, dirp, sizeof dirp)) return buf;
+    if (!mods_base(name, dirp, sizeof dirp)) return buf;
     DIR *d = opendir(dirp);
     if (!d) return buf;
     struct dirent *e;
@@ -222,4 +227,5 @@ int mods_file_count(void) { return 0; }
 void mods_select_dlc(bool dlc) { (void)dlc; }
 bool mods_file(int i, const char **path, const char **host) { (void)i, (void)path, (void)host; return false; }
 const char *mods_note(const char *name, char *buf, size_t cap) { (void)name; if (cap) buf[0] = 0; return buf; }
+bool mods_base(const char *name, char *out, size_t cap) { (void)name, (void)out, (void)cap; return false; }
 #endif

@@ -22,6 +22,7 @@
 
 #include "hle.h"
 #include "kernel.h"
+#include "codemods.h"
 #include "rt.h"
 #include "settings.h"
 
@@ -602,8 +603,23 @@ static void prepare_module(Module *m) {
     }
     bool is_main = m->base == MAIN_BASE;
     uint64_t nfix = sizeof fixes / sizeof *fixes;
-    uint64_t area = (m->base + m->size + 0xFFFF) & ~0xFFFFull, asize = (nsites * 80 + nfix * 128 + 0x3FFF) & ~0x3FFFull;
+    uint64_t asize = (nsites * 80 + nfix * 128 + 0x3FFF) & ~0x3FFFull;
     if (!asize) asize = 0x4000;
+    // After the module - and after code mods' modules, which sit right after main (runtime/codemods.h) - and clear of
+    // the areas already placed this boot
+    static struct { uint64_t lo, hi; } taken[8];
+    static int ntaken;
+    if (m == &g_modules[0]) ntaken = 0;
+    uint64_t end = m->base + m->size;
+    for (int k = 0; k < g_nmodules; k++)
+        if (g_modules[k].base >= end && g_modules[k].base < end + 0x100000) end = g_modules[k].base + g_modules[k].size;
+    uint64_t area = (end + 0xFFFF) & ~0xFFFFull;
+    for (bool moved = true; moved;) {
+        moved = false;
+        for (int k = 0; k < ntaken; k++)
+            if (area < taken[k].hi && area + asize > taken[k].lo) area = (taken[k].hi + 0xFFFF) & ~0xFFFFull, moved = true;
+    }
+    if (ntaken < 8) taken[ntaken].lo = area, taken[ntaken++].hi = area + asize;
     plat_commit(area, asize);
     uint64_t at = area;
     unsigned nsvc = 0, ntls = 0, ncnt = 0, nfrq = 0, nlock = 0;
@@ -649,6 +665,10 @@ static void prepare_module(Module *m) {
         uint64_t site = MAIN_BASE + (fixes[f].addr - 0x7000000000ull);
         uint64_t alt = fixes[f].alt ? MAIN_BASE + (fixes[f].alt - 0x7000000000ull) : 0;
         uint32_t *w = (uint32_t *)(uintptr_t)site;
+        if (*w != fixes[f].word && g_codemods_active) {  // (a code mod changed that instruction: its code stays)
+            LOG("[native] fix '%s' at %llx left out: a code mod changed it\n", fixes[f].what, (unsigned long long)fixes[f].addr);
+            continue;
+        }
         if (*w != fixes[f].word) FATAL("[native] fix '%s' at %llx: %08x, not %08x\n", fixes[f].what,
                                        (unsigned long long)fixes[f].addr, *w, fixes[f].word);
         at += stub_fix((uint32_t *)(uintptr_t)at, at, site, f, *w, alt);

@@ -51,10 +51,14 @@ def sanitize(sym):
 
 
 class Module:
-    def __init__(self, name, path, base, simd='asm'):
+    def __init__(self, name, path, base, simd='asm', ips=()):
         self.name = name
-        self.nso = Nso(path)
+        self.nso = Nso(path, ips)
         self.patches = patches_for(self.nso.build_id)  # (tools/patches.py: this build's, by its build id)
+        # (a code mod's patch changed one of their sites: the mod's code stays - runtime/codemods.c)
+        for a in [a for a in self.patches if a - 0x7000000000 in self.nso.ips_written]:
+            print(f'{name}: patch at {a:#x} left out (a code mod changed that instruction)', file=sys.stderr)
+            del self.patches[a]
         self.base = base
         n = self.nso
         self.lo = base + n.text[0]
@@ -141,6 +145,18 @@ class Module:
                 starts.add(b + add)
         starts = sorted(a for a in starts if self.in_text(a))
         return starts
+
+    def sweep(self):
+        """--sweep (a code mod's module: runtime/codemods.c): its entry and every word after an unconditional ret, b,
+        br or brk/udf as a start too. Such a module has no symbols nor unwind tables, and calls its functions through
+        offsets it computes (exlaunch's tables) that discovery can't see. A start that turns out to be in the middle of
+        a function only splits it: the first part goes on into the second (emit_function)."""
+        out = {self.lo}
+        for i, w in enumerate(self.words):
+            if ((w & 0xFFFFFC1F) in (0xD65F0000, 0xD61F0000) or (w & 0xFC000000) == 0x14000000 or
+                    (w & 0xFFE0001F) == 0xD4200000 or w == 0):
+                out.add(self.lo + (i + 1) * 4)
+        return sorted(a for a in out if self.in_text(a))
 
     # ------------------------------------------------------------ jump tables
 
@@ -621,8 +637,10 @@ def discover(m, starts):
 
 def generate(name, nso, base, outdir, opts):
     t0 = time.time()
-    m = Module(name, nso, base, opts.simd)
+    m = Module(name, nso, base, opts.simd, opts.ips or ())
     starts = m.boundaries()
+    if opts.sweep:
+        starts = sorted(set(starts) | set(m.sweep()))
     hle = {}
     if opts.hle and os.path.exists(opts.hle):
         want = {l.strip() for l in open(opts.hle) if l.strip() and not l.startswith('#')}
@@ -718,6 +736,8 @@ def main():
                     default='asm' if platform.machine().lower() in ('arm64', 'aarch64') else 'c')
     ap.add_argument('--dyn-base', action='store_true',
                     help='Android: guest addresses relative to the window the runtime picks (lifter.gaddr)')
+    ap.add_argument('--ips', action='append', help='a code mod\'s IPS patch for this module (runtime/codemods.c)')
+    ap.add_argument('--sweep', action='store_true', help='a code mod\'s module: a start after every terminator')
     args = ap.parse_args()
     lifter.DYN_BASE = args.dyn_base
     generate(args.name, args.nso, args.base, args.outdir, args)
