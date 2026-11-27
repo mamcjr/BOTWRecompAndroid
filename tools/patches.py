@@ -141,7 +141,16 @@ PATCHES_190[0x7000eb4a28] = _persp_get_aspect_182
 # of it (1.9.0 0x7000dea400, the camera target) an actor whose + 0x570 is null (accessing 0x88). Both now treat such an
 # actor as none: the helper answers 0, the inline copy leaves its function by the path of "no target". An actor, and its
 # link, are in the guest window (rt.h: GUEST_LO .. + 0x320000000; the address below moves with it, gen.py rebase_patch).
+# The link's + 0x88 too, when it isn't null (null already reads as zero there: the null page): #401's 0.5.0 crash had a
+# link inside the window - into the game's code - whose + 0x88 was two instructions (aa1f03e0d65f03c0), and the next
+# function (1.9.0 0x70014c1850) read + 0x760 of that.
 _IN_WINDOW = '(%s - 0x7000000000ull < 0x320000000ull)'
+
+
+def _stale(reg):  # C: true when the actor in `reg` (or its link, or the link's + 0x88) is no object
+    return ('({ uint64_t sa_ = %s, sl_, so_; !%s || (sl_ = LD64(sa_ + 0x570ull), !%s) || '
+            '((so_ = LD64(sl_ + 0x88ull)) && !%s); })'
+            % (reg, _IN_WINDOW % 'sa_', _IN_WINDOW % 'sl_', _IN_WINDOW % 'so_'))
 
 
 def _stale_actor_helper(gen, a):
@@ -152,7 +161,7 @@ def _stale_actor_helper(gen, a):
     target = a + (((w >> 5) & 0x7ffff) - (1 << 19 if w >> 23 & 1 else 0)) * 4
     return ('{ extern void rt_stale_actor(void); '
             f'if (!c->x[0]) goto L_{target:x}; '
-            f'if (!{_IN_WINDOW % "c->x[0]"} || !{_IN_WINDOW % "LD64(c->x[0] + 0x570ull)"}) '
+            f'if ({_stale("c->x[0]")}) '
             f'{{ rt_stale_actor(); c->x[0] = 0; goto L_{target:x}; }} }}'
             f'  /* {a:#x}: cbz x0 (a stale actor: none; tools/patches.py) */')
 
@@ -168,7 +177,7 @@ def _stale_actor_target(gen, a):
             break
     assert exit_at, 'stale actor target: no cbnz x19 above %#x' % a
     return ('{ extern void rt_stale_actor(void); '
-            f'if (!{_IN_WINDOW % "c->x[19]"} || !{_IN_WINDOW % "LD64(c->x[19] + 0x570ull)"}) '
+            f'if ({_stale("c->x[19]")}) '
             f'{{ rt_stale_actor(); goto L_{exit_at:x}; }} '
             'c->x[8] = LD64(c->x[19] + 0x570ull); }'
             f'  /* {a:#x}: ldr x8, [x19, #0x570] (a stale camera target: none; tools/patches.py) */')
