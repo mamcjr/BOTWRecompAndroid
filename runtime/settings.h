@@ -78,6 +78,9 @@ typedef struct {
     int present_fifo;     // the swapchain's present mode: 1 FIFO (each image waits for the screen), 0 MAILBOX; -1
                           // Automatic: FIFO on Adreno 7xx (#367: the picture froze with MAILBOX while the game ran on),
                           // MAILBOX elsewhere (vulkan/device.c present_mode; LARECOMP_VK_PRESENT over it)
+    int depth16;          // the game's 16-bit depth (NVN D16: its shadow maps) as: 0 D16, 1 D32, 2 D24; -1 Automatic (D32 on
+                          // Huawei Maleoon, whose driver rejected D16 views - #301 - else D16). Read when the game starts;
+                          // LARECOMP_DEPTH16=d16/d32/d24 over it (vulkan/textures.c depth16)
     int dyn_render;       // Vulkan dynamic rendering: 1 on, 0 classic VkRenderPass, -1 Automatic (off on ARM Mali r49+,
                           // on elsewhere: vulkan/device.c); LARECOMP_NO_DYNAMIC_RENDERING over it; restart to apply
     bool log_file;        // the log in a file as well (platform/android.c), to send with a report

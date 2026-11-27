@@ -67,6 +67,7 @@ Settings g_settings = {
     .turnip_lrz = -1,
     .present_fifo = -1,
     .dyn_render = -1,
+    .depth16 = -1,
     .event_fps_unlock = false,  // (some events count frames: hle/framepace.c in_event)
     .fps_mode = 1,  // (30: the game's own choice dropped the overworld to 20, where the GPU's clocks settled low)
     .thermal_cap = true,  // (hle/framepace.c: 60 / 45 fps drop to 30 while the phone is too hot)
@@ -324,6 +325,8 @@ void settings_load(void) {
         else if (!strcmp(key, "turnip_lrz")) g_settings.turnip_lrz = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "present_fifo")) g_settings.present_fifo = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
         else if (!strcmp(key, "dyn_render")) g_settings.dyn_render = !strcmp(val, "auto") ? -1 : atoi(val) != 0;
+        else if (!strcmp(key, "depth16"))  // (auto / d16 / d32 / d24: vulkan/textures.c depth16)
+            g_settings.depth16 = !strcmp(val, "d16") ? 0 : !strcmp(val, "d32") ? 1 : !strcmp(val, "d24") ? 2 : -1;
         else if (!strcmp(key, "log_file")) g_settings.log_file = atoi(val) != 0;
         else if (!strcmp(key, "gpu_model")) snprintf(g_settings.gpu_model, sizeof g_settings.gpu_model, "%s", val);
         else if (!strcmp(key, "driver_env")) snprintf(g_settings.driver_env, sizeof g_settings.driver_env, "%s", val);
@@ -453,6 +456,10 @@ static void settings_save_locked(void) {
     fprintf(f, "low_ram = %s\n", TRI(g_settings.low_ram));
     fprintf(f, "present_fifo = %s\n", TRI(g_settings.present_fifo));
     fprintf(f, "dyn_render = %s\n", TRI(g_settings.dyn_render));
+    {
+        static const char *const d16[] = {"d16", "d32", "d24"};
+        fprintf(f, "depth16 = %s\n", g_settings.depth16 >= 0 && g_settings.depth16 <= 2 ? d16[g_settings.depth16] : "auto");
+    }
 #undef TRI
     fprintf(f, "touch_drag_camera = %d\ntouch_drag_sens = %.2f\ntouch_sticks_hidden = %d\ntouch_half_areas = %d\n",
             g_settings.touch_drag_camera, g_settings.touch_drag_sens, g_settings.touch_sticks_hidden,

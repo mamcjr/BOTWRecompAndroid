@@ -13,6 +13,7 @@
 #endif
 
 #include "../../benchmark_perf.h"
+#include "../../settings.h"
 #include "vk.h"
 #include "../astc.h"
 #include "../renderer.h"
@@ -46,18 +47,41 @@ static VkFormat depth24_stencil8(void) {
 // Maleoon 920 advertises D16 but rejects its image view when the opening scene uses it (#301).
 // Keep D16 on other GPUs when it supports every use of these depth textures; D32 is the
 // depth-only format already used for NVN DEPTH24/DEPTH32 on this backend.
+// The choice: Driver compatibility > 16-bit depth (settings.h depth16), LARECOMP_DEPTH16=d16/d32/d24 over it. Kept as D32 or
+// D24, its texels are converted on the way in and out (copies to and from buffers, uploads) and the game's constant
+// depth bias is scaled to the wider format's unit (exec.c: a D16 shadow map's bias, 256 times too small as D32 - the
+// terrain shadowing itself, scenes dark under a bright sky: #516)
+static bool depth_format_ok(VkFormat f) {
+    VkFormatProperties p;
+    vkGetPhysicalDeviceFormatProperties(g_vk.phys, f, &p);
+    VkFormatFeatureFlags want = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
+                                VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
+    return (p.optimalTilingFeatures & want) == want;
+}
+
 static VkFormat depth16(void) {
     static VkFormat f;
     if (!f) {
-        VkFormatProperties p;
-        vkGetPhysicalDeviceFormatProperties(g_vk.phys, VK_FORMAT_D16_UNORM, &p);
-        VkFormatFeatureFlags want = VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-                                    VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT;
-        bool d16_ok = (p.optimalTilingFeatures & want) == want;
-        f = d16_ok && g_vk.props.vendorID != 0x19e5 ? VK_FORMAT_D16_UNORM : VK_FORMAT_D32_SFLOAT;
-        if (f != VK_FORMAT_D16_UNORM)
-            LOG("[vk] depth16: D32_SFLOAT instead of D16_UNORM (%s)\n",
-                d16_ok ? "Maleoon driver rejects D16 views" : "D16 features unavailable");
+        bool d16_ok = depth_format_ok(VK_FORMAT_D16_UNORM);
+        int pick = g_settings.depth16;
+        const char *e = getenv("LARECOMP_DEPTH16"), *why = "settings";
+        if (e && *e) pick = !strcmp(e, "d16") ? 0 : !strcmp(e, "d32") ? 1 : !strcmp(e, "d24") ? 2 : -1, why = "LARECOMP_DEPTH16";
+        // Automatic: D16 where it works; on Maleoon (its driver rejected D16 views, #301) D24 - D32 left whole scenes
+        // dark (#516: half the brightness on the POCO with LARECOMP_DEPTH16=d32, D24 as D16 within a few levels) - and
+        // D32 only where D24 can't be
+        if (pick < 0 && d16_ok && g_vk.props.vendorID != 0x19e5) pick = 0, why = "automatic";
+        else if (pick < 0) {
+            pick = depth_format_ok(VK_FORMAT_X8_D24_UNORM_PACK32) ? 2 : 1;
+            why = d16_ok ? "automatic: the Maleoon driver rejected D16 views, #301" : "automatic: D16 features unavailable";
+        }
+        f = pick == 0 ? VK_FORMAT_D16_UNORM : pick == 2 ? VK_FORMAT_X8_D24_UNORM_PACK32 : VK_FORMAT_D32_SFLOAT;
+        if (!depth_format_ok(f)) {  // (the one chosen can't be: the next that can)
+            VkFormat alt[3] = {VK_FORMAT_D16_UNORM, VK_FORMAT_D32_SFLOAT, VK_FORMAT_X8_D24_UNORM_PACK32};
+            for (int i = 0; i < 3; i++) if (alt[i] != f && depth_format_ok(alt[i])) { f = alt[i]; break; }
+            why = "the one chosen isn't supported for every use here";
+        }
+        LOG("[vk] depth16: %s (%s)\n", f == VK_FORMAT_D16_UNORM ? "D16_UNORM" : f == VK_FORMAT_D32_SFLOAT ? "D32_SFLOAT instead of D16"
+                                       : "X8_D24_UNORM instead of D16", why);
     }
     return f;
 }
@@ -1333,7 +1357,7 @@ static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) 
             uint32_t row = l.wb * fi->bpb;
             uint64_t sz = (uint64_t)row * l.hb * l.d;
             bool expand = mf.expand_rgb && fi->bpb == 3;
-            bool depth16_expand = t->format == 0x32 && b->format == VK_FORMAT_D32_SFLOAT;
+            bool depth16_expand = vk_depth16_wide(t->format, b->format);
             uint32_t out_row = expand || depth16_expand ? l.wb * 4 : row;
             VkSpan s = vk_transient((uint64_t)out_row * l.hb * l.d, 16);
             uint8_t *lin = expand || depth16_expand ? texture_scratch(sz) : s.ptr;
@@ -1371,13 +1395,13 @@ static bool upload_texture_impl(NvnTexture *t, TexBackend *b, bool for_rt_load) 
                 uint8_t *o = s.ptr;
                 uint64_t n = (uint64_t)l.wb * l.hb * l.d;
                 for (uint64_t i = 0; i < n; i++) { o[i * 4] = lin[i * 3]; o[i * 4 + 1] = lin[i * 3 + 1]; o[i * 4 + 2] = lin[i * 3 + 2]; o[i * 4 + 3] = 255; }
-            } else if (depth16_expand) {  // NVN's normalized D16 texels -> the fallback D32 image
-                float *out = s.ptr;
+            } else if (depth16_expand) {  // NVN's normalized D16 texels -> the D32 or D24 image (depth16)
+                uint32_t *out = s.ptr;
                 uint64_t n = (uint64_t)l.wb * l.hb * l.d;
                 for (uint64_t i = 0; i < n; i++) {
                     uint16_t value;
                     memcpy(&value, lin + i * 2, sizeof value);
-                    out[i] = (float)value / 65535.0f;
+                    out[i] = vk_depth16_out(value, b->format);
                 }
             }
             uint32_t w = l.w, hh = l.h, d = l.d;

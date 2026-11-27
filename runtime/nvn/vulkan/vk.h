@@ -187,5 +187,26 @@ VkShaderModule vk_builtin_shader(const char *name);  // internal shaders (clear,
 void vk_save_png(const char *path, const uint8_t *rgba, uint32_t w, uint32_t h);
 #ifdef __ANDROID__
 bool vk_driver_is_mali(void);
+
+// The game's 16-bit depth (NVN D16, format 0x32) kept as D32 or X8_D24 (textures.c depth16): 4 bytes a texel here, 2 in
+// the game's memory - converted on the way in and out (uploads, copies to and from buffers)
+static inline bool vk_depth16_wide(uint32_t nvn_format, VkFormat f) {
+    return nvn_format == 0x32 && (f == VK_FORMAT_D32_SFLOAT || f == VK_FORMAT_X8_D24_UNORM_PACK32);
+}
+static inline uint32_t vk_depth16_out(uint16_t v, VkFormat f) {  // the game's value -> the wide texel
+    if (f == VK_FORMAT_X8_D24_UNORM_PACK32) return (uint32_t)(((uint64_t)v * 0xFFFFFFu + 0x7FFFu) / 0xFFFFu);
+    float d = (float)v / 65535.0f;
+    uint32_t u;
+    __builtin_memcpy(&u, &d, 4);
+    return u;
+}
+static inline uint16_t vk_depth16_in(uint32_t u, VkFormat f) {  // the wide texel -> the game's value
+    if (f == VK_FORMAT_X8_D24_UNORM_PACK32) return (uint16_t)(((uint64_t)(u & 0xFFFFFFu) * 0xFFFFu + 0x7FFFFFu) / 0xFFFFFFu);
+    float d;
+    __builtin_memcpy(&d, &u, 4);
+    if (!(d >= 0.0f)) d = 0.0f;
+    if (d > 1.0f) d = 1.0f;
+    return (uint16_t)(d * 65535.0f + 0.5f);
+}
 bool vk_slot_async_default(void);
 #endif

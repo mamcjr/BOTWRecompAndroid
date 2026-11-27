@@ -1861,6 +1861,23 @@ static void prelaunch_tab(float sc) {
                                   "while the sound and the game go on. Automatic: on for Adreno 7xx GPUs, off for the "
                                   "others. Applies when the game starts."));
         ImGui::Spacing();
+        ImGui::Text("%s", tr("16-bit depth (shadows)"));  // (settings.h depth16, vulkan/textures.c depth16)
+        {
+            ImGui::PushID("depth16");
+            changed |= ImGui::RadioButton(tr("Automatic"), &g_settings.depth16, -1);
+            ImGui::SameLine();
+            changed |= ImGui::RadioButton("D16", &g_settings.depth16, 0);
+            ImGui::SameLine();
+            changed |= ImGui::RadioButton("D32", &g_settings.depth16, 1);
+            ImGui::SameLine();
+            changed |= ImGui::RadioButton("D24", &g_settings.depth16, 2);
+            ImGui::PopID();
+        }
+        ImGui::TextDisabled("%s", tr("How the game's 16-bit depth (its shadow maps) is kept: D16 as on the Switch, or D32 or "
+                                  "D24 for drivers that reject D16. Automatic: D24 on Huawei Maleoon GPUs (D32 where D24 can't be), D16 elsewhere. "
+                                  "Try another one if shadows or whole scenes look dark, or if the game closes as it opens. "
+                                  "Applies when the game starts."));
+        ImGui::Spacing();
         ImGui::Text("%s", tr("Dynamic rendering"));  // (settings.h dyn_render, vulkan/device.c)
         if (!vk_dyn_render_supported()) ImGui::BeginDisabled();
         changed |= tri("dynrender", &g_settings.dyn_render, vk_dyn_render_auto());

@@ -8626,6 +8626,14 @@ static void draw_(CmdRec *r, bool indexed) {
             if (k16 < 0) k16 = getenv("LARECOMP_D16_BIAS_SCALE") ? (float)atof(getenv("LARECOMP_D16_BIAS_SCALE")) : 0;
             if (k16 > 0 && on && st.rt.depth && st.rt.depth->backend &&
                 ((TexBackend *)st.rt.depth->backend)->format == VK_FORMAT_D16_UNORM) f[1] *= k16;
+            // The game's D16 kept as D32 or D24 (textures.c depth16; Maleoon's Automatic): its constant bias is in D16
+            // units (1/65535), the wider format's unit 256 times smaller (D24 exactly; D32 for depths of 0.5 and up).
+            // Unscaled, the shadow maps' surfaces shadowed themselves: terrain and characters dark under a bright sky
+            // (#516). LARECOMP_DEPTH16_BIAS=<k>: k instead of 256 (1: as before)
+            static float kw = -1;
+            if (kw < 0) kw = getenv("LARECOMP_DEPTH16_BIAS") ? (float)atof(getenv("LARECOMP_DEPTH16_BIAS")) : 256.0f;
+            if (on && st.rt.depth && st.rt.depth->backend &&
+                vk_depth16_wide(st.rt.depth->format, ((TexBackend *)st.rt.depth->backend)->format)) f[1] *= kw;
         }
         if (equal_tol) { f[1] -= 8; on = true; }  // (see the EQUAL comment above: a few depth ulps nearer)
         if (g_vk.eds2 && ss_need(SS_DBE, ss.dbe == (VkBool32)on)) { ss.dbe = on; vkCmdSetDepthBiasEnable(cb, on); }
@@ -9126,7 +9134,7 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
     }
     bool array = b->layers > 1 && b->depth == 1;
     uint32_t hb = ((uint32_t)rg[4] + fi->bh - 1) / fi->bh, wb = ((uint32_t)rg[3] + fi->bw - 1) / fi->bw;
-    bool depth16_expand = t->format == 0x32 && b->format == VK_FORMAT_D32_SFLOAT;
+    bool depth16_expand = vk_depth16_wide(t->format, b->format);
     uint32_t out_bpb = fi->bpb == 3 || depth16_expand ? 4 : fi->bpb;
     uint32_t nz = (uint32_t)rg[5];
     VkCommandBuffer cb = vk_cmd();
@@ -9142,8 +9150,8 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
                 for (uint32_t x = 0; x < wb; x++) {
                     uint16_t value;
                     memcpy(&value, sr + x * 2, sizeof value);
-                    float depth = (float)value / 65535.0f;
-                    memcpy(dr + x * 4, &depth, sizeof depth);
+                    uint32_t wide = vk_depth16_out(value, b->format);
+                    memcpy(dr + x * 4, &wide, sizeof wide);
                 }
             } else for (uint32_t x = 0; x < wb; x++) { memcpy(dr + x * 4, sr + x * 3, 3); dr[x * 4 + 3] = 255; }
         }
@@ -9174,7 +9182,7 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     copy_region_dims(t, src, &fi, rg, &level, &row, &img);
     if (!fi || !fi->bpb || fi->bpb == 3 || row % fi->bpb) return;
     TexBackend *b = vk_tex(t, false);
-    bool depth16_pack = t->format == 0x32 && b->format == VK_FORMAT_D32_SFLOAT;
+    bool depth16_pack = vk_depth16_wide(t->format, b->format);
     float tsx, tsy;
     renderer_texture_scale(t, &tsx, &tsy);
     VkCommandBuffer cb = vk_cmd();
@@ -9210,15 +9218,13 @@ static void copy_texture_to_buffer(const TexRefRec *src, uint64_t dst) {
     renderer_flush();  // the CPU may read the result right after the fence
     vk_readback_ready(readback_size);
     if (depth16_pack) {
-        // The guest buffer is D16 even though the host image is D32. Preserve guest row/image strides.
+        // The guest buffer is D16 even though the host image is D32 or D24. Preserve guest row/image strides.
         for (uint32_t z = 0; z < nz; z++)
             for (uint32_t y = 0; y < (uint32_t)rg[4]; y++)
                 for (uint32_t x = 0; x < (uint32_t)rg[3]; x++) {
-                    float depth;
-                    memcpy(&depth, (const uint8_t *)out.ptr + (uint64_t)z * img * 2 + (uint64_t)y * row * 2 + x * 4, sizeof depth);
-                    if (!(depth >= 0.0f)) depth = 0.0f;
-                    if (depth > 1.0f) depth = 1.0f;
-                    uint16_t value = (uint16_t)lroundf(depth * 65535.0f);
+                    uint32_t wide;
+                    memcpy(&wide, (const uint8_t *)out.ptr + (uint64_t)z * img * 2 + (uint64_t)y * row * 2 + x * 4, sizeof wide);
+                    uint16_t value = vk_depth16_in(wide, b->format);
                     memcpy((uint8_t *)(uintptr_t)dst + (uint64_t)z * img + (uint64_t)y * row + x * 2, &value, sizeof value);
                 }
     } else memcpy((void *)(uintptr_t)dst, out.ptr, total);
