@@ -1599,11 +1599,11 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
         });
     }
 
-    // the folder holding romfs/: dir itself or one below it (3 levels at most)
+    // the folder holding romfs/ or exefs/ (code mods: runtime/codemods.h): dir itself or one below it (3 levels at most)
     private Doc modFolder(Uri tree, Doc dir, int depth) {
         List<Doc> kids = children(tree, dir.id);
-        Doc r = named(kids, "romfs");
-        if (r != null && r.dir) return dir;
+        Doc r = named(kids, "romfs"), x = named(kids, "exefs");
+        if ((r != null && r.dir) || (x != null && x.dir)) return dir;
         if (depth >= 3) return null;
         for (Doc k : kids) {
             if (!k.dir) continue;
@@ -1641,7 +1641,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             }
             Doc mod = modFolder(tree, root, 0);
             if (mod == null) {
-                nativeModImportDone("0|No romfs folder in the selected folder.");
+                nativeModImportDone("0|No romfs or exefs folder in the selected folder.");
                 return;
             }
             String name = mod.name == null ? "mod" : mod.name.replaceAll("[^A-Za-z0-9 ._()\\-]", "_").trim();
@@ -1651,7 +1651,7 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             if (!mods.isDirectory() && !mods.mkdirs()) throw new IOException("Could not create the mods folder.");
             if (modInPlace) {  // its folder where it is: noted, not copied
                 String at = documentPath(mod.id);
-                if (at == null || !new File(at, "romfs").isDirectory())
+                if (at == null || !(new File(at, "romfs").isDirectory() || new File(at, "exefs").isDirectory()))
                     throw new IOException("This folder can't be used in place; choose Game files: Copy them, or a folder on the phone's storage.");
                 deleteTree(new File(mods, name));  // (a copy imported before: the noted folder from now on)
                 try (OutputStream o = new FileOutputStream(new File(mods, name + ".link"))) {
@@ -1663,8 +1663,9 @@ public class BOTWRecompAndroidActivity extends SDLActivity {
             new File(mods, name + ".link").delete();  // (one noted before: the copy from now on)
             stage = new File(mods, ".import-" + name);
             deleteTree(stage);
-            Doc romfsDoc = named(children(tree, mod.id), "romfs");
-            copyDocs(tree, romfsDoc, new File(stage, "romfs"));
+            Doc romfsDoc = named(children(tree, mod.id), "romfs"), exefsDoc = named(children(tree, mod.id), "exefs");
+            if (romfsDoc != null && romfsDoc.dir) copyDocs(tree, romfsDoc, new File(stage, "romfs"));
+            if (exefsDoc != null && exefsDoc.dir) copyDocs(tree, exefsDoc, new File(stage, "exefs"));  // (code mods)
             for (Doc k : children(tree, mod.id))  // (its notes: the menu shows one as its description)
                 if (!k.dir && k.name != null && k.name.toLowerCase().endsWith(".txt")) copyDoc(tree, k, new File(stage, k.name));
             File dst = new File(mods, name);
