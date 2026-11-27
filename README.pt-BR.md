@@ -14,7 +14,7 @@ O projeto parte do motor do **[LAS Recomp](https://github.com/peiikai/LASRecomp)
 > [!WARNING]
 > **Beta.** Testado principalmente em um celular (POCO F7 Ultra, Adreno 830, driver Mesa Turnip). O desempenho e a
 > compatibilidade variam entre aparelhos; espere bugs, sobretudo em GPUs ainda não testadas fisicamente. Veja as
-> [notas da 0.5.2-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.5.2-beta) e as
+> [notas da 0.5.3-beta](https://github.com/mamcjr/BOTWRecompAndroid/releases/tag/v0.5.3-beta) e as
 > [notas de desenvolvimento](docs/BOTW-PORT.md).
 
 ## Plataforma suportada
@@ -110,6 +110,8 @@ Windows, Linux e macOS podem continuar sendo usados como ambientes de desenvolvi
 - **0.5.2:** mods de código (#390): mods com pasta `exefs` (patches IPS do código do jogo e módulos extras como o
   `subsdk6`) agora funcionam, nos modos Recompilado e Nativo - por exemplo, a tradução árabe que forma o próprio texto;
   mais um crash com os alvos da Pedra Sheikah coberto (#401). O código do jogo precisa ser compilado de novo uma vez.
+- **0.5.3:** Compatibilidade do driver > **Profundidade de 16 bits (sombras)**: D16, D32 ou D24. O Automático dos
+  Huawei Maleoon agora é D24 em vez de D32, que deixava cenas inteiras escuras (#516; o 920C da #240 recusa D16 e D32).
 - **Problemas conhecidos:** a grama baixa só aparece de perto; reflexos da água podem acompanhar a câmera; o fundo
   do menu de pausa pode ficar preto no driver padrão da Qualcomm; Link pode piscar no primeiro golpe no modo nativo;
   a chuva cai mais devagar que no console.
@@ -165,7 +167,8 @@ Desde a **0.2.12-beta**, enquanto você joga no mundo, os controles de toque mos
    **Configurações > Arquivos > Driver Vulkan**. Se o app informar que o driver Vulkan é antigo ao abrir, toque e
    segure o ícone do app e escolha **Escolher driver** antes de iniciar o jogo.
 
-Atualizar para a 0.5.2-beta exige compilar o código do jogo de novo uma vez (a tela inicial pede). Os shaders são compilados novamente uma
+Atualizar para a 0.5.3-beta a partir da 0.5.2 não exige compilar o código do jogo; de versões anteriores, exige uma
+vez (a tela inicial pede). Os shaders são compilados novamente uma
 vez, então os primeiros minutos podem ter travadinhas. Para relatar um problema, abra uma
 [issue](https://github.com/mamcjr/BOTWRecompAndroid/issues) com celular, GPU, driver, versão do jogo e um log de
 **Configurações > Arquivos > Salvar um arquivo de log**.
