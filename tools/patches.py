@@ -134,6 +134,52 @@ PATCHES_190[0x7000eb4a44] = _persp_matrix_182
 PATCHES_190[0x7000eb4a28] = _persp_get_aspect_182
 
 
+# A stale actor (SavageWindRecomp's, MIT: Revivedx bc6031e, its #391 #393): the game's target manager (the Sheikah
+# Slate's magnesis and camera targets) keeps a pointer to an actor that is already gone. The helper that asks an actor
+# for its link (1.9.0 0x700120bc40: actor + 0x570, then + 0x88) got a freed pointer - here #415 #596, "accessing
+# 0x...3f800570 in the game's code" at main+120bc44: two floats 1.0 where the actor was, plus 0x570 - and one inline copy
+# of it (1.9.0 0x7000dea400, the camera target) an actor whose + 0x570 is null (accessing 0x88). Both now treat such an
+# actor as none: the helper answers 0, the inline copy leaves its function by the path of "no target". An actor, and its
+# link, are in the guest window (rt.h: GUEST_LO .. + 0x320000000; the address below moves with it, gen.py rebase_patch).
+_IN_WINDOW = '(%s - 0x7000000000ull < 0x320000000ull)'
+
+
+def _stale_actor_helper(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w & 0xff00001f == 0xb4000000, hex(w)  # cbz x0, <ret>
+    nxt = struct.unpack_from('<I', gen.nso.image, a + 4 - gen.base)[0]
+    assert nxt == 0xf942b808, hex(nxt)  # ldr x8, [x0, #0x570]
+    target = a + (((w >> 5) & 0x7ffff) - (1 << 19 if w >> 23 & 1 else 0)) * 4
+    return ('{ extern void rt_stale_actor(void); '
+            f'if (!c->x[0]) goto L_{target:x}; '
+            f'if (!{_IN_WINDOW % "c->x[0]"} || !{_IN_WINDOW % "LD64(c->x[0] + 0x570ull)"}) '
+            f'{{ rt_stale_actor(); c->x[0] = 0; goto L_{target:x}; }} }}'
+            f'  /* {a:#x}: cbz x0 (a stale actor: none; tools/patches.py) */')
+
+
+def _stale_actor_target(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0xf942ba68, hex(w)  # ldr x8, [x19, #0x570]
+    # the epilogue of "no target": the fall-through of the cbnz x19 that jumps to this code (the function's early exit)
+    exit_at = None
+    for b in range(a - 4, a - 0x80, -4):
+        if struct.unpack_from('<I', gen.nso.image, b - gen.base)[0] & 0xff00001f == 0xb5000013:  # cbnz x19
+            exit_at = b + 4
+            break
+    assert exit_at, 'stale actor target: no cbnz x19 above %#x' % a
+    return ('{ extern void rt_stale_actor(void); '
+            f'if (!{_IN_WINDOW % "c->x[19]"} || !{_IN_WINDOW % "LD64(c->x[19] + 0x570ull)"}) '
+            f'{{ rt_stale_actor(); goto L_{exit_at:x}; }} '
+            'c->x[8] = LD64(c->x[19] + 0x570ull); }'
+            f'  /* {a:#x}: ldr x8, [x19, #0x570] (a stale camera target: none; tools/patches.py) */')
+
+
+PATCHES_190[0x700120bc40] = _stale_actor_helper
+PATCHES_190[0x7000dea400] = _stale_actor_target
+PATCHES_182[0x70010f7eb0] = _stale_actor_helper  # (tools/port_addrs.py from 1.9.0's; 1.6.0 / 1.0.0: no unique match)
+PATCHES_182[0x7000cd7160] = _stale_actor_target
+
+
 def patches_for(build_id):
     """The patches for a module, by its build id (sdk and anything unknown: none)."""
     return {BUILD_1_0_0: PATCHES, BUILD_1_6_0: PATCHES_160, BUILD_1_8_2: PATCHES_182, BUILD_1_9_0: PATCHES_190}.get(build_id[:32], {})

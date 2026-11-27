@@ -183,6 +183,14 @@ uint64_t framepace_period_ns(void) {
 // The frame loop's vsync wait: the present keeps the pace instead (1: skipped; 0: the game's own wait).
 int rt_frame_wait(void) { return framepace_on(); }
 
+// A stale actor in the game's target manager was ignored (tools/patches.py _stale_actor_helper / _stale_actor_target;
+// SavageWindRecomp's, #415 #596): the game would have crashed on it. Logged the first five times, then each power of two.
+void rt_stale_actor(void) {
+    static uint32_t n;
+    uint32_t k = __atomic_add_fetch(&n, 1, __ATOMIC_RELAXED);
+    if (k <= 5 || (k & (k - 1)) == 0) LOG("[game] a stale actor in the target manager was ignored (%u so far)\n", k);
+}
+
 // ------------------------------------------------------------------ presents
 // The controllers (sead::ControllerBase::updateDerivativeParams_, 0x7000d9d8a0) count how long each button has been
 // held, in frames, by a step the game keeps at 1 (a float at 0x7001c4ba40, read there only): the runtime sets it to
