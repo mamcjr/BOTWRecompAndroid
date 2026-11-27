@@ -133,7 +133,10 @@ static int by_str(const void *x, const void *y) { return strcmp((const char *)x,
 void codemods_find(const char *main_path, CodeMods *out) {
     memset(out, 0, sizeof *out);
     uint8_t h[0x60];
-    if (!read_header(main_path, h)) return;
+    if (!read_header(main_path, h)) {
+        LOG("[codemods] %s: no main there - no code mods looked for\n", main_path);
+        return;
+    }
     char bid[65];
     for (int i = 0; i < 32; i++) snprintf(bid + 2 * i, 3, "%02x", h[0x40 + i]);
     uint64_t hash = 0xcbf29ce484222325ull;
@@ -161,7 +164,6 @@ void codemods_find(const char *main_path, CodeMods *out) {
                 if (out->nips == CODEMODS_IPS_MAX) { LOG("[codemods] %s: too many patches, left out\n", path); continue; }
                 snprintf(out->ips[out->nips++], sizeof out->ips[0], "%s", path);
                 hash = hash_file(hash, f, path);
-                LOG("[codemods] %s: a patch for main\n", path);
             } else if (!strncmp(f, "subsdk", 6) && isdigit((unsigned char)f[6]) && !f[7] && f[6] != '0') {
                 bool dup = false;
                 for (int j = 0; j < out->nmod; j++) dup |= !strcmp(out->mod_name[j], f);
@@ -172,7 +174,6 @@ void codemods_find(const char *main_path, CodeMods *out) {
                 snprintf(out->mod_name[out->nmod], sizeof out->mod_name[0], "%s", f);
                 snprintf(out->mod_path[out->nmod++], sizeof out->mod_path[0], "%s", path);
                 hash = hash_file(hash, f, path);
-                LOG("[codemods] %s: a module\n", path);
             } else if (strcasecmp(f + (strlen(f) > 4 ? strlen(f) - 4 : 0), ".ips") == 0 || !strcmp(f, "main") ||
                        !strcmp(f, "sdk") || !strcmp(f, "rtld") || !strcmp(f, "subsdk0") || strstr(f, ".pchtxt")) {
                 LOG("[codemods] %s: not used (another game version's patch, or a replaced game module)\n", path);
@@ -180,6 +181,13 @@ void codemods_find(const char *main_path, CodeMods *out) {
         }
     }
     if (out->nips || out->nmod) out->hash = hash ? hash : 1;
+    static uint64_t logged = 1;  // (once per change: the start screen asks every frame)
+    if (logged != out->hash) {
+        logged = out->hash;
+        LOG("[codemods] %d mods in mods/: %d patches for main, %d modules\n", n, out->nips, out->nmod);
+        for (int i = 0; i < out->nips; i++) LOG("[codemods]   patch %s\n", out->ips[i]);
+        for (int i = 0; i < out->nmod; i++) LOG("[codemods]   module %s\n", out->mod_path[i]);
+    }
 }
 #else
 void codemods_find(const char *main_path, CodeMods *out) {
