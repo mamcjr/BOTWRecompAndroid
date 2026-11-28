@@ -27,6 +27,9 @@
 #include "shaders.h"
 #include "shader_meta_cache.h"
 #include "vk.h"
+#ifdef __ANDROID__
+#include "bc_astc_policy.h"
+#endif
 #define CBWIN_SPAN_TYPE
 typedef VkSpan CbwinSpan;
 #include "cbwin_snap.h"
@@ -2588,7 +2591,6 @@ static void begin_pass(void) {
             if (st.rt.color[j] == t && ((unowned_slots >> j) & 1)) was_unowned = true;
         if (was_unowned && i < 8) unowned_slots |= 1u << i;
         if (lv) vk_tex_upload_for_mips(t);
-        renderer_mark_gpu_owned(t);
         VkFormat vf = VK_FORMAT_UNDEFINED;  // the attachment's format and extent
         uint32_t ew = 0, eh = 0;
         VkImageView v = VK_NULL_HANDLE;
@@ -2597,11 +2599,28 @@ static void begin_pass(void) {
             vk_tex(t, true);
             v = vk_bc_shadow_view(t, &st.rt.cview[i], &vf, &ew, &eh);
         }
+        TexBackend *ba = t->backend;
+        if (!v && ba && ba->bc_astc_mode != VK_BC_ASTC_NONE) {
+            // ASTC images lack COLOR_ATTACHMENT_BIT; non-shadow draws/clears cannot target them directly.
+            static int nlog;
+            if (nlog++ < 4) LOG("[vk] target %ux%u (nvn %#x) drawn into without BC shadow: skipped (ASTC mode %u)\n",
+                                t->width, t->height, t->format, ba->bc_astc_mode);
+            continue;
+        }
 #endif
+        renderer_mark_gpu_owned(t);
         bool bc_shadow = v != VK_NULL_HANDLE;
         if (!v) v = vk_view(t, &st.rt.cview[i], st.rt.has_cview[i], true, TEXTYPE_2D);
         TexBackend *b = t->backend;
         if (!v) continue;
+#ifdef __ANDROID__
+        if (!bc_shadow && b && b->bc_astc_mode != VK_BC_ASTC_NONE) {
+            static int nlog;
+            if (nlog++ < 4) LOG("[vk] target %ux%u (nvn %#x) drawn into without BC shadow: skipped (ASTC mode %u)\n",
+                                t->width, t->height, t->format, b->bc_astc_mode);
+            continue;
+        }
+#endif
         if (!vf) {
             bool view_fmt = st.rt.has_cview[i] && (st.rt.cview[i].setmask & 4);
             if (view_fmt && vk_format(t->format) != b->format && rt_kind(st.rt.cview[i].format) != rt_kind(t->format)) {
@@ -4431,8 +4450,15 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
     // reads got an empty dummy, layers 3-7 and the mips stayed zero, and that ground was drawn flat and low
     // (forests floating below the plateau, Link sunk into the grass).
     uint32_t nl = src->depth > 1 ? 1 : (src->layers ? src->layers : 1), nm = src->levels ? src->levels : 1;
+#ifdef __ANDROID__
+    uint8_t src_bc_astc = src->bc_astc_mode;
+#endif
     if (d->image && (d->width != src->width || d->height != src->height || d->format != src->format || d->layers != nl ||
-                     d->levels != nm)) {
+                     d->levels != nm ||
+#ifdef __ANDROID__
+                     d->bc_astc_mode != src_bc_astc ||
+#endif
+                     false)) {
         vk_views_forget(d);  // (resolution change)
         vk_defer_image(d->image, d->mem);
         d->image = VK_NULL_HANDLE;
@@ -4447,6 +4473,9 @@ static TexBackend *snapshot_image(NvnTexture *t, TexBackend *src) {
         VK_CHECK(vmaCreateImage(g_vk.vma, &ci, &ai, &d->image, &d->mem, NULL));
         d->format = src->format; d->width = src->width; d->height = src->height; d->depth = 1; d->layers = nl; d->levels = nm;
         d->samples = src->samples; d->aspect = src->aspect; d->base_type = nl > 1 ? VK_IMAGE_VIEW_TYPE_2D_ARRAY : VK_IMAGE_VIEW_TYPE_2D;
+#ifdef __ANDROID__
+        d->bc_astc_mode = src_bc_astc;
+#endif
         vk_image_init_layout(vk_cmd(), d->image, d->aspect);
     }
     return d;
@@ -9132,6 +9161,14 @@ static void copy_buffer_to_texture(uint64_t src, const TexRefRec *dst) {
         if (nlog++ < 5) LOG("[vk] buffer -> ASTC texture copy skipped (%ux%u)\n", t->width, t->height);
         return;
     }
+#ifdef __ANDROID__
+    if (b->bc_astc_mode != VK_BC_ASTC_NONE) {
+        static int nlog;
+        if (nlog++ < 5) LOG("[vk] buffer -> BC-transcoded ASTC texture copy skipped (%ux%u nvn %#x)\n",
+                            t->width, t->height, t->format);
+        return;
+    }
+#endif
     bool array = b->layers > 1 && b->depth == 1;
     uint32_t hb = ((uint32_t)rg[4] + fi->bh - 1) / fi->bh, wb = ((uint32_t)rg[3] + fi->bw - 1) / fi->bw;
     bool depth16_expand = vk_depth16_wide(t->format, b->format);
@@ -9317,12 +9354,25 @@ static void copy_texture(const TexRefRec *src, const TexRefRec *dst, uint64_t fl
         return;
     }
     if (s->samples != d->samples) return;
-    if (sw == dw && sh == dh && s->format == d->format) {
+    if (sw == dw && sh == dh && s->format == d->format
+#ifdef __ANDROID__
+        && s->bc_astc_mode == d->bc_astc_mode
+#endif
+    ) {
         VkImageCopy c = {.srcSubresource = {sa, slv, sly, 1}, .srcOffset = {sx0, sy0, 0}, .dstSubresource = {da, dlv, dly, 1},
                          .dstOffset = {dx0, dy0, 0}, .extent = {(uint32_t)sw, (uint32_t)sh, 1}};
         vkCmdCopyImage(cb, s->image, VK_IMAGE_LAYOUT_GENERAL, d->image, VK_IMAGE_LAYOUT_GENERAL, 1, &c);
         return;
     }
+#ifdef __ANDROID__
+    // ASTC images lack BLIT_DST_BIT (and BC5 LA stores G in A), so never issue vkCmdBlitImage to/across them.
+    if (s->bc_astc_mode == VK_BC_ASTC_LA || d->bc_astc_mode != VK_BC_ASTC_NONE || vk_format_is_astc_ldr(d->format)) {
+        static int nlog;
+        if (nlog++ < 5) LOG("[vk] ASTC/BC-transcoded copy skipped (%d/%u -> %d/%u %dx%d -> %dx%d)\n",
+                            s->format, s->bc_astc_mode, d->format, d->bc_astc_mode, sw, sh, dw, dh);
+        return;
+    }
+#endif
     // scaled / converting copy: the game builds its depth pyramid this way (nearest), colour copies filter if asked
     bool depth = (sa | da) & (VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT);
     if (depth && s->format != d->format) return;

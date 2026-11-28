@@ -68,7 +68,7 @@ typedef struct { uint32_t bpb, bw, bh; } FormatInfo;
 typedef struct { const FormatInfo *fmt; } TexLayout;
 typedef struct {
     TexLayout layout;
-    uint32_t format, width, height;
+    uint32_t format, width, height, flags, target, samples;
     void *backend;
 } NvnTexture;
 typedef struct {
@@ -90,10 +90,17 @@ typedef struct {
 typedef struct {
     VkFormat format;
     VkFormat bc_vf;
+    uint8_t bc_astc_mode;
     VkImageAspectFlags aspect;
     bool fixed_fmt;
     VkFormat view_alt;
 } TexBackend;
+
+enum {
+    VK_BC_ASTC_NONE = 0,
+    VK_BC_ASTC_RGBA = 1,
+    VK_BC_ASTC_LA = 2,
+};
 
 static struct { NvnDescPool *tpool, *spool; } st;
 static bool mock_filters_linear_91 = false;
@@ -115,7 +122,13 @@ static VkFmt fmt_of(uint32_t nvn_fmt) {
 }
 static VkFormat vk_format(uint32_t nvn_fmt) { return fmt_of(nvn_fmt).vf; }
 static bool is_bc(VkFormat f) { return f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_BC7_SRGB_BLOCK; }
-static VkFormat bc_target(VkFormat bc, uint32_t *bpp) { *bpp = 4; (void)bc; return VK_FORMAT_R8G8B8A8_UNORM; }
+static VkFormat bc_target_ex(VkFormat bc, bool allow_astc, uint32_t *bpp, uint8_t *astc_mode) {
+    (void)bc;
+    (void)allow_astc;
+    *bpp = 4;
+    if (astc_mode) *astc_mode = VK_BC_ASTC_NONE;
+    return VK_FORMAT_R8G8B8A8_UNORM;
+}
 static bool renderer_format_is_depth(uint32_t f) { (void)f; return false; }
 static VkImageAspectFlags aspect_of(uint32_t f) { (void)f; return VK_IMAGE_ASPECT_COLOR_BIT; }
 static int naliases = 0;

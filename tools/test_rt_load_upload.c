@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #include "../runtime/nvn/formats.c"
@@ -94,6 +95,8 @@ uint32_t texpatch_generation(void) { return 0; }
 void texpatch_apply(int id, uint32_t lv, uint8_t *b, uint32_t w, uint32_t h, uint32_t r) { (void)id, (void)lv, (void)b, (void)w, (void)h, (void)r; }
 void astc_decode_ldr(const uint8_t *b, uint32_t w, uint32_t h, uint32_t bw, uint32_t bh, bool sr, uint8_t *o) { (void)b, (void)w, (void)h, (void)bw, (void)bh, (void)sr, (void)o; }
 void bc1_to_astc(const uint8_t *b, uint8_t *a, uint64_t n) { (void)b, (void)a, (void)n; }
+void bc3_to_astc(const uint8_t *b, uint8_t *a, uint64_t n) { (void)b, (void)a, (void)n; }
+void bc5_unorm_to_astc_la(const uint8_t *b, uint8_t *a, uint64_t n) { (void)b, (void)a, (void)n; }
 const unsigned char *smaa_area_tex(void) { return NULL; }
 const unsigned char *smaa_search_tex(void) { return NULL; }
 uint64_t device_integer(int id) { (void)id; return 128; }
@@ -177,6 +180,8 @@ typedef struct { VkCommandBuffer handle; MockOp ops[512]; int nops; } MockCb;
 
 static MockImg m_imgs[128]; static MockBuf m_bufs[128]; static MockView m_views[256]; static MockCb m_cbs[64];
 static int n_imgs, n_bufs, n_views, n_cbs, stat_b2i, stat_in_up, stat_in_main, stat_bar, stat_up_bar, stat_sc_bar, stat_dispatch, stat_cbuf, cbuf_bars[8], mock_hazards;
+static bool mock_no_bc = false;
+static int stat_views_created, stat_copies, stat_blits;
 static MockCb *act_cb; static MockImg *act_att0; static VkAttachmentLoadOp last_lop[8];
 static MockImg *find_img(VkImage im) { for (int i = 0; i < n_imgs; i++) if (m_imgs[i].handle == im) return &m_imgs[i]; return NULL; }
 static MockBuf *find_buf(VkBuffer b) { for (int i = 0; i < n_bufs; i++) if (m_bufs[i].handle == b) return &m_bufs[i]; return NULL; }
@@ -241,11 +246,25 @@ static VKAPI_ATTR VkResult VKAPI_CALL m_wfences(VkDevice d, uint32_t n, const Vk
 static VKAPI_ATTR VkResult VKAPI_CALL m_wsems(VkDevice d, const VkSemaphoreWaitInfo *w, uint64_t t) { (void)d, (void)w, (void)t; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL m_gsem(VkDevice d, VkSemaphore s, uint64_t *v) { (void)d, (void)s; *v = submit_seq; return VK_SUCCESS; }
 static VKAPI_ATTR void VKAPI_CALL m_fprops(VkPhysicalDevice pd, VkFormat f, VkFormatProperties *p) {
-    (void)pd, (void)f; memset(p, 0, sizeof *p);
+    (void)pd; memset(p, 0, sizeof *p);
+    if (mock_no_bc && is_bc(f)) return;
+    if (vk_format_is_astc_ldr(f)) {
+        p->optimalTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
+                                   VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT |
+                                   VK_FORMAT_FEATURE_BLIT_SRC_BIT;
+        return;
+    }
     p->optimalTilingFeatures = VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT | VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT | VK_FORMAT_FEATURE_TRANSFER_SRC_BIT | VK_FORMAT_FEATURE_TRANSFER_DST_BIT | VK_FORMAT_FEATURE_BLIT_SRC_BIT | VK_FORMAT_FEATURE_BLIT_DST_BIT;
 }
 static VKAPI_ATTR VkResult VKAPI_CALL mc_view(VkDevice d, const VkImageViewCreateInfo *ci, const VkAllocationCallbacks *a, VkImageView *v) {
-    (void)d, (void)a; MockView *mv = &m_views[n_views++]; mv->img = find_img(ci->image); mv->handle = (VkImageView)(uintptr_t)(0x50000 + n_views); *v = mv->handle; return VK_SUCCESS;
+    (void)d, (void)a;
+    uint32_t id = (uint32_t)(n_views++);
+    MockView *mv = &m_views[id & 255u];
+    mv->img = find_img(ci->image);
+    mv->handle = (VkImageView)(uintptr_t)(0x50000 + id + 1u);
+    *v = mv->handle;
+    stat_views_created++;
+    return VK_SUCCESS;
 }
 static VKAPI_ATTR void VKAPI_CALL md_view(VkDevice d, VkImageView v, const VkAllocationCallbacks *a) { (void)d, (void)v, (void)a; }
 static VKAPI_ATTR void VKAPI_CALL m_clr_col(VkCommandBuffer cb, VkImage im, VkImageLayout l, const VkClearColorValue *cv, uint32_t n, const VkImageSubresourceRange *r) {
@@ -266,6 +285,7 @@ static VKAPI_ATTR void VKAPI_CALL m_i2b(VkCommandBuffer cb, VkImage im, VkImageL
 }
 static VKAPI_ATTR void VKAPI_CALL m_copy_img(VkCommandBuffer cb, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageCopy *r) {
     if (act_cb || sl != VK_IMAGE_LAYOUT_GENERAL || dl != VK_IMAGE_LAYOUT_GENERAL) mock_hazards++; MockCb *c = find_cb(cb);
+    stat_copies++;
     for (uint32_t k = 0; k < n; k++) c->ops[c->nops++] = (MockOp){.op = MOP_COPY, .img = find_img(s), .dst_img = find_img(d), .ic = r[k]};
 }
 static VKAPI_ATTR void VKAPI_CALL m_bar2(VkCommandBuffer cb, const VkDependencyInfo *di) {
@@ -330,7 +350,10 @@ static VKAPI_ATTR VkResult VKAPI_CALL m_submit2(VkQueue q, uint32_t nsub, const 
                 } else if (o->op == MOP_B2I && o->img && o->buf && !o->bic.imageSubresource.mipLevel) {
                     chk_w(o->img, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_WRITE_BIT);
                     uint32_t w = o->bic.imageExtent.width, h = o->bic.imageExtent.height, bpb = o->img->bpb, rl = o->bic.bufferRowLength ? o->bic.bufferRowLength : w;
-                    for (uint32_t y = 0; y < h; y++) memcpy(o->img->px + ((size_t)(o->bic.imageOffset.y + y) * o->img->w + o->bic.imageOffset.x) * bpb, o->buf->ptr + o->bic.bufferOffset + (size_t)y * rl * bpb, (size_t)w * bpb);
+                    if ((uint64_t)o->bic.bufferOffset + (uint64_t)h * rl * bpb <= o->buf->size &&
+                        o->bic.imageOffset.x + (int32_t)w <= (int32_t)o->img->w &&
+                        o->bic.imageOffset.y + (int32_t)h <= (int32_t)o->img->h)
+                        for (uint32_t y = 0; y < h; y++) memcpy(o->img->px + ((size_t)(o->bic.imageOffset.y + y) * o->img->w + o->bic.imageOffset.x) * bpb, o->buf->ptr + o->bic.bufferOffset + (size_t)y * rl * bpb, (size_t)w * bpb);
                     o->img->pending_write_stage |= VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT; o->img->pending_write_access |= VK_ACCESS_2_TRANSFER_WRITE_BIT;
                 } else if (o->op == MOP_COPY && o->img && o->dst_img && !o->ic.srcSubresource.mipLevel) {
                     chk_r(o->img, VK_PIPELINE_STAGE_2_ALL_TRANSFER_BIT, VK_ACCESS_2_TRANSFER_READ_BIT);
@@ -367,7 +390,7 @@ static VKAPI_ATTR VkResult VKAPI_CALL m_submit2(VkQueue q, uint32_t nsub, const 
 static VKAPI_ATTR void VKAPI_CALL n_vp(VkCommandBuffer c, uint32_t f, uint32_t n, const VkViewport *v) { (void)c, (void)f, (void)n, (void)v; }
 static VKAPI_ATTR void VKAPI_CALL n_sc(VkCommandBuffer c, uint32_t f, uint32_t n, const VkRect2D *r) { (void)c, (void)f, (void)n, (void)r; }
 static VKAPI_ATTR void VKAPI_CALL n_cbuf(VkCommandBuffer c, VkBuffer s, VkBuffer d, uint32_t n, const VkBufferCopy *r) { (void)c, (void)s, (void)d, (void)n, (void)r; cbuf_bars[stat_cbuf++ & 7] = stat_bar; }
-static VKAPI_ATTR void VKAPI_CALL n_blit(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageBlit *r, VkFilter f) { (void)c, (void)s, (void)sl, (void)d, (void)dl, (void)n, (void)r, (void)f; }
+static VKAPI_ATTR void VKAPI_CALL n_blit(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageBlit *r, VkFilter f) { (void)c, (void)s, (void)sl, (void)d, (void)dl, (void)n, (void)r, (void)f; stat_blits++; }
 static VKAPI_ATTR void VKAPI_CALL n_res(VkCommandBuffer c, VkImage s, VkImageLayout sl, VkImage d, VkImageLayout dl, uint32_t n, const VkImageResolve *r) { (void)c, (void)s, (void)sl, (void)d, (void)dl, (void)n, (void)r; }
 static VKAPI_ATTR void VKAPI_CALL n_pipe(VkCommandBuffer c, VkPipelineBindPoint p, VkPipeline pi) { (void)c, (void)p, (void)pi; }
 static VKAPI_ATTR void VKAPI_CALL n_sets(VkCommandBuffer c, VkPipelineBindPoint p, VkPipelineLayout l, uint32_t f, uint32_t nc, const VkDescriptorSet *s, uint32_t nd, const uint32_t *d) { (void)c, (void)p, (void)l, (void)f, (void)nc, (void)s, (void)nd, (void)d; }
@@ -519,6 +542,33 @@ static void *seqlock_writer_fn(void *arg) {
     atomic_store_explicit(&ctx->stop, true, memory_order_release);
     return NULL;
 }
+
+#ifdef __ANDROID__
+static NvnTexture make_bc_tex(uint32_t fmt, uint32_t w, uint32_t h, uint32_t flags, uint32_t target, uint32_t samples) {
+    const FormatInfo *fi = nvn_format_info(fmt);
+    return (NvnTexture){.target = target, .format = fmt, .flags = flags, .width = w, .height = h,
+                        .depth = 1, .levels = 1, .samples = samples,
+                        .layout = {.width = w, .height = h, .depth = 1, .layers = 1, .levels = 1, .fmt = fi}};
+}
+
+static bool run_bc_astc_cfg_fork(const char *ext_v, const char *bc1_v, const char *bc3_v, const char *bc5_v,
+                                 bool exp1, bool exp3, bool exp5) {
+    pid_t pid = fork();
+    if (pid < 0) return false;
+    if (pid == 0) {
+        if (ext_v) setenv("LARECOMP_BC_ASTC_EXT", ext_v, 1); else unsetenv("LARECOMP_BC_ASTC_EXT");
+        if (bc1_v) setenv("LARECOMP_BC1_ASTC", bc1_v, 1); else unsetenv("LARECOMP_BC1_ASTC");
+        if (bc3_v) setenv("LARECOMP_BC3_ASTC", bc3_v, 1); else unsetenv("LARECOMP_BC3_ASTC");
+        if (bc5_v) setenv("LARECOMP_BC5_ASTC", bc5_v, 1); else unsetenv("LARECOMP_BC5_ASTC");
+        mock_no_bc = true;
+        bool b1 = false, b3 = false, b5 = false;
+        bc_astc_cfg(&b1, &b3, &b5);
+        _exit((b1 == exp1 && b3 == exp3 && b5 == exp5) ? 0 : 1);
+    }
+    int st_w = 0;
+    return waitpid(pid, &st_w, 0) == pid && WIFEXITED(st_w) && WEXITSTATUS(st_w) == 0;
+}
+#endif
 
 int main(void) {
     setvbuf(stdout, NULL, _IONBF, 0);
@@ -1111,6 +1161,131 @@ int main(void) {
                ok_placed_shortcircuit, ok_retire_drop, ok_seqlock_mt, ok_cbwin_off, ok_reset, ok_non_cbwin_zero_churn);
     check("cbwin integration: base reuse, in/out updates, b2b/seqlock, retire, mt stress, #453, short-circuit, non-Mali off, zero non-cbwin churn, and reset", ok_cb_all);
     }
+
+#ifdef __ANDROID__
+    {
+    // 10. BC3 / BC5_UNORM -> ASTC 4x4 gating, env precedence, view_format, and exec.c safety guards.
+    bool ok_env =
+        run_bc_astc_cfg_fork(NULL, NULL, NULL, NULL, true, true, true) &&
+        run_bc_astc_cfg_fork("0", NULL, NULL, NULL, true, false, false) &&
+        run_bc_astc_cfg_fork("0", NULL, "1", NULL, true, true, false) &&
+        run_bc_astc_cfg_fork("0", NULL, NULL, "1", true, false, true) &&
+        run_bc_astc_cfg_fork("1", "0", "0", NULL, false, false, true) &&
+        run_bc_astc_cfg_fork("", NULL, NULL, NULL, true, true, true);
+
+    unsetenv("LARECOMP_BC_ASTC_EXT");
+    unsetenv("LARECOMP_BC1_ASTC");
+    unsetenv("LARECOMP_BC3_ASTC");
+    unsetenv("LARECOMP_BC5_ASTC");
+    mock_no_bc = true;
+
+    VkFormat bcvf = VK_FORMAT_UNDEFINED;
+    uint8_t bcam = 0;
+    bool astc_cpu = false;
+    NvnTexture t_bc3_u = make_bc_tex(0x44, 32, 32, 0, 1, 1);
+    NvnTexture t_bc3_s = make_bc_tex(0x48, 32, 32, 0, 1, 1);
+    NvnTexture t_bc5_u = make_bc_tex(0x4B, 32, 32, 0, 1, 1);
+    NvnTexture t_bc5_sn = make_bc_tex(0x4C, 32, 32, 0, 1, 1);
+    bool ok_fmt =
+        resolve_tex_format(&t_bc3_u, &bcvf, &bcam, &astc_cpu, true) == VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
+        bcvf == VK_FORMAT_BC3_UNORM_BLOCK && bcam == VK_BC_ASTC_RGBA && !astc_cpu &&
+        resolve_tex_format(&t_bc3_s, &bcvf, &bcam, &astc_cpu, true) == VK_FORMAT_ASTC_4x4_SRGB_BLOCK &&
+        bcvf == VK_FORMAT_BC3_SRGB_BLOCK && bcam == VK_BC_ASTC_RGBA && !astc_cpu &&
+        resolve_tex_format(&t_bc5_u, &bcvf, &bcam, &astc_cpu, true) == VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
+        bcvf == VK_FORMAT_BC5_UNORM_BLOCK && bcam == VK_BC_ASTC_LA && !astc_cpu &&
+        resolve_tex_format(&t_bc5_sn, &bcvf, &bcam, &astc_cpu, true) == VK_FORMAT_R8G8_SNORM &&
+        bcvf == VK_FORMAT_BC5_SNORM_BLOCK && bcam == VK_BC_ASTC_NONE && !astc_cpu;
+
+    const uint32_t excl_fmts[3] = {0x42, 0x44, 0x4B};
+    const uint32_t excl_cases[5][3] = {{8, 1, 1}, {0, 2, 1}, {0, 0, 1}, {0, 3, 1}, {0, 1, 4}};
+    bool ok_excl = true;
+    for (int fi = 0; fi < 3; fi++) {
+        VkFormat exp_f = excl_fmts[fi] == 0x4B ? VK_FORMAT_R8G8_UNORM : VK_FORMAT_R8G8B8A8_UNORM;
+        for (int ci = 0; ci < 5; ci++) {
+            NvnTexture ex = make_bc_tex(excl_fmts[fi], 32, 32, excl_cases[ci][0], excl_cases[ci][1], excl_cases[ci][2]);
+            VkFormat gv = resolve_tex_format(&ex, &bcvf, &bcam, &astc_cpu, true);
+            if (gv != exp_f || bcam != VK_BC_ASTC_NONE) ok_excl = false;
+        }
+    }
+
+    NvnTextureView v_srgb = {.format = 0x48, .setmask = 4};
+    NvnTextureView v_unorm = {.format = 0x44, .setmask = 4};
+    NvnTextureView v_bc5s = {.format = 0x4C, .setmask = 4};
+    bool ok_views =
+        view_format(VK_FORMAT_ASTC_4x4_UNORM_BLOCK, VK_FORMAT_BC3_UNORM_BLOCK, VK_BC_ASTC_RGBA,
+                    VK_IMAGE_ASPECT_COLOR_BIT, false, VK_FORMAT_UNDEFINED, &t_bc3_u, &v_srgb, true, false) ==
+            VK_FORMAT_ASTC_4x4_SRGB_BLOCK &&
+        view_format(VK_FORMAT_ASTC_4x4_SRGB_BLOCK, VK_FORMAT_BC3_SRGB_BLOCK, VK_BC_ASTC_RGBA,
+                    VK_IMAGE_ASPECT_COLOR_BIT, false, VK_FORMAT_UNDEFINED, &t_bc3_s, &v_unorm, true, false) ==
+            VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
+        view_format(VK_FORMAT_ASTC_4x4_UNORM_BLOCK, VK_FORMAT_BC5_UNORM_BLOCK, VK_BC_ASTC_LA,
+                    VK_IMAGE_ASPECT_COLOR_BIT, false, VK_FORMAT_UNDEFINED, &t_bc5_u, &v_unorm, true, false) ==
+            VK_FORMAT_ASTC_4x4_UNORM_BLOCK &&
+        view_format(VK_FORMAT_ASTC_4x4_UNORM_BLOCK, VK_FORMAT_BC5_UNORM_BLOCK, VK_BC_ASTC_LA,
+                    VK_IMAGE_ASPECT_COLOR_BIT, false, VK_FORMAT_UNDEFINED, &t_bc5_u, &v_bc5s, true, false) ==
+            VK_FORMAT_ASTC_4x4_UNORM_BLOCK;
+
+    NvnTexture t_bc3 = make_bc_tex(0x44, 32, 32, 0, 1, 1);
+    NvnTexture t_bc3_b = make_bc_tex(0x44, 32, 32, 0, 1, 1);
+    NvnTexture t_bc5 = make_bc_tex(0x4B, 32, 32, 0, 1, 1);
+    NvnTexture t_bc5_sm = make_bc_tex(0x4B, 16, 16, 0, 1, 1);
+    NvnTexture t_rgba = make_bc_tex(0x25, 32, 32, 0, 1, 1);
+    vk_tex(&t_bc3, false);
+    vk_tex(&t_bc3_b, false);
+    vk_tex(&t_bc5, false);
+    vk_tex(&t_bc5_sm, false);
+    vk_tex(&t_rgba, false);
+    renderer_flush();
+
+    int vc0 = stat_views_created;
+    reset_pass(&t_bc3, NULL, 0xF, NULL);
+    begin_pass();
+    bool ok_rt_skip = in_pass && pass_color[0] == VK_FORMAT_UNDEFINED &&
+                      !((TexBackend *)t_bc3.backend)->gpu_owned && stat_views_created == vc0;
+    vk_end_pass();
+    renderer_flush();
+
+    int b2i0 = stat_b2i;
+    TexRefRec dst_bc3 = {.tex = (uint64_t)(uintptr_t)&t_bc3};
+    copy_buffer_to_texture((uint64_t)(uintptr_t)alloc_guest(1024), &dst_bc3);
+    renderer_flush();
+    bool ok_b2t_skip = stat_b2i == b2i0;
+
+    int cpy0 = stat_copies, blt0 = stat_blits;
+    TexRefRec sr_3 = {.tex = (uint64_t)(uintptr_t)&t_bc3}, dr_3b = {.tex = (uint64_t)(uintptr_t)&t_bc3_b};
+    copy_texture(&sr_3, &dr_3b, 0);
+    renderer_flush();
+    bool ok_copy_same = stat_copies == cpy0 + 1 && stat_blits == blt0;
+
+    int cpy1 = stat_copies, blt1 = stat_blits;
+    TexRefRec sr_la = {.tex = (uint64_t)(uintptr_t)&t_bc5_sm}, dr_rb = {.tex = (uint64_t)(uintptr_t)&t_rgba};
+    copy_texture(&sr_la, &dr_rb, 1);
+    copy_texture(&dr_rb, &sr_la, 1);
+    renderer_flush();
+    bool ok_blit_skip = stat_copies == cpy1 && stat_blits == blt1;
+
+    TexBackend *sn0 = snapshot_image(&t_bc3, (TexBackend *)t_bc3.backend);
+    VkImage img0 = sn0 ? sn0->image : VK_NULL_HANDLE;
+    TexBackend *sn1 = snapshot_image(&t_bc3, (TexBackend *)t_bc5.backend);
+    bool ok_snap = sn0 && sn0 == sn1 && img0 != VK_NULL_HANDLE &&
+                   sn1->image != img0 && sn1->bc_astc_mode == VK_BC_ASTC_LA;
+
+    backend_texture_destroyed(&t_bc3);
+    backend_texture_destroyed(&t_bc3_b);
+    backend_texture_destroyed(&t_bc5);
+    backend_texture_destroyed(&t_bc5_sm);
+    backend_texture_destroyed(&t_rgba);
+    snapshots_invalidate(NULL);
+    mock_no_bc = false;
+    renderer_flush();
+
+    if (!(ok_env && ok_fmt && ok_excl && ok_views && ok_rt_skip && ok_b2t_skip && ok_copy_same && ok_blit_skip && ok_snap))
+        printf("  bc_astc fail: env=%d fmt=%d excl=%d views=%d rtskip=%d b2tskip=%d copy=%d blitskip=%d snap=%d\n",
+               ok_env, ok_fmt, ok_excl, ok_views, ok_rt_skip, ok_b2t_skip, ok_copy_same, ok_blit_skip, ok_snap);
+    check("BC3/BC5_UNORM ASTC gating, env precedence, view_format, and exec.c ASTC guards",
+          ok_env && ok_fmt && ok_excl && ok_views && ok_rt_skip && ok_b2t_skip && ok_copy_same && ok_blit_skip && ok_snap);
+    }
+#endif
 
     check("Vulkan mock synchronization validator recorded 0 hazards", !mock_hazards);
     printf("test_rt_load_upload: %s (%d failure(s))\n", failures ? "FAILED" : "all passed", failures);
