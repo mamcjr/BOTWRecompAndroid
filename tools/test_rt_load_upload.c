@@ -7,6 +7,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/stat.h>
 #include <unistd.h>
 
 #include "../runtime/nvn/formats.c"
@@ -66,6 +67,10 @@ uint64_t vk_frame_counter(void) { return s_frame_counter; }
 uint64_t renderer_present_count(void) { return s_frame_counter; }
 int vk_between_fps(void) { return 30; }
 int fps_mode_now(void) { return 0; }
+static bool s_mock_fp_on = true;
+static int s_mock_fp_target = 30;
+bool framepace_on(void) { return s_mock_fp_on; }
+int framepace_target(void) { return s_mock_fp_target; }
 void benchmark_frame(double a, double b, double c, double d, double e) { (void)a, (void)b, (void)c, (void)d, (void)e; }
 void vk_save_png(const char *p, const uint8_t *r, uint32_t w, uint32_t h) { (void)p, (void)r, (void)w, (void)h; }
 void vk_memfd_probe(void) {}
@@ -110,16 +115,33 @@ VkRenderPass vk_rp_compat(uint32_t n, const VkFormat *c, VkFormat d, VkFormat s,
 void vk_shaders_init(void) {}
 uint32_t *vk_glsl_to_spirv(const char *s, int stg, const char *n, size_t *nw) { (void)s, (void)stg, (void)n, (void)nw; return NULL; }
 uint32_t *vk_glsl_to_spirv_ex(const char *s, int stg, const char *n, size_t *nw, uint64_t *oh) { (void)s, (void)stg, (void)n, (void)nw, (void)oh; return NULL; }
-uint32_t *vk_spirv_load_cached(uint64_t h, size_t *nw) { (void)h, (void)nw; return NULL; }
+static bool s_mock_spv_hit = false;
+uint32_t *vk_spirv_load_cached(uint64_t h, size_t *nw) {
+    (void)h;
+    if (!s_mock_spv_hit) { if (nw) *nw = 0; return NULL; }
+    uint32_t *w = calloc(4, sizeof(uint32_t));
+    if (w) w[0] = 0x07230203u;
+    if (nw) *nw = 4;
+    return w;
+}
 void vk_shader_cache_ensure_dirs(void) {}
 const uint8_t *maxwell_dbg_code = NULL;
 const uint8_t *maxwell_dbg_vs = NULL;
-VkShaderModule vk_module(const uint32_t *spv, size_t n) { (void)spv, (void)n; return VK_NULL_HANDLE; }
+VkShaderModule vk_module(const uint32_t *spv, size_t n) {
+    (void)spv, (void)n;
+    return s_mock_spv_hit ? (VkShaderModule)(uintptr_t)0x7777 : VK_NULL_HANDLE;
+}
 int vk_reflect(const uint32_t *spv, size_t n, VkBindingInfo *o, int m) { (void)spv, (void)n, (void)o, (void)m; return 0; }
 VkDescriptorSetLayout vk_set_layout(const VkBindingInfo *b, int n, uint32_t s, VkShaderStageFlags stg) { (void)b, (void)n, (void)s, (void)stg; return VK_NULL_HANDLE; }
-void maxwell_free(ShaderInfo *s) { (void)s; }
+void maxwell_free(ShaderInfo *s) { free(s); }
 ShaderInfo *maxwell_translate(const uint8_t *c, size_t m, int s, const ShaderKey *k) { (void)c, (void)m, (void)s, (void)k; return NULL; }
-ShaderInfo *maxwell_translate_bounded(const uint8_t *c, size_t m, size_t cz, int s, const ShaderKey *k) { (void)c, (void)m, (void)cz, (void)s, (void)k; return NULL; }
+ShaderInfo *maxwell_translate_bounded(const uint8_t *c, size_t m, size_t cz, int s, const ShaderKey *k) {
+    (void)c, (void)m, (void)cz, (void)s, (void)k;
+    if (!s_mock_spv_hit) return NULL;
+    ShaderInfo *si = calloc(1, sizeof *si);
+    if (si) snprintf(si->error, sizeof si->error, "mock");
+    return si;
+}
 uint64_t maxwell_gmem_size = 0;
 unsigned maxwell_gmem_miss_stages = ~0u;
 bool maxwell_no_int64 = false, maxwell_gmem_map_all = false, maxwell_gmem_miss_log = false, maxwell_brx_window = true;
@@ -128,7 +150,8 @@ bool maxwell_no_local_struct = false, maxwell_native_half = true, maxwell_fast_m
 int g_game_version = 0x190;
 volatile int g_debug_frame_request = 0;
 VkShaderModule vk_builtin_shader(const char *name) { (void)name; return VK_NULL_HANDLE; }
-uint64_t plat_now_ns(void) { return 0; }
+static _Atomic uint64_t s_mock_now_ns = 1000000ull, s_mock_now_step = 0;
+uint64_t plat_now_ns(void) { return atomic_fetch_add_explicit(&s_mock_now_ns, atomic_load_explicit(&s_mock_now_step, memory_order_relaxed), memory_order_relaxed); }
 uint64_t SDL_GetTicksNS(void) { return 0; }
 void SDL_DelayPrecise(uint64_t ns) { (void)ns; }
 int SDL_GetNumLogicalCPUCores(void) { return 4; }
@@ -383,8 +406,25 @@ static VKAPI_ATTR VkResult VKAPI_CALL n_ads(VkDevice d, const VkDescriptorSetAll
 static VKAPI_ATTR void VKAPI_CALL n_uds(VkDevice d, uint32_t wc, const VkWriteDescriptorSet *w, uint32_t cc, const VkCopyDescriptorSet *c) { (void)d, (void)wc, (void)w, (void)cc, (void)c; }
 static VKAPI_ATTR VkResult VKAPI_CALL n_dsl(VkDevice d, const VkDescriptorSetLayoutCreateInfo *c, const VkAllocationCallbacks *a, VkDescriptorSetLayout *l) { (void)d, (void)c, (void)a; *l = VK_NULL_HANDLE; return VK_SUCCESS; }
 static VKAPI_ATTR VkResult VKAPI_CALL n_pl(VkDevice d, const VkPipelineLayoutCreateInfo *c, const VkAllocationCallbacks *a, VkPipelineLayout *l) { (void)d, (void)c, (void)a; *l = VK_NULL_HANDLE; return VK_SUCCESS; }
-static VKAPI_ATTR VkResult VKAPI_CALL n_gp(VkDevice d, VkPipelineCache pc, uint32_t n, const VkGraphicsPipelineCreateInfo *c, const VkAllocationCallbacks *a, VkPipeline *p) { (void)d, (void)pc, (void)n, (void)c, (void)a, (void)p; return VK_SUCCESS; }
-static VKAPI_ATTR void VKAPI_CALL n_dp(VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) { (void)d, (void)p, (void)a; }
+static _Atomic int s_gp_calls, s_dp_calls;
+static _Atomic bool s_gp_fail_cache_only, s_gp_stray_on_fail;
+static _Atomic uint32_t s_gp_last_flags;
+static VKAPI_ATTR VkResult VKAPI_CALL n_gp(VkDevice d, VkPipelineCache pc, uint32_t n, const VkGraphicsPipelineCreateInfo *c, const VkAllocationCallbacks *a, VkPipeline *p) {
+    (void)d, (void)pc, (void)a;
+    atomic_fetch_add_explicit(&s_gp_calls, 1, memory_order_relaxed);
+    if (n && c) atomic_store_explicit(&s_gp_last_flags, (uint32_t)c[0].flags, memory_order_relaxed);
+    if (n && c && (c[0].flags & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) &&
+        atomic_load_explicit(&s_gp_fail_cache_only, memory_order_relaxed)) {
+        if (p) p[0] = atomic_load_explicit(&s_gp_stray_on_fail, memory_order_relaxed) ? (VkPipeline)(uintptr_t)0xBAD1 : VK_NULL_HANDLE;
+        return VK_PIPELINE_COMPILE_REQUIRED;
+    }
+    if (n && p) p[0] = (VkPipeline)(uintptr_t)0x600D;
+    return VK_SUCCESS;
+}
+static VKAPI_ATTR void VKAPI_CALL n_dp(VkDevice d, VkPipeline p, const VkAllocationCallbacks *a) {
+    (void)d, (void)a;
+    if (p != VK_NULL_HANDLE) atomic_fetch_add_explicit(&s_dp_calls, 1, memory_order_relaxed);
+}
 static VKAPI_ATTR void VKAPI_CALL n_dsm(VkDevice d, VkShaderModule m, const VkAllocationCallbacks *a) { (void)d, (void)m, (void)a; }
 static VKAPI_ATTR void VKAPI_CALL n_dpl(VkDevice d, VkPipelineLayout l, const VkAllocationCallbacks *a) { (void)d, (void)l, (void)a; }
 static VKAPI_ATTR void VKAPI_CALL n_ddsl(VkDevice d, VkDescriptorSetLayout l, const VkAllocationCallbacks *a) { (void)d, (void)l, (void)a; }
@@ -1111,6 +1151,275 @@ int main(void) {
                ok_placed_shortcircuit, ok_retire_drop, ok_seqlock_mt, ok_cbwin_off, ok_reset, ok_non_cbwin_zero_churn);
     check("cbwin integration: base reuse, in/out updates, b2b/seqlock, retire, mt stress, #453, short-circuit, non-Mali off, zero non-cbwin churn, and reset", ok_cb_all);
     }
+
+#ifdef __ANDROID__
+    {
+        bool saved_pcc = g_vk.pipe_cache_ctrl, saved_bench = g_benchmark, saved_steal = g_inline_steal,
+             saved_exec_stats = g_vk.exec_stats;
+        VkPipelineCache saved_pcache = g_vk.pcache;
+        unsetenv("LARECOMP_INLINE_WARM_US");
+        warm_budget_env_checked = false;
+        warm_budget_env_override = false;
+        g_vk.pipe_cache_ctrl = true;
+        g_vk.exec_stats = false;
+        g_vk.pcache = (VkPipelineCache)(uintptr_t)0xCAFE;
+        g_benchmark = true;
+        g_inline_steal = false;
+        atomic_store_explicit(&s_mock_now_step, 50000ull, memory_order_relaxed);
+
+        static uint8_t mock_shader_code[0x240];
+        Prog mock_prog = {.vs = (VkShaderModule)(uintptr_t)0x11, .fs = (VkShaderModule)(uintptr_t)0x22,
+                          .layout = (VkPipelineLayout)(uintptr_t)0x33,
+                          .code = {(uint64_t)(uintptr_t)mock_shader_code, (uint64_t)(uintptr_t)mock_shader_code}};
+        PipeKey base_key = {.prog = &mock_prog, .ncolor = 1, .color = {VK_FORMAT_R8G8B8A8_UNORM},
+                            .samples = VK_SAMPLE_COUNT_1_BIT, .poly_fill = 1};
+
+        // Case 1: direct cache_only probe miss with stray handle destroys handle and preserves state/counters/OOM fields.
+        Pipe p_miss = {.k = base_key};
+        atomic_init(&p_miss.state, 0);
+        int comp0 = atomic_load(&stat_compiles), live0 = atomic_load(&live_gpipes);
+        uint64_t bp_builds0 = atomic_load(&g_bench_perf[BP_BUILDS]);
+        atomic_store_explicit(&s_gp_calls, 0, memory_order_relaxed);
+        atomic_store_explicit(&s_dp_calls, 0, memory_order_relaxed);
+        atomic_store_explicit(&s_gp_fail_cache_only, true, memory_order_relaxed);
+        atomic_store_explicit(&s_gp_stray_on_fail, true, memory_order_relaxed);
+        bool ok_miss_ret = !build_pipeline_ex(&p_miss, true);
+        bool ok_miss_flags = (atomic_load(&s_gp_last_flags) & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) != 0;
+        bool ok_miss_clean = atomic_load(&s_gp_calls) == 1 && atomic_load(&s_dp_calls) == 1 &&
+                             atomic_load(&p_miss.state) == 0 && p_miss.pipe == VK_NULL_HANDLE &&
+                             atomic_load(&stat_compiles) == comp0 && atomic_load(&live_gpipes) == live0 &&
+                             atomic_load(&g_bench_perf[BP_BUILDS]) == bp_builds0 &&
+                             p_miss.retry_s == 0 && !atomic_load(&pipe_oom);
+
+        // Case 2: schedule_pipeline_build cache hit runs synchronously and charges BP_BUILDS, BP_BUILD_NS, and account_build_wait().
+        Pipe p_hit = {.k = base_key};
+        atomic_init(&p_hit.state, 0);
+        s_frame_counter = 200;
+        uint64_t whits0 = atomic_load(&stat_warm_pipe_hits), wmiss0 = atomic_load(&stat_warm_pipe_misses);
+        uint64_t bns0 = atomic_load(&g_bench_perf[BP_BUILD_NS]), wait0 = atomic_load(&g_bench_perf[BP_BUILD_WAIT_NS]);
+        uint64_t sbw0 = stat_build_wait_ns, bbw0 = atomic_load(&boot_build_wait_ns), swaits0 = atomic_load(&stat_build_waits);
+        atomic_store(&stat_build_wait_max_ns, 0);
+        atomic_store_explicit(&s_gp_fail_cache_only, false, memory_order_relaxed);
+        atomic_store_explicit(&s_gp_stray_on_fail, false, memory_order_relaxed);
+        schedule_pipeline_build(&p_hit, false);
+        uint64_t hit_dt_ns = stat_build_wait_ns - sbw0;
+        bool ok_hit = atomic_load(&p_hit.state) == 1 && p_hit.pipe == (VkPipeline)(uintptr_t)0x600D &&
+                      atomic_load(&stat_warm_pipe_hits) == whits0 + 1 &&
+                      atomic_load(&stat_warm_pipe_misses) == wmiss0 &&
+                      atomic_load(&stat_compiles) == comp0 + 1 &&
+                      atomic_load(&live_gpipes) == live0 + 1 &&
+                      atomic_load(&g_bench_perf[BP_BUILDS]) == bp_builds0 + 1 &&
+                      atomic_load(&g_bench_perf[BP_BUILD_NS]) > bns0 &&
+                      hit_dt_ns > 0 &&
+                      (atomic_load(&g_bench_perf[BP_BUILD_WAIT_NS]) - wait0) == hit_dt_ns &&
+                      (atomic_load(&boot_build_wait_ns) - bbw0) == hit_dt_ns &&
+                      atomic_load(&stat_build_waits) == swaits0 + 1 &&
+                      atomic_load(&stat_build_wait_max_ns) >= hit_dt_ns;
+
+        // Case 3: schedule_pipeline_build cache-only miss records miss + account_build_wait() and falls back to worker cleanly.
+        Pipe p_fb = {.k = base_key};
+        atomic_init(&p_fb.state, 0);
+        s_frame_counter = 201;
+        uint64_t wait1 = atomic_load(&g_bench_perf[BP_BUILD_WAIT_NS]);
+        uint64_t bp1 = atomic_load(&g_bench_perf[BP_BUILDS]);
+        uint64_t sbw1 = stat_build_wait_ns, bbw1 = atomic_load(&boot_build_wait_ns), swaits1 = atomic_load(&stat_build_waits);
+        atomic_store_explicit(&s_gp_fail_cache_only, true, memory_order_relaxed);
+        schedule_pipeline_build(&p_fb, false);
+        for (int w = 0; w < 1000 && atomic_load(&p_fb.state) == 0; w++) usleep(100);
+        uint64_t fb_dt_ns = stat_build_wait_ns - sbw1;
+        bool ok_fallback = atomic_load(&p_fb.state) == 1 && p_fb.pipe == (VkPipeline)(uintptr_t)0x600D &&
+                           atomic_load(&stat_warm_pipe_misses) == wmiss0 + 1 &&
+                           fb_dt_ns > 0 &&
+                           (atomic_load(&g_bench_perf[BP_BUILD_WAIT_NS]) - wait1) == fb_dt_ns &&
+                           (atomic_load(&boot_build_wait_ns) - bbw1) == fb_dt_ns &&
+                           atomic_load(&stat_build_waits) == swaits1 + 1 &&
+                           atomic_load(&g_bench_perf[BP_BUILDS]) == bp1 + 1;
+
+        // Case 4: jobs_abort aborts inline schedule cleanly with state=2 and zero vkCreateGraphicsPipelines calls.
+        Pipe p_ab = {.k = base_key};
+        atomic_init(&p_ab.state, 0);
+        s_frame_counter = 202;
+        int gp_ab0 = atomic_load(&s_gp_calls);
+        atomic_store_explicit(&jobs_abort, true, memory_order_release);
+        schedule_pipeline_build(&p_ab, false);
+        atomic_store_explicit(&jobs_abort, false, memory_order_release);
+        bool ok_abort = atomic_load(&p_ab.state) == 2 && atomic_load(&s_gp_calls) == gp_ab0;
+
+        // Case 5: !g_vk.dyn_render + null vk_rp_compat() leaves cache_only probe clean and sets OOM/retry on normal build.
+        bool saved_dyn_render = g_vk.dyn_render;
+        g_vk.dyn_render = false;
+        atomic_store(&pipe_oom, 0);
+        Pipe p_crp = {.k = base_key};
+        atomic_init(&p_crp.state, 0);
+        bool ok_crp_probe = !build_pipeline_ex(&p_crp, true) &&
+                            atomic_load(&p_crp.state) == 0 && p_crp.retry_s == 0 && !atomic_load(&pipe_oom);
+        bool ok_crp_fail = !build_pipeline_ex(&p_crp, false) &&
+                           atomic_load(&p_crp.state) == 2 && p_crp.retry_s > 0 && atomic_load(&pipe_oom) == 1;
+        atomic_store(&pipe_oom, 0);
+        g_vk.dyn_render = saved_dyn_render;
+
+        // Case 6: warm_inline_budget_refresh() tracks framepace_target() and falls back to 30 fps when !framepace_on().
+        unsetenv("LARECOMP_INLINE_WARM_US");
+        warm_budget_env_checked = false;
+        warm_budget_env_override = false;
+        s_mock_fp_on = true;
+        s_mock_fp_target = 30; warm_inline_budget_refresh(300);
+        bool ok_fp30 = warm_budget.limit_ns == 4000000ull;
+        s_mock_fp_target = 45; warm_inline_budget_refresh(301);
+        bool ok_fp45 = warm_budget.limit_ns == 3000000ull;
+        s_mock_fp_target = 60; warm_inline_budget_refresh(302);
+        bool ok_fp60 = warm_budget.limit_ns == 2000000ull;
+        s_mock_fp_target = 0; warm_inline_budget_refresh(303);
+        bool ok_fp0 = warm_budget.limit_ns == 2000000ull;
+        s_mock_fp_on = false; s_mock_fp_target = 60; warm_inline_budget_refresh(304);
+        bool ok_fpoff = warm_budget.limit_ns == 4000000ull;
+        s_mock_fp_on = true; s_mock_fp_target = 30;
+
+        // Case 7: flag-off (pipe_cache_ctrl=false) and exec_stats=true skip inline cache-only probe completely.
+        Pipe p_off = {.k = base_key}, p_stats = {.k = base_key};
+        atomic_init(&p_off.state, 0);
+        atomic_init(&p_stats.state, 0);
+        uint64_t wh_off0 = atomic_load(&stat_warm_pipe_hits), wm_off0 = atomic_load(&stat_warm_pipe_misses);
+        g_vk.pipe_cache_ctrl = false;
+        atomic_store_explicit(&s_gp_last_flags, 0, memory_order_relaxed);
+        schedule_pipeline_build(&p_off, false);
+        for (int w = 0; w < 1000 && atomic_load(&p_off.state) == 0; w++) usleep(100);
+        bool ok_pcc_off = atomic_load(&p_off.state) == 1 &&
+                          (atomic_load(&s_gp_last_flags) & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) == 0 &&
+                          atomic_load(&stat_warm_pipe_hits) == wh_off0 &&
+                          atomic_load(&stat_warm_pipe_misses) == wm_off0;
+        g_vk.pipe_cache_ctrl = true;
+        g_vk.exec_stats = true;
+        atomic_store_explicit(&s_gp_last_flags, 0, memory_order_relaxed);
+        schedule_pipeline_build(&p_stats, false);
+        for (int w = 0; w < 1000 && atomic_load(&p_stats.state) == 0; w++) usleep(100);
+        bool ok_exec_stats = atomic_load(&p_stats.state) == 1 &&
+                             (atomic_load(&s_gp_last_flags) & VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT) == 0 &&
+                             atomic_load(&stat_warm_pipe_hits) == wh_off0 &&
+                             atomic_load(&stat_warm_pipe_misses) == wm_off0;
+
+        // Case 8: get_program() inline warm hit & FS-missing probe miss both call account_build_wait() once (no double count).
+        bool ok_prog_hit = false, ok_prog_miss = false;
+        char old_cwd[512] = {0};
+        char tmp_tmpl[] = "/data/local/tmp/rtlu_warm_XXXXXX";
+        if (getcwd(old_cwd, sizeof old_cwd) && mkdtemp(tmp_tmpl)) {
+            char cdir[600], sdir[600];
+            snprintf(cdir, sizeof cdir, "%s/cache", tmp_tmpl);
+            snprintf(sdir, sizeof sdir, "%s/cache/spirv", tmp_tmpl);
+            if (mkdir(cdir, 0755) == 0 && mkdir(sdir, 0755) == 0 && chdir(tmp_tmpl) == 0) {
+                static uint8_t prog_vs_code[0x240], prog_fs_hit[0x240], prog_fs_miss[0x240];
+                memset(prog_vs_code, 0x11, sizeof prog_vs_code);
+                memset(prog_fs_hit, 0x22, sizeof prog_fs_hit);
+                memset(prog_fs_miss, 0x33, sizeof prog_fs_miss);
+                ShaderKey vk_g = {0}, fk_g = {0};
+                fk_g.glsl = true;
+                uint64_t vh1 = 0, vh2 = 0, fh1 = 0, fh2 = 0;
+                bool vk_ok = mw_stage_key(prog_vs_code, 0x200, 0, STAGE_VERTEX, &vk_g, current_trans_flags(STAGE_VERTEX),
+                                          HEAP_BASE, HEAP_MAX, MW_META_BUILD_ID, &vh1, &vh2);
+                ShaderKey fk_store = fk_g;
+                fk_store.vs_out_mask = 0x55u;
+                bool fk_ok = mw_stage_key(prog_fs_hit, 0x200, 0, STAGE_FRAGMENT, &fk_store, current_trans_flags(STAGE_FRAGMENT),
+                                          HEAP_BASE, HEAP_MAX, MW_META_BUILD_ID, &fh1, &fh2);
+                ShaderInfo vs_meta = {.stage = STAGE_VERTEX, .out_mask = 0x55u};
+                ShaderInfo fs_meta = {.stage = STAGE_FRAGMENT, .out_mask = 0x1u};
+                if (vk_ok && fk_ok &&
+                    mw_meta_store("cache/spirv", vh1, vh2, STAGE_VERTEX, &vs_meta, 0xAAA1ull, false, 0) &&
+                    mw_meta_store("cache/spirv", fh1, fh2, STAGE_FRAGMENT, &fs_meta, 0xBBB1ull, false, 1)) {
+                    s_mock_spv_hit = true;
+                    s_frame_counter = 205;
+                    NvnProgram np_hit = {.stage_mask = 3,
+                                         .stages = {[0] = {.code_addr = (uint64_t)(uintptr_t)prog_vs_code, .const_offset = 0x200},
+                                                    [1] = {.code_addr = (uint64_t)(uintptr_t)prog_fs_hit, .const_offset = 0x200}}};
+                    uint64_t sbw_p0 = stat_build_wait_ns, bbw_p0 = atomic_load(&boot_build_wait_ns);
+                    uint64_t wait_p0 = atomic_load(&g_bench_perf[BP_BUILD_WAIT_NS]), sw_p0 = atomic_load(&stat_build_waits);
+                    uint64_t bld_p0 = atomic_load(&g_bench_perf[BP_BUILDS]), wph_p0 = atomic_load(&stat_warm_prog_hits);
+                    atomic_store(&stat_build_wait_max_ns, 0);
+                    Prog *gp_hit = get_program(&np_hit, &vk_g, &fk_g, false);
+                    uint64_t gp_hit_dt = stat_build_wait_ns - sbw_p0;
+                    ok_prog_hit = gp_hit && atomic_load(&gp_hit->state) == 1 &&
+                                  atomic_load(&stat_warm_prog_hits) == wph_p0 + 1 &&
+                                  gp_hit_dt > 0 &&
+                                  (atomic_load(&boot_build_wait_ns) - bbw_p0) == gp_hit_dt &&
+                                  (atomic_load(&g_bench_perf[BP_BUILD_WAIT_NS]) - wait_p0) == gp_hit_dt &&
+                                  atomic_load(&stat_build_waits) == sw_p0 + 1 &&
+                                  atomic_load(&stat_build_wait_max_ns) >= gp_hit_dt &&
+                                  atomic_load(&g_bench_perf[BP_BUILDS]) == bld_p0 + 1;
+                    if (!ok_prog_hit)
+                        printf("  [diag 8a] gp=%p state=%d wph=%llu->%llu dt=%llu bbw=%llu wait=%llu sw=%llu->%llu max=%llu bld=%llu->%llu\n",
+                               (void *)gp_hit, gp_hit ? atomic_load(&gp_hit->state) : -1,
+                               (unsigned long long)wph_p0, (unsigned long long)atomic_load(&stat_warm_prog_hits),
+                               (unsigned long long)gp_hit_dt,
+                               (unsigned long long)(atomic_load(&boot_build_wait_ns) - bbw_p0),
+                               (unsigned long long)(atomic_load(&g_bench_perf[BP_BUILD_WAIT_NS]) - wait_p0),
+                               (unsigned long long)sw_p0, (unsigned long long)atomic_load(&stat_build_waits),
+                               (unsigned long long)atomic_load(&stat_build_wait_max_ns),
+                               (unsigned long long)bld_p0, (unsigned long long)atomic_load(&g_bench_perf[BP_BUILDS]));
+
+                    s_frame_counter = 206;
+                    NvnProgram np_miss = {.stage_mask = 3,
+                                          .stages = {[0] = {.code_addr = (uint64_t)(uintptr_t)prog_vs_code, .const_offset = 0x200},
+                                                     [1] = {.code_addr = (uint64_t)(uintptr_t)prog_fs_miss, .const_offset = 0x200}}};
+                    uint64_t sbw_p1 = stat_build_wait_ns, bbw_p1 = atomic_load(&boot_build_wait_ns);
+                    uint64_t wait_p1 = atomic_load(&g_bench_perf[BP_BUILD_WAIT_NS]), sw_p1 = atomic_load(&stat_build_waits);
+                    uint64_t mm_p1 = atomic_load(&stat_meta_misses), wph_p1 = atomic_load(&stat_warm_prog_hits);
+                    Prog *gp_miss = get_program(&np_miss, &vk_g, &fk_g, false);
+                    for (int w = 0; w < 1000 && gp_miss && atomic_load(&gp_miss->state) == 0; w++) usleep(100);
+                    uint64_t gp_miss_dt = stat_build_wait_ns - sbw_p1;
+                    ok_prog_miss = gp_miss && gp_miss_dt > 0 &&
+                                   atomic_load(&stat_warm_prog_hits) == wph_p1 &&
+                                   atomic_load(&stat_meta_misses) == mm_p1 + 1 &&
+                                   (atomic_load(&boot_build_wait_ns) - bbw_p1) == gp_miss_dt &&
+                                   (atomic_load(&g_bench_perf[BP_BUILD_WAIT_NS]) - wait_p1) == gp_miss_dt &&
+                                   atomic_load(&stat_build_waits) == sw_p1 + 1;
+                    if (!ok_prog_miss)
+                        printf("  [diag 8b] gp=%p state=%d wph=%llu->%llu mm=%llu->%llu dt=%llu bbw=%llu wait=%llu sw=%llu->%llu\n",
+                               (void *)gp_miss, gp_miss ? atomic_load(&gp_miss->state) : -1,
+                               (unsigned long long)wph_p1, (unsigned long long)atomic_load(&stat_warm_prog_hits),
+                               (unsigned long long)mm_p1, (unsigned long long)atomic_load(&stat_meta_misses),
+                               (unsigned long long)gp_miss_dt,
+                               (unsigned long long)(atomic_load(&boot_build_wait_ns) - bbw_p1),
+                               (unsigned long long)(atomic_load(&g_bench_perf[BP_BUILD_WAIT_NS]) - wait_p1),
+                               (unsigned long long)sw_p1, (unsigned long long)atomic_load(&stat_build_waits));
+                    jobs_drain();
+                    s_mock_spv_hit = false;
+                } else {
+                    printf("  [diag 8 setup] vk_ok=%d fk_ok=%d\n", vk_ok, fk_ok);
+                }
+                char p1[640], p2[640];
+                snprintf(p1, sizeof p1, "%s/%016llx.smeta", sdir, (unsigned long long)vh1);
+                snprintf(p2, sizeof p2, "%s/%016llx.smeta", sdir, (unsigned long long)fh1);
+                unlink(p1);
+                unlink(p2);
+                (void)chdir(old_cwd);
+            }
+            rmdir(sdir);
+            rmdir(cdir);
+            rmdir(tmp_tmpl);
+        }
+
+        jobs_drain();
+        atomic_store_explicit(&s_gp_fail_cache_only, false, memory_order_relaxed);
+        atomic_store_explicit(&s_gp_stray_on_fail, false, memory_order_relaxed);
+        atomic_store_explicit(&s_mock_now_step, 0, memory_order_relaxed);
+        atomic_store(&live_gpipes, live0);
+        g_vk.pipe_cache_ctrl = saved_pcc;
+        g_vk.exec_stats = saved_exec_stats;
+        g_vk.pcache = saved_pcache;
+        g_benchmark = saved_bench;
+        g_inline_steal = saved_steal;
+        vk_exec_reset();
+        bool ok_warm_all = ok_miss_ret && ok_miss_flags && ok_miss_clean && ok_hit && ok_fallback && ok_abort &&
+                           ok_crp_probe && ok_crp_fail && ok_fp30 && ok_fp45 && ok_fp60 && ok_fp0 && ok_fpoff &&
+                           ok_pcc_off && ok_exec_stats && ok_prog_hit && ok_prog_miss;
+        if (!ok_warm_all)
+            printf("  warm fail breakdown: miss=(%d,%d,%d) hit=%d fb=%d abort=%d crp=(%d,%d) fp=(%d,%d,%d,%d,%d) bypass=(%d,%d) prog=(%d,%d)\n",
+                   ok_miss_ret, ok_miss_flags, ok_miss_clean, ok_hit, ok_fallback, ok_abort,
+                   ok_crp_probe, ok_crp_fail, ok_fp30, ok_fp45, ok_fp60, ok_fp0, ok_fpoff,
+                   ok_pcc_off, ok_exec_stats, ok_prog_hit, ok_prog_miss);
+        check("warm-cache fastpath integration: cache_only probe/stray destroy, hit/miss account_build_wait, worker fallback, jobs_abort, null crp, framepace_target budget, get_program inline hit/miss, and flag-off/exec_stats bypass",
+              ok_warm_all);
+    }
+#endif
 
     check("Vulkan mock synchronization validator recorded 0 hazards", !mock_hazards);
     printf("test_rt_load_upload: %s (%d failure(s))\n", failures ? "FAILED" : "all passed", failures);

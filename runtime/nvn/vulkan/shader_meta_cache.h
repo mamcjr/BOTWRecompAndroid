@@ -218,6 +218,31 @@ static inline bool mw_meta_exists(const char *dir, uint64_t h1) {
 #endif
 }
 
+// Header-only peek for STAGE_VERTEX out_mask without payload allocation or full decode.
+static inline bool mw_meta_peek_out_mask(const char *dir, uint64_t want_h1, uint64_t want_h2, uint32_t *out_mask) {
+    if (!dir || !*dir || !want_h1 || !want_h2 || !out_mask) return false;
+    char path[256];
+    int pn = snprintf(path, sizeof path, "%s/%016llx.smeta", dir, (unsigned long long)want_h1);
+    if (pn < 0 || (size_t)pn >= sizeof path) return false;
+    FILE *f = fopen(path, "rb");
+    if (!f) return false;
+    MwMetaHdr hdr;
+    size_t n = fread(&hdr, 1, sizeof hdr, f);
+    bool io_err = ferror(f) != 0;
+    fclose(f);
+    if (io_err || n != sizeof hdr) return false;
+    if (memcmp(hdr.magic, MW_META_MAGIC, 8) != 0 ||
+        hdr.version != MW_META_VERSION ||
+        hdr.stage != STAGE_VERTEX ||
+        hdr.h1 != want_h1 ||
+        hdr.h2 != want_h2 ||
+        hdr.spv_hash == 0 ||
+        hdr.ntex > 64)
+        return false;
+    *out_mask = hdr.out_mask;
+    return true;
+}
+
 static inline uint64_t mw_meta_payload_hash(const MwMetaHdr *hdr, const MwMetaTex *tex, uint32_t ntex) {
     uint64_t a = 0xcbf29ce484222325ull;
     uint64_t b = 0x243f6a8885a308d3ull;

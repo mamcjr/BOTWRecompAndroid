@@ -332,12 +332,23 @@ int main(void) {
     ShaderInfo vsrc = {0};
     vsrc.stage = STAGE_VERTEX;
     vsrc.ntex = 0;
+    vsrc.out_mask = 0x5au;
     vsrc.writes_point_size = true;
     vsrc.uses_gmem = true;
     vsrc.uses_gmem_store = true;
     assert(mw_meta_store(dir, vh1, vh2, STAGE_VERTEX, &vsrc, 0xabcdef0123456789ull, true, 0));
+    uint32_t peek_mask = 0;
+    assert(mw_meta_peek_out_mask(dir, vh1, vh2, &peek_mask) && peek_mask == 0x5au);
+    assert(!mw_meta_peek_out_mask(NULL, vh1, vh2, &peek_mask));
+    assert(!mw_meta_peek_out_mask("", vh1, vh2, &peek_mask));
+    assert(!mw_meta_peek_out_mask(dir, 0, vh2, &peek_mask));
+    assert(!mw_meta_peek_out_mask(dir, vh1, 0, &peek_mask));
+    assert(!mw_meta_peek_out_mask(dir, vh1, vh2, NULL));
+    assert(!mw_meta_peek_out_mask(dir, vh1, vh2 ^ 1ull, &peek_mask));
+    assert(!mw_meta_peek_out_mask(dir, vh1 ^ 1ull, vh2, &peek_mask));  // missing file
+    assert(!mw_meta_peek_out_mask(dir, h1a, h2a, &peek_mask));          // STAGE_FRAGMENT rejected
     loaded = mw_meta_load(dir, vh1, vh2, STAGE_VERTEX, &got_spv, &got_vid, NULL);
-    assert(loaded && got_vid && loaded->writes_point_size && loaded->uses_gmem_store && loaded->ntex == 0);
+    assert(loaded && got_vid && loaded->writes_point_size && loaded->uses_gmem_store && loaded->ntex == 0 && loaded->out_mask == 0x5au);
     free(loaded);
 
     vsrc.ntex = 64;
@@ -428,6 +439,68 @@ int main(void) {
     assert(f && fwrite(raw, 1, 32, f) == 32);
     fclose(f);
     assert(mw_meta_load(dir, h1a, h2a, STAGE_FRAGMENT, &got_spv, &got_vid, &got_gather) == NULL);
+
+    // Truncated STAGE_VERTEX header and full validation boundary checks in mw_meta_peek_out_mask
+    char vtrunc[600];
+    snprintf(vtrunc, sizeof vtrunc, "%s/%016llx.smeta", dir, (unsigned long long)vh1);
+    f = fopen(vtrunc, "wb");
+    assert(f && fwrite(raw, 1, 32, f) == 32);
+    fclose(f);
+    peek_mask = 0xdeadbeefu;
+    assert(!mw_meta_peek_out_mask(dir, vh1, vh2, &peek_mask));
+    assert(peek_mask == 0xdeadbeefu);
+
+    // Valid ntex = 64 roundtrip (header peek skips payload safely even with 64 texture slots on disk)
+    MwMetaHdr vhdr = {0};
+    memcpy(vhdr.magic, MW_META_MAGIC, 8);
+    vhdr.version = MW_META_VERSION;
+    vhdr.stage = STAGE_VERTEX;
+    vhdr.h1 = vh1;
+    vhdr.h2 = vh2;
+    vhdr.spv_hash = 0x123456789abcdef0ull;
+    vhdr.ntex = 64;
+    vhdr.out_mask = 0x13579bdfu;
+    MwMetaTex dummy_tex[64] = {{0}};
+    f = fopen(vtrunc, "wb");
+    assert(f && fwrite(&vhdr, 1, sizeof vhdr, f) == sizeof vhdr &&
+           fwrite(dummy_tex, sizeof dummy_tex[0], 64, f) == 64);
+    fclose(f);
+    assert(mw_meta_peek_out_mask(dir, vh1, vh2, &peek_mask) && peek_mask == 0x13579bdfu);
+
+    // Exact sizeof(MwMetaHdr) - 1 short read preserves *out_mask
+    f = fopen(vtrunc, "wb");
+    assert(f && fwrite(&vhdr, 1, sizeof vhdr - 1, f) == sizeof vhdr - 1);
+    fclose(f);
+    peek_mask = 0xdeadbeefu;
+    assert(!mw_meta_peek_out_mask(dir, vh1, vh2, &peek_mask) && peek_mask == 0xdeadbeefu);
+
+    // Wrong h1, corrupt magic, corrupt version, zero spv_hash, ntex > 64, and overlong dir
+    MwMetaHdr bad = vhdr;
+    bad.h1 = vh1 ^ 1ull;
+    f = fopen(vtrunc, "wb"); assert(f && fwrite(&bad, 1, sizeof bad, f) == sizeof bad); fclose(f);
+    assert(!mw_meta_peek_out_mask(dir, vh1, vh2, &peek_mask) && peek_mask == 0xdeadbeefu);
+
+    bad = vhdr; bad.magic[0] = 'X';
+    f = fopen(vtrunc, "wb"); assert(f && fwrite(&bad, 1, sizeof bad, f) == sizeof bad); fclose(f);
+    assert(!mw_meta_peek_out_mask(dir, vh1, vh2, &peek_mask) && peek_mask == 0xdeadbeefu);
+
+    bad = vhdr; bad.version = MW_META_VERSION + 1u;
+    f = fopen(vtrunc, "wb"); assert(f && fwrite(&bad, 1, sizeof bad, f) == sizeof bad); fclose(f);
+    assert(!mw_meta_peek_out_mask(dir, vh1, vh2, &peek_mask) && peek_mask == 0xdeadbeefu);
+
+    bad = vhdr; bad.spv_hash = 0;
+    f = fopen(vtrunc, "wb"); assert(f && fwrite(&bad, 1, sizeof bad, f) == sizeof bad); fclose(f);
+    assert(!mw_meta_peek_out_mask(dir, vh1, vh2, &peek_mask) && peek_mask == 0xdeadbeefu);
+
+    bad = vhdr; bad.ntex = 65;
+    f = fopen(vtrunc, "wb"); assert(f && fwrite(&bad, 1, sizeof bad, f) == sizeof bad); fclose(f);
+    assert(!mw_meta_peek_out_mask(dir, vh1, vh2, &peek_mask) && peek_mask == 0xdeadbeefu);
+
+    char peek_long_dir[300];
+    memset(peek_long_dir, 'a', sizeof peek_long_dir - 1);
+    peek_long_dir[sizeof peek_long_dir - 1] = '\0';
+    assert(!mw_meta_peek_out_mask(peek_long_dir, vh1, vh2, &peek_mask) && peek_mask == 0xdeadbeefu);
+    remove(vtrunc);
 
     remove(path);
     assert(!mw_meta_exists(dir, h1a));
