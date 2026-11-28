@@ -122,16 +122,30 @@ def _persp_get_aspect_182(gen, a):
             f'  /* {a:#x}: ldr s0, [x0, #0xb0] (projection aspect: widescreen; tools/patches.py) */')
 
 
+# View-frustum builder (1.8.2 f_7000e7d004 at 0x7000e7d0b4, 1.9.0 f_7000f90cf4 at 0x7000f90da4; shadow cascades
+# and culling): after virtual getFovy() returns into s0, substitute the Vert+ effective fovy matching the widened
+# mFovyTan without mutating mAngle (+0xa0), so camera blends reading getFovy() cannot creep while shadow cascades
+# cover the taller narrow-screen frustum.
+def _frustum_fovy_182(gen, a):
+    w = struct.unpack_from('<I', gen.nso.image, a - gen.base)[0]
+    assert w == 0x1e20400a, hex(w)  # fmov s10, s0
+    return ('{ extern uint32_t rt_persp_fovy(uint64_t, uint32_t); '
+            'c->v[10] = rt_persp_fovy(c->x[0], (uint32_t)c->v[0]); }'
+            f'  /* {a:#x}: fmov s10, s0 (frustum fovy: widescreen; tools/patches.py) */')
+
+
 PATCHES_182[0x7000d811fc] = _frame_wait_182
 PATCHES_182[0x70014092f4] = _vfr_ratio_182
 PATCHES_182[0x7000da13f4] = _persp_matrix_182
 PATCHES_182[0x7000da13d8] = _persp_get_aspect_182
+PATCHES_182[0x7000e7d0b4] = _frustum_fovy_182
 
 # v1.9.0: the same code at other addresses (tools/port_addrs.py, from 1.8.2's; the words checked as above)
 PATCHES_190[0x7000e9487c] = _frame_wait_182
 PATCHES_190[0x700151d494] = _vfr_ratio_182
 PATCHES_190[0x7000eb4a44] = _persp_matrix_182
 PATCHES_190[0x7000eb4a28] = _persp_get_aspect_182
+PATCHES_190[0x7000f90da4] = _frustum_fovy_182
 
 
 # A stale actor (SavageWindRecomp's, MIT: Revivedx bc6031e, its #391 #393): the game's target manager (the Sheikah
